@@ -22,7 +22,7 @@ import { installShortcuts } from './ui/shortcuts';
 import { CanvasLabels } from './ui/canvasLabels';
 import { Thumbnails } from './ui/thumbnails';
 import { Toolbar } from './ui/toolbar';
-import { IDENTITY_VIEW, docToClipMatrix, fitRectToView, type ViewTransform } from './viewport/viewport';
+import { IDENTITY_VIEW, docToClipMatrix, fitRectToView, zoomAt, type ViewTransform } from './viewport/viewport';
 
 async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
@@ -179,6 +179,7 @@ async function main(): Promise<void> {
       sampleColor(phase, screen);
       if (phase === 'end') tools.returnFromEyedropper();
     },
+    canDrawAt: (p) => hitTest(workspace.canvases, p) !== null,
     tap(fingers) {
       if (fingers === 2) workspace.undo();
       else workspace.redo();
@@ -331,6 +332,13 @@ async function main(): Promise<void> {
     selectTool,
     resizeBrush: (factor) => tools.adjustSize(factor),
     newLayer: () => active()?.addLayer(),
+    zoomBy: (factor) => setView(zoomAt(view, { x: cssWidth / 2, y: cssHeight / 2 }, factor)),
+    zoomToActualSize: () => setView(zoomAt(view, { x: cssWidth / 2, y: cssHeight / 2 }, 1 / view.scale)), // 100% = one canvas pixel per CSS pixel, as in Figma and the HUD
+    fitAll: () => setView(fitAll()),
+    fitSelection: () => {
+      const doc = active()?.doc;
+      if (doc) setView(fitRectToView(doc.placement, cssWidth, cssHeight));
+    },
     toggleHud: () => hud.setVisible(!hud.visible),
   });
 

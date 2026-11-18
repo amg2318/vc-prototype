@@ -2,6 +2,7 @@ import { panBy, screenToDoc, zoomAt, type Vec2, type ViewTransform } from '../vi
 import { GESTURES } from '../config';
 import { TouchNavigator } from './gestures';
 import { TouchGestures } from './touchGestures';
+import { wheelAction } from './wheel';
 import { isEraserEvent, penSampleFromEvent, type PenSample } from './penSample';
 
 /** `cancel`: a second finger landed (a pinch), so the pick should be undone. */
@@ -24,6 +25,8 @@ export interface InputCallbacks {
   eyedropper(phase: EyedropperPhase, screen: Vec2, doc: Vec2): void;
   /** A multi-finger tap on the canvas (2 = undo, 3 = redo). */
   tap(fingers: 2 | 3): void;
+  /** True if a stroke starting at this workspace point would draw (it is over a canvas). */
+  canDrawAt(p: Vec2): boolean;
 }
 
 const supportsCoalesced = typeof PointerEvent !== 'undefined' && 'getCoalescedEvents' in PointerEvent.prototype;
@@ -36,7 +39,9 @@ export const inputCapabilities = { coalescedEvents: supportsCoalesced, predicted
  *  - pen / mouse primary button → drawing (one stroke at a time)
  *  - touch → two-finger navigation, ignored entirely while the pen is down;
  *    two/three-finger taps; one-finger touch-and-hold → eyedropper
- *  - middle mouse drag, or space + drag → pan; mouse wheel → zoom at cursor
+ *  - pen / mouse drag that starts on empty space, middle mouse drag, or
+ *    space + drag → pan
+ *  - wheel: trackpad scroll pans, pinch or ⌘/Ctrl + wheel zooms (see wheel.ts)
  */
 export class PointerInput {
   readonly touch = new TouchNavigator();
@@ -108,7 +113,10 @@ export class PointerInput {
 
     // Pen or mouse.
     if (this.drawingPointer !== null || this.panPointer !== null || this.eyedropperPointer !== null) return;
-    const wantsPan = e.button === 1 || (e.button === 0 && this.spaceHeld);
+    const onEmptySpace =
+      e.button === 0 && !this.callbacks.eyedropperActive() &&
+      !this.callbacks.canDrawAt(screenToDoc(this.callbacks.getView(), this.screenPoint(e)));
+    const wantsPan = e.button === 1 || (e.button === 0 && this.spaceHeld) || onEmptySpace;
     if (wantsPan) {
       this.panPointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
       this.canvas.setPointerCapture(e.pointerId);
@@ -235,13 +243,14 @@ export class PointerInput {
 
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
-    const lineHeight = 16;
-    const delta = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * lineHeight : e.deltaY;
-    // Trackpad pinch arrives as ctrl+wheel with small deltas; make it a bit more sensitive.
-    const sensitivity = e.ctrlKey ? 0.01 : 0.0015;
-    const factor = Math.exp(-delta * sensitivity);
+    const action = wheelAction(e);
+    const view = this.callbacks.getView();
+    if (action.kind === 'pan') {
+      this.callbacks.setView(panBy(view, action.dx, action.dy));
+      return;
+    }
     const p = { x: e.clientX - this.origin.x, y: e.clientY - this.origin.y };
-    this.callbacks.setView(zoomAt(this.callbacks.getView(), p, factor));
+    this.callbacks.setView(zoomAt(view, p, action.factor));
   };
 
   private onKeyDown = (e: KeyboardEvent): void => {

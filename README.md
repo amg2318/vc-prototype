@@ -101,8 +101,11 @@ push to `main`.
 | Two fingers                        | Pan and pinch-zoom (rotation: tick "Two-finger rotate")           |
 | Two-finger tap / three-finger tap  | Undo / redo                                                       |
 | One finger, touch and hold         | Eyedropper (samples what you see: all visible layers + background); a second finger cancels it |
-| Mouse wheel / trackpad pinch       | Zoom at the cursor                                                |
-| Middle-drag, or Space + drag       | Pan                                                               |
+| Trackpad two-finger scroll / wheel | Pan (Shift + wheel pans sideways)                                 |
+| Trackpad pinch, or ⌘/Ctrl + wheel  | Zoom at the cursor                                                |
+| Drag on empty space, middle-drag, or Space + drag | Pan                                                |
+| ⌘/Ctrl + = / − / 0                 | Zoom in / out / 100%                                              |
+| ⇧1 / ⇧2                            | Fit all canvases / fit the selected canvas                        |
 
 | Key                       | Action                       |
 | ------------------------- | ---------------------------- |
