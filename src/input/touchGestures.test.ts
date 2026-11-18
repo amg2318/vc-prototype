@@ -87,7 +87,7 @@ describe('TouchGestures hold', () => {
   it('a second finger after a hold can still make a two-finger tap', () => {
     const g = new TouchGestures();
     g.down(1, p(0), FINGER, 0);
-    expect(g.checkHold(1)).toBe(true); // eyedropper tool: picks immediately
+    expect(g.checkHold(1)).toBe(true);
     g.down(2, p(100), FINGER, 30);
     g.releaseHold(); // the app cancels the pick
     g.up(1, 120);

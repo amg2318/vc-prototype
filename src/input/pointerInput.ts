@@ -92,7 +92,7 @@ export class PointerInput {
         this.callbacks.palmRejected();
         return;
       }
-      // A second finger during a finger eyedropper means a pinch: cancel the pick and navigate.
+      // A second finger during a touch-and-hold means a pinch: cancel the pick and navigate.
       if (this.gestures.holdingTouch !== null) this.endHold('cancel');
       const p = this.screenPoint(e);
       if (this.touchPoints.size === 0) this.viewAtTouchStart = this.callbacks.getView();
@@ -101,10 +101,8 @@ export class PointerInput {
       this.touch.down(e.pointerId, p, this.callbacks.getView(), e.timeStamp);
       this.canvas.setPointerCapture(e.pointerId);
       const id = e.pointerId;
-      // With the eyedropper tool selected, one finger picks straight away;
-      // otherwise it takes a touch-and-hold.
-      if (this.callbacks.eyedropperActive()) this.startHold(id);
-      else window.setTimeout(() => this.startHold(id), GESTURES.holdDurationMs);
+      // A finger uses the eyedropper by touch-and-hold, whatever the tool.
+      window.setTimeout(() => this.startHold(id), GESTURES.holdDurationMs);
       return;
     }
 
