@@ -97,13 +97,17 @@ push to `main`.
 | ---------------------------------- | ----------------------------------------------------------------- |
 | Apple Pencil / pen                 | Use the current tool (brush, eraser or eyedropper)                |
 | Pen eraser end (Wacom etc.)        | Erase to transparent, whatever tool is selected                   |
-| Mouse, left button                 | Use the current tool at full pressure                             |
+| Mouse, left button                 | Use the current tool (full pressure, or "pressure from speed")    |
+| Alt/Option + click or drag         | Eyedropper                                                        |
+| One finger                         | Use the current tool when finger drawing is on; pan when it's off |
+| Second finger right after a one-finger stroke starts | Cancels that stroke (no undo step); then pinch or tap as usual |
 | Two fingers                        | Pan and pinch-zoom (rotation: tick "Two-finger rotate")           |
 | Two-finger tap / three-finger tap  | Undo / redo                                                       |
-| One finger, touch and hold         | Eyedropper (samples what you see: all visible layers + background); a second finger cancels it |
+| One finger, touch and hold (0.4 s) | Eyedropper (samples what you see: all visible layers + background); discards the tiny stroke it started; a second finger cancels it |
+| Drag a canvas's name label         | Move the canvas (tap: select, double tap: zoom to it)             |
 | Trackpad two-finger scroll / wheel | Pan (Shift + wheel pans sideways)                                 |
 | Trackpad pinch, or ⌘/Ctrl + wheel  | Zoom at the cursor                                                |
-| Drag on empty space, middle-drag, or Space + drag | Pan                                                |
+| Drag on empty space (pen, mouse or finger), middle-drag, or Space + drag | Pan                         |
 | ⌘/Ctrl + = / − / 0                 | Zoom in / out / 100%                                              |
 | ⇧1 / ⇧2                            | Fit all canvases / fit the selected canvas                        |
 
@@ -115,6 +119,10 @@ push to `main`.
 | [ / ]                     | Smaller / larger tool size   |
 | ⇧N                        | New layer                    |
 | H                         | Toggle HUD                   |
+
+**Finger drawing** (brush panel, "Finger draws"): *Auto* (default) lets one finger draw until a pen is
+used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it either way. The
+**Finger** button in the toolbar switches it on or off at any time.
 
 **Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
 layers.

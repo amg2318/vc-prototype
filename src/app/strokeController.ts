@@ -107,6 +107,23 @@ export class StrokeController {
     this.events.requestFrame();
   }
 
+  /**
+   * Throw the stroke away (a finger stroke that turned out to be the start
+   * of a gesture or a touch-and-hold): nothing is committed or undoable, and
+   * the canvas recomposites without it.
+   */
+  discard(): void {
+    const stroke = this.active;
+    if (!stroke) return;
+    this.engine.end();
+    this.active = null;
+    this.editor = null;
+    this.renderer.setPredictedDabs([]);
+    this.events.liveStrokeChanged(null);
+    this.renderer.invalidateTiles(stroke.canvasId, [...this.dirty.keys]);
+    this.events.requestFrame();
+  }
+
   private queueDabs(real: Dab[], predicted: Dab[]): void {
     this.dirty.addDabs(real);
     this.renderer.addStrokeDabs(real);

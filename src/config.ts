@@ -70,9 +70,16 @@ export const GESTURES = {
   tapMaxDurationMs: 250,
   /** …and no finger may move further than this. */
   tapMaxMovementPx: 12,
-  /** Touch-and-hold for the eyedropper. */
-  holdDurationMs: 500,
+  /** Touch-and-hold for the eyedropper (it also discards the tiny stroke the finger started). */
+  holdDurationMs: 400,
   holdMaxMovementPx: 8,
+  /**
+   * A second finger landing within this time of a one-finger stroke starting,
+   * before that finger moved this far, cancels the stroke (it was the start
+   * of a pinch or a two-finger tap).
+   */
+  strokeCancelMs: 200,
+  strokeCancelMovementPx: 30,
   /**
    * Touches with a contact larger than this (PointerEvent width/height) are
    * treated as a palm: they never tap or trigger the eyedropper. Devices that

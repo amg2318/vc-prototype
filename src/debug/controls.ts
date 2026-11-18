@@ -1,5 +1,6 @@
 import type { BrushSettings } from '../brush/brushSettings';
 import { PRESSURE_CURVE_PRESETS, type PressureCurvePreset } from '../brush/pressureCurve';
+import type { FingerDrawing, FingerDrawingSetting } from '../input/fingerDrawing';
 
 export interface ControlActions {
   fitView(): void;
@@ -24,10 +25,12 @@ export class Controls {
   readonly debugBody: HTMLElement;
   private readonly bindings: Binding[] = [];
   private readonly title: HTMLElement;
+  private readonly fingerSelect = document.createElement('select');
 
   constructor(
     private readonly settings: () => BrushSettings,
     private readonly toolName: () => string,
+    private readonly fingers: FingerDrawing,
     actions: ControlActions,
   ) {
     this.element = document.createElement('div');
@@ -41,6 +44,7 @@ export class Controls {
       this.title,
       this.slider('Size', 1, 400, 1, (s) => s.diameter, (s, v) => (s.diameter = v), (v) => `${v}px`),
       this.slider('Opacity', 0.05, 1, 0.01, (s) => s.opacity, (s, v) => (s.opacity = v), pct),
+      this.fingerSetting(),
     );
 
     const details = document.createElement('details');
@@ -76,6 +80,16 @@ export class Controls {
     this.title.textContent = this.toolName();
     const s = this.settings();
     for (const b of this.bindings) b.refresh(s);
+    this.fingerSelect.value = this.fingers.setting;
+    this.fingerSelect.title = this.fingers.enabled ? 'One finger draws' : 'One finger pans';
+  }
+
+  /** Finger drawing: Auto (on until a pen is used) / On / Off. */
+  private fingerSetting(): HTMLElement {
+    const el = this.fingerSelect;
+    el.append(new Option('Auto (off once a pen is used)', 'auto'), new Option('On', 'on'), new Option('Off', 'off'));
+    el.addEventListener('change', () => (this.fingers.setting = el.value as FingerDrawingSetting));
+    return row('Finger draws', el);
   }
 
   private slider(

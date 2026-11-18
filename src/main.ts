@@ -234,6 +234,10 @@ async function main(): Promise<void> {
       if (cancelled) metrics.counters.cancelledStrokes++;
       strokes.end();
     },
+    strokeDiscard() {
+      metrics.counters.cancelledStrokes++;
+      strokes.discard();
+    },
     palmRejected() {
       metrics.counters.palmRejections++;
     },
@@ -311,6 +315,7 @@ async function main(): Promise<void> {
   const controls = new Controls(
     () => tools.editableSettings,
     () => (tools.paintingTool === 'eraser' ? 'Eraser' : 'Brush'),
+    input.fingers,
     {
       fitView() {
         setView(fitAll());
@@ -362,6 +367,9 @@ async function main(): Promise<void> {
       layersPanel.setVisible(!layersPanel.visible);
       if (layersPanel.visible) canvasPanel.setVisible(false);
     },
+    toggleFingerDrawing: () => {
+      input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
+    },
     toggleCanvases: () => {
       canvasPanel.setVisible(!canvasPanel.visible);
       if (canvasPanel.visible) layersPanel.setVisible(false);
@@ -374,6 +382,7 @@ async function main(): Promise<void> {
       color: tools.brush.color,
       canUndo: workspace.history.canUndo,
       canRedo: workspace.history.canRedo,
+      fingerDraws: input.fingers.enabled,
     });
     layersPanel.update();
     canvasPanel.update();
@@ -381,6 +390,7 @@ async function main(): Promise<void> {
     controls.refresh();
   }
   tools.onChange(refreshUi);
+  input.fingers.onChange(refreshUi);
 
   const banner = document.createElement('div');
   banner.className = 'banner';
