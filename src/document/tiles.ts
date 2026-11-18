@@ -9,7 +9,12 @@ import { PAGE_SIDE_TILES, SLOTS_PER_PAGE, TILES_X, TILES_Y, TILE_SIZE } from '..
  */
 
 export type TileKey = number;
-/** Index of a tile slot in the GPU tile pool (page * SLOTS_PER_PAGE + index in page). */
+/**
+ * A tile: an immutable 256² image, shared by layers and undo history. Where
+ * its pixels are (a GPU slot, or compressed in memory) is up to the renderer.
+ */
+export type TileId = number;
+/** Index of a tile slot in a GPU tile pool (page * SLOTS_PER_PAGE + index in page). */
 export type TileSlot = number;
 
 export function tileKey(tx: number, ty: number): TileKey {

@@ -21,11 +21,26 @@ export const MAX_LAYERS = 32;
  */
 export const ATLAS_PAGE_SIZE = 4096;
 /**
- * Upper bound on pages. Also bounded by texture bindings: the compositor binds
- * every page at once, and WebGL2 on iOS guarantees only 16 texture units.
- * 8 pages = 2048 tiles = 512 MB of tile memory (document + undo history).
+ * Upper bound on layer tile pages. Also bounded by texture bindings: the
+ * compositor binds every page at once, and WebGL2 on iOS guarantees only 16
+ * texture units. 8 pages = 2048 tiles = 512 MB.
  */
 export const MAX_ATLAS_PAGES = 8;
+
+/**
+ * Tile residency: documents and undo history refer to tiles by id; only
+ * recently used tiles are kept on the GPU, within this budget (default 256 MB
+ * = 1024 tiles; `?layerBudgetMB=` overrides it, up to MAX_ATLAS_PAGES pages).
+ * Least recently used tiles are evicted: read back, deflate-compressed, and
+ * kept in JS memory until needed again.
+ */
+export const LAYER_GPU_BUDGET_BYTES = 256 * 1024 * 1024;
+/** Upper bound on tile ids (layers + undo history, on the GPU or compressed). */
+export const MAX_TILE_IDS = 65536;
+/** Evicted tiles being decompressed at once. */
+export const MAX_LOADS_IN_FLIGHT = 16;
+/** Reloaded tiles uploaded to the GPU per frame (each is 256 KB). */
+export const UPLOADS_PER_FRAME = 32;
 
 /**
  * Composite cache: each canvas's composite is a pyramid of tiles at full,
@@ -75,4 +90,5 @@ export const TILE_BYTES = TILE_SIZE * TILE_SIZE * 4;
 export const PAGE_SIDE_TILES = ATLAS_PAGE_SIZE / TILE_SIZE;
 export const SLOTS_PER_PAGE = PAGE_SIDE_TILES * PAGE_SIDE_TILES;
 export const MAX_TILE_SLOTS = SLOTS_PER_PAGE * MAX_ATLAS_PAGES;
+export const LAYER_GPU_SLOTS = Math.min(MAX_TILE_SLOTS, Math.floor(LAYER_GPU_BUDGET_BYTES / TILE_BYTES));
 export const PAGE_BYTES = ATLAS_PAGE_SIZE * ATLAS_PAGE_SIZE * 4;
