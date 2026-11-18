@@ -1,12 +1,13 @@
 import type { StrokeController } from '../app/strokeController';
-import { CANVAS_HEIGHT, CANVAS_WIDTH, MAX_LAYERS } from '../config';
+import { MAX_LAYERS } from '../config';
 import type { Editor } from '../document/editor';
 import type { PenSample } from '../input/penSample';
 import type { ToolState } from '../tools/tools';
 import { buttons } from './controls';
 
 export interface StressDeps {
-  editor: Editor;
+  /** The active canvas's editor (strokes are drawn on it). */
+  readonly editor: Editor;
   strokes: StrokeController;
   tools: ToolState;
   report(message: string): void;
@@ -74,17 +75,19 @@ function sample(x: number, y: number, pressure: number, t: number): PenSample {
   };
 }
 
-/** One wavy stroke across a random part of the canvas. */
-async function drawOne(deps: StressDeps, rand: () => number, length = CANVAS_WIDTH * 0.6): Promise<void> {
-  const x0 = rand() * CANVAS_WIDTH * 0.4;
-  const y0 = rand() * CANVAS_HEIGHT;
+/** One wavy stroke across a random part of the active canvas (in workspace coordinates). */
+async function drawOne(deps: StressDeps, rand: () => number, lengthFraction = 0.6): Promise<void> {
+  const doc = deps.editor.doc;
+  const length = doc.width * lengthFraction;
+  const x0 = doc.x + rand() * doc.width * 0.4;
+  const y0 = doc.y + rand() * doc.height;
   const amp = 50 + rand() * 300;
   const steps = 60;
   const now = performance.now();
   deps.strokes.begin(sample(x0, y0, 0.3, now));
   for (let i = 1; i <= steps; i++) {
     const t = i / steps;
-    const p = sample(x0 + t * length, y0 + Math.sin(t * 8 + x0) * amp, 0.3 + 0.7 * Math.sin(t * Math.PI), now + i * 4);
+    const p = sample(x0 + t * length, y0 + Math.sin(t * 8 + x0 - doc.x) * amp, 0.3 + 0.7 * Math.sin(t * Math.PI), now + i * 4);
     deps.strokes.move([p], []);
   }
   deps.strokes.end();
@@ -132,7 +135,7 @@ async function fillPool(deps: StressDeps): Promise<string> {
     let lastUsed = -1;
     while (strokes < 2000) {
       if (deps.editor.canAddLayer && strokes % 10 === 0) deps.editor.addLayer();
-      await drawOne(deps, rand, CANVAS_WIDTH * 0.9);
+      await drawOne(deps, rand, 0.9);
       strokes++;
       const used = deps.editor.stats().usedSlots;
       if (used === lastUsed && !deps.editor.canAddLayer) break; // nothing more fits

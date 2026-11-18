@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   docToClipMatrix,
+  fitRectToView,
   docToScreen,
   fitToView,
   panBy,
@@ -109,6 +110,12 @@ describe('fitToView', () => {
     const v = fitToView(2048, 2048, 1024, 768, 0);
     expect(v.scale).toBeCloseTo(768 / 2048);
     expectClose(docToScreen(v, { x: 1024, y: 1024 }), { x: 512, y: 384 });
+  });
+
+  it('fits a rectangle anywhere in the workspace', () => {
+    const v = fitRectToView({ x: 10000, y: -500, width: 4000, height: 1000 }, 1000, 1000, 0);
+    expect(v.scale).toBeCloseTo(0.25);
+    expectClose(docToScreen(v, { x: 10000, y: -500 }), { x: 0, y: 375 });
   });
 });
 

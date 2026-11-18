@@ -6,8 +6,9 @@ import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from '.
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
 import { createStressPanel } from './debug/stress';
-import { containsPoint, visibleWorkspaceRect } from './workspace/coords';
-import { singleCanvasEditor } from './workspace/workspace';
+import type { Editor } from './document/editor';
+import { hitTest, union, visibleWorkspaceRect } from './workspace/coords';
+import { Workspace } from './workspace/workspace';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -18,9 +19,10 @@ import { ColorPicker } from './ui/colorPicker';
 import { LayersPanel } from './ui/layersPanel';
 import { Loupe } from './ui/loupe';
 import { installShortcuts } from './ui/shortcuts';
+import { CanvasLabels } from './ui/canvasLabels';
 import { Thumbnails } from './ui/thumbnails';
 import { Toolbar } from './ui/toolbar';
-import { IDENTITY_VIEW, docToClipMatrix, fitToView, type ViewTransform } from './viewport/viewport';
+import { IDENTITY_VIEW, docToClipMatrix, fitRectToView, type ViewTransform } from './viewport/viewport';
 
 async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
@@ -29,7 +31,10 @@ async function main(): Promise<void> {
   const { renderer, fallbackReason, canvas } = await createRenderer(initialCanvas, requestedRenderer(location.search));
   blockBrowserGestures(canvas);
 
-  const editor = singleCanvasEditor();
+  const workspace = new Workspace();
+  seedCanvases(workspace, Number(new URLSearchParams(location.search).get('canvases') ?? 1));
+  /** The selected canvas's editor; null when no canvas is selected. */
+  const active = (): Editor | null => workspace.activeEditor;
   const tools = new ToolState();
   const metrics = new Metrics();
 
@@ -55,6 +60,13 @@ async function main(): Promise<void> {
       canvasPxPerDevicePx: 1 / (view.scale * window.devicePixelRatio),
     });
     metrics.frameRendered(rafTime, performance.now() - start, info);
+    labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
+  }
+
+  /** Zoom to fit every canvas. */
+  function fitAll(): ViewTransform {
+    const all = union(workspace.canvases.map((c) => c.placement)) ?? { x: 0, y: 0, width: 1, height: 1 };
+    return fitRectToView(all, cssWidth, cssHeight);
   }
 
   function setView(next: ViewTransform): void {
@@ -64,7 +76,6 @@ async function main(): Promise<void> {
 
   // --- workspace → compositor ----------------------------------------------
 
-  const workspace = editor.workspace;
   let liveStroke: ActiveStroke | null = null;
   function updateCompositeState(): void {
     renderer.setCanvases(
@@ -72,8 +83,9 @@ async function main(): Promise<void> {
     );
     requestFrame();
   }
-  const thumbnails = new Thumbnails(editor, renderer, requestFrame);
-  editor.onChange((change) => {
+  const thumbnails = new Thumbnails(workspace, renderer, requestFrame);
+  const labels = new CanvasLabels();
+  workspace.onChange((change) => {
     updateCompositeState();
     renderer.invalidateTiles(change.canvasId, change.tiles);
     for (const id of change.layers) thumbnails.schedule(id);
@@ -93,7 +105,13 @@ async function main(): Promise<void> {
       showBanner('Tile memory is full: that stroke could not be kept. Delete or clear layers to free memory.');
     },
     requestFrame,
-  }, (p) => (containsPoint(editor.doc.placement, p) ? editor : null));
+  }, (p) => {
+    // A stroke draws on the topmost canvas under its first point (and selects it).
+    const doc = hitTest(workspace.canvases, p);
+    if (!doc) return null;
+    workspace.setActiveCanvas(doc.id);
+    return workspace.editor(doc.id);
+  });
 
   // --- canvas size and devicePixelRatio -----------------------------------
 
@@ -107,7 +125,7 @@ async function main(): Promise<void> {
     );
     input.updateOrigin();
     if (!hasFitted) {
-      view = fitToView(editor.doc.width, editor.doc.height, cssWidth, cssHeight);
+      view = fitAll();
       hasFitted = true;
     }
     requestFrame();
@@ -154,8 +172,8 @@ async function main(): Promise<void> {
       if (phase === 'end') tools.returnFromEyedropper();
     },
     tap(fingers) {
-      if (fingers === 2) editor.undo();
-      else editor.redo();
+      if (fingers === 2) workspace.undo();
+      else workspace.redo();
     },
   });
 
@@ -204,9 +222,11 @@ async function main(): Promise<void> {
 
   const mb = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MB`;
   const hud = new Hud(metrics, rendererLabel, () => {
-    const s = editor.stats();
+    const s = workspace.stats();
+    const a = active()?.stats();
     return [
-      `tiles ${s.tileEntries} in ${s.layers} layers · slots ${s.usedSlots}/${s.capacitySlots} · pages ${renderer.memory().layerPages}`,
+      `canvases ${s.canvases} · active: ${a ? `${a.tileEntries} tiles in ${a.layers} layers` : 'none'}`,
+      `slots ${s.usedSlots}/${s.capacitySlots} · pages ${renderer.memory().layerPages}`,
       `gpu memory ≈ ${mb(renderer.memory().bytes)} (composite pages ${renderer.memory().compositePages})`,
       `history ${s.historySteps} undo / ${s.redoSteps} redo · ${mb(s.historyBytes)}`,
       `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
@@ -219,7 +239,7 @@ async function main(): Promise<void> {
     () => (tools.paintingTool === 'eraser' ? 'Eraser' : 'Brush'),
     {
       fitView() {
-        setView(fitToView(editor.doc.width, editor.doc.height, cssWidth, cssHeight));
+        setView(fitAll());
       },
       toggleHud() {
         hud.setVisible(!hud.visible);
@@ -227,7 +247,7 @@ async function main(): Promise<void> {
       exportMeasurements() {
         const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
         void saveMeasurements(buildExport(metrics, session(), tools.brush, label, {
-          ...editor.stats(),
+          ...workspace.stats(),
           atlasPages: renderer.memory().layerPages,
           gpuMemoryBytes: renderer.memory().bytes,
         }), label);
@@ -244,11 +264,11 @@ async function main(): Promise<void> {
   const selectTool = (tool: Tool): void => tools.setTool(tool);
   const picker = new ColorPicker((color) => tools.setColor(color));
   picker.setColor(tools.brush.color);
-  const layersPanel = new LayersPanel(editor, thumbnails);
+  const layersPanel = new LayersPanel(active, thumbnails);
   const toolbar = new Toolbar({
     selectTool,
-    undo: () => editor.undo(),
-    redo: () => editor.redo(),
+    undo: () => workspace.undo(),
+    redo: () => workspace.redo(),
     toggleColorPicker: () => picker.toggle(),
     toggleLayers: () => layersPanel.setVisible(!layersPanel.visible),
   });
@@ -257,8 +277,8 @@ async function main(): Promise<void> {
     toolbar.update({
       tool: tools.current,
       color: tools.brush.color,
-      canUndo: editor.history.canUndo,
-      canRedo: editor.history.canRedo,
+      canUndo: workspace.history.canUndo,
+      canRedo: workspace.history.canRedo,
     });
     layersPanel.update();
     picker.setRecentColors(tools.recentColors);
@@ -279,18 +299,27 @@ async function main(): Promise<void> {
   renderer.onLost = (message) => showBanner(message, true);
 
   if (new URLSearchParams(location.search).has('stress')) {
-    controls.debugBody.append(createStressPanel({ editor, strokes, tools, report: (m) => showBanner(m, true) }));
+    controls.debugBody.append(
+      createStressPanel({
+        get editor() {
+          return active() ?? workspace.editor(workspace.canvases[0]!.id);
+        },
+        strokes,
+        tools,
+        report: (m) => showBanner(m, true),
+      }),
+    );
   }
 
-  ui.append(toolbar.element, picker.element, controls.element, layersPanel.element, hud.element, loupe.element, banner);
+  ui.append(labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, hud.element, loupe.element, banner);
   refreshUi();
 
   installShortcuts({
-    undo: () => editor.undo(),
-    redo: () => editor.redo(),
+    undo: () => workspace.undo(),
+    redo: () => workspace.redo(),
     selectTool,
     resizeBrush: (factor) => tools.adjustSize(factor),
-    newLayer: () => editor.addLayer(),
+    newLayer: () => active()?.addLayer(),
     toggleHud: () => hud.setVisible(!hud.visible),
   });
 
@@ -298,6 +327,24 @@ async function main(): Promise<void> {
   watchDevicePixelRatio();
   resize();
   hud.setVisible(true); // after the first resize, so the HUD never shows the pre-fit view
+}
+
+/**
+ * The starting canvases: one 4096² canvas, or with `?canvases=N` a grid of
+ * N A4 canvases (for testing many canvases before the canvas UI exists).
+ */
+function seedCanvases(workspace: Workspace, count: number): void {
+  const n = Math.max(1, Math.min(100, Math.floor(count) || 1));
+  const size = n === 1 ? { width: 4096, height: 4096 } : { width: 2480, height: 3508 };
+  const columns = Math.ceil(Math.sqrt(n));
+  const gap = 300;
+  for (let i = 0; i < n; i++) {
+    const doc = workspace.newCanvas(size, `Canvas ${i + 1}`);
+    doc.x = (i % columns) * (size.width + gap);
+    doc.y = Math.floor(i / columns) * (size.height + gap);
+    workspace.attachCanvas(doc);
+  }
+  workspace.activeCanvasId = workspace.canvases[0]!.id;
 }
 
 main().catch((error: unknown) => {

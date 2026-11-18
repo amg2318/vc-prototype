@@ -137,13 +137,23 @@ export function fitToView(
   viewHeight: number,
   margin = 24,
 ): ViewTransform {
+  return fitRectToView({ x: 0, y: 0, width: docWidth, height: docHeight }, viewWidth, viewHeight, margin);
+}
+
+/** Centre a workspace rectangle in the view, unrotated and scaled to fit with a margin (CSS px). */
+export function fitRectToView(
+  rect: { x: number; y: number; width: number; height: number },
+  viewWidth: number,
+  viewHeight: number,
+  margin = 24,
+): ViewTransform {
   const availW = Math.max(1, viewWidth - 2 * margin);
   const availH = Math.max(1, viewHeight - 2 * margin);
-  const scale = clampScale(Math.min(availW / docWidth, availH / docHeight));
+  const scale = clampScale(Math.min(availW / Math.max(1, rect.width), availH / Math.max(1, rect.height)));
   return pinDocPointToScreen(
     scale,
     0,
-    { x: docWidth / 2, y: docHeight / 2 },
+    { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
     { x: viewWidth / 2, y: viewHeight / 2 },
   );
 }

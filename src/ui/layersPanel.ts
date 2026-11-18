@@ -25,8 +25,12 @@ export class LayersPanel {
   private blendSelect: HTMLSelectElement | null = null;
   private opacityDrag = 0;
 
+  /** The canvas being edited; set by `update()`. */
+  private editor: Editor | null = null;
+
+  /** `activeEditor` gives the active canvas's editor (null when no canvas is selected). */
   constructor(
-    private readonly editor: Editor,
+    private readonly activeEditor: () => Editor | null,
     private readonly thumbnails: Thumbnails,
   ) {
     this.element = document.createElement('aside');
@@ -35,7 +39,7 @@ export class LayersPanel {
     const header = document.createElement('header');
     const title = document.createElement('h2');
     title.textContent = 'Layers';
-    this.addButton = button('+', () => editor.addLayer(), 'Add layer (⇧N)');
+    this.addButton = button('+', () => this.editor?.addLayer(), 'Add layer (⇧N)');
     header.append(title, this.addButton);
 
     this.list = document.createElement('ol');
@@ -44,7 +48,7 @@ export class LayersPanel {
     paperRow.className = 'paper-row';
     this.paperInput = document.createElement('input');
     this.paperInput.type = 'color';
-    this.paperInput.addEventListener('change', () => editor.setPaper(hexToRgb(this.paperInput.value)));
+    this.paperInput.addEventListener('change', () => this.editor?.setPaper(hexToRgb(this.paperInput.value)));
     paperRow.append(Object.assign(document.createElement('span'), { textContent: 'Background' }), this.paperInput);
 
     this.element.append(header, this.list, paperRow);
@@ -60,33 +64,43 @@ export class LayersPanel {
   }
 
   update(): void {
-    const doc = this.editor.doc;
+    const editor = this.activeEditor();
+    this.editor = editor;
+    this.element.classList.toggle('no-canvas', editor === null);
+    if (!editor) {
+      this.signature = '';
+      this.list.replaceChildren();
+      this.addButton.disabled = true;
+      return;
+    }
+    const doc = editor.doc;
     const signature = JSON.stringify([
-      this.editor.activeLayerId,
+      doc.id,
+      editor.activeLayerId,
       doc.layers.map((l) => [l.id, l.name, l.visible]),
     ]);
     if (signature !== this.signature) {
       this.signature = signature;
       this.rebuild();
     }
-    const active = this.editor.activeLayer;
+    const active = editor.activeLayer;
     if (this.opacitySlider && document.activeElement !== this.opacitySlider) {
       this.opacitySlider.value = String(active.opacity);
     }
     if (this.opacityOutput) this.opacityOutput.textContent = `${Math.round(active.opacity * 100)}%`;
     if (this.blendSelect) this.blendSelect.value = active.blendMode;
-    this.addButton.disabled = !this.editor.canAddLayer;
+    this.addButton.disabled = !editor.canAddLayer;
     this.paperInput.value = rgbToHex(doc.paper);
   }
 
   private rebuild(): void {
-    const layers = [...this.editor.doc.layers].reverse();
+    const layers = [...this.editor!.doc.layers].reverse();
     this.opacitySlider = this.opacityOutput = this.blendSelect = null;
     this.list.replaceChildren(...layers.map((layer) => this.row(layer)));
   }
 
   private row(layer: RasterLayer): HTMLLIElement {
-    const editor = this.editor;
+    const editor = this.editor!;
     const isActive = layer.id === editor.activeLayerId;
     const li = document.createElement('li');
     li.className = 'layer-row';
@@ -121,7 +135,7 @@ export class LayersPanel {
 
   /** Controls for the active layer. */
   private details(layer: RasterLayer): HTMLElement {
-    const editor = this.editor;
+    const editor = this.editor!;
     const box = document.createElement('div');
     box.className = 'layer-details';
 
@@ -161,8 +175,10 @@ export class LayersPanel {
   }
 
   private rename(id: LayerId): void {
-    const name = prompt('Layer name', this.editor.doc.layer(id).name);
-    if (name !== null) this.editor.renameLayer(id, name);
+    const editor = this.editor;
+    if (!editor) return;
+    const name = prompt('Layer name', editor.doc.layer(id).name);
+    if (name !== null) editor.renameLayer(id, name);
   }
 
   /** Drag a row by its handle; dropping moves the layer to the row it was dropped on. */
@@ -190,7 +206,7 @@ export class LayersPanel {
         const rect = r.getBoundingClientRect();
         return rect.top + rect.height / 2 < e.clientY;
       }).length;
-      this.editor.moveLayer(id, this.editor.doc.layers.length - 1 - listIndex);
+      this.editor?.moveLayer(id, this.editor.doc.layers.length - 1 - listIndex);
     };
     handle.addEventListener('pointerup', finish);
     handle.addEventListener('pointercancel', finish);
