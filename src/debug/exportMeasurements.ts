@@ -15,10 +15,16 @@ export function isStandalone(): boolean {
   return nav.standalone === true || matchMedia('(display-mode: standalone)').matches;
 }
 
-export function buildExport(metrics: Metrics, session: SessionInfo, brush: BrushSettings, label: string): object {
+export function buildExport(
+  metrics: Metrics,
+  session: SessionInfo,
+  brush: BrushSettings,
+  label: string,
+  document: object = {},
+): object {
   return {
-    format: 'vc-prototype-phase0-measurements',
-    version: 1,
+    format: 'vc-prototype-measurements',
+    version: 2,
     note:
       'Latencies are software estimates (input event timestamp → GPU work submitted / GPU work done). ' +
       'They exclude display scan-out and digitizer latency; true on-glass latency is higher.',
@@ -32,6 +38,7 @@ export function buildExport(metrics: Metrics, session: SessionInfo, brush: Brush
       ...session,
     },
     brush,
+    document,
     counters: metrics.counters,
     summary: metrics.summary(),
     frames: metrics.frames,
@@ -41,7 +48,7 @@ export function buildExport(metrics: Metrics, session: SessionInfo, brush: Brush
 function fileName(label: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safeLabel = label.replace(/[^a-z0-9-_]+/gi, '_').slice(0, 40);
-  return `phase0-${safeLabel ? safeLabel + '-' : ''}${stamp}.json`;
+  return `measurements-${safeLabel ? safeLabel + '-' : ''}${stamp}.json`;
 }
 
 /**

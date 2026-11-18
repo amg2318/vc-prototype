@@ -30,6 +30,12 @@ export interface FrameRecord {
   oldestInputToSubmitMs: number | null;
   /** Newest consumed sample → GPU reported work done (WebGPU only). */
   inputToGpuDoneMs: number | null;
+  /** Tiles recomposited this frame. */
+  compositedTiles: number;
+  /** CPU time encoding the composite pass. */
+  compositeCpuMs: number;
+  /** GPU time of the composite pass (WebGPU with timestamp queries only). */
+  compositeGpuMs: number | null;
 }
 
 export interface Stats {
@@ -50,6 +56,12 @@ export interface MetricsSummary {
   inputToSubmit: Stats;
   oldestInputToSubmit: Stats;
   inputToGpuDone: Stats;
+  /** Composite pass CPU encode time per frame that recomposited anything. */
+  compositeCpu: Stats;
+  /** Composite GPU time per frame that recomposited anything (WebGPU timestamp queries only). */
+  compositeGpu: Stats;
+  /** Tiles recomposited per frame that recomposited anything. */
+  compositedTiles: Stats;
 }
 
 /** Frames further apart than this are not "consecutive" (the app was idle). */
@@ -135,9 +147,15 @@ export class Metrics {
       inputToSubmitMs: inputToSubmit,
       oldestInputToSubmitMs: oldestToSubmit,
       inputToGpuDoneMs: null,
+      compositedTiles: info.compositedTiles,
+      compositeCpuMs: info.compositeCpuMs,
+      compositeGpuMs: null,
     };
     if (this.frames.length < MAX_RECORDS) this.frames.push(record);
 
+    void info.compositeGpuMs?.then((gpuMs) => {
+      record.compositeGpuMs = gpuMs;
+    });
     if (hasInput && info.gpuDone) {
       const newest = p.newest;
       void info.gpuDone.then((doneAt) => {
@@ -151,6 +169,7 @@ export class Metrics {
   summary(since = -Infinity, now = performance.now()): MetricsSummary {
     const frames = this.frames.filter((f) => f.t >= since);
     const inputFrames = frames.filter((f) => f.samples > 0);
+    const compositeFrames = frames.filter((f) => f.compositedTiles > 0);
     const interval = computeStats(frames.map((f) => f.intervalMs));
     const totalEvents = inputFrames.reduce((n, f) => n + f.events, 0);
     const totalSamples = inputFrames.reduce((n, f) => n + f.samples, 0);
@@ -171,6 +190,9 @@ export class Metrics {
       inputToSubmit: computeStats(inputFrames.map((f) => f.inputToSubmitMs)),
       oldestInputToSubmit: computeStats(inputFrames.map((f) => f.oldestInputToSubmitMs)),
       inputToGpuDone: computeStats(inputFrames.map((f) => f.inputToGpuDoneMs)),
+      compositeCpu: computeStats(compositeFrames.map((f) => f.compositeCpuMs)),
+      compositeGpu: computeStats(compositeFrames.map((f) => f.compositeGpuMs)),
+      compositedTiles: computeStats(compositeFrames.map((f) => f.compositedTiles)),
     };
   }
 

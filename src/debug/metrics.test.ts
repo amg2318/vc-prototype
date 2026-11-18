@@ -38,7 +38,7 @@ describe('Metrics', () => {
     const m = new Metrics();
     m.noteInput([sample(100), sample(104)], 104);
     m.noteDabs(10, 3);
-    m.frameRendered(110, 1.5, { submittedAt: 112, gpuDone: null });
+    m.frameRendered(110, 1.5, { submittedAt: 112, gpuDone: null, compositedTiles: 0, compositeCpuMs: 0 });
     const f = m.frames[0]!;
     expect(f.samples).toBe(2);
     expect(f.events).toBe(1);
@@ -49,7 +49,7 @@ describe('Metrics', () => {
 
   it('only counts frame intervals between consecutive frames', () => {
     const m = new Metrics();
-    const info = { submittedAt: 0, gpuDone: null };
+    const info = { submittedAt: 0, gpuDone: null, compositedTiles: 0, compositeCpuMs: 0 };
     m.frameRendered(0, 1, info);
     m.frameRendered(16, 1, info);
     m.frameRendered(2000, 1, info); // after idle
@@ -60,7 +60,7 @@ describe('Metrics', () => {
   it('fills GPU-done latency when the promise resolves', async () => {
     const m = new Metrics();
     m.noteInput([sample(100)], 100);
-    m.frameRendered(105, 1, { submittedAt: 106, gpuDone: Promise.resolve(120) });
+    m.frameRendered(105, 1, { submittedAt: 106, gpuDone: Promise.resolve(120), compositedTiles: 1, compositeCpuMs: 0 });
     await Promise.resolve();
     await Promise.resolve();
     expect(m.frames[0]!.inputToGpuDoneMs).toBe(20);
@@ -69,7 +69,7 @@ describe('Metrics', () => {
   it('counts implausible timestamps instead of recording them', () => {
     const m = new Metrics();
     m.noteInput([sample(5000)], 5000);
-    m.frameRendered(10, 1, { submittedAt: 11, gpuDone: null });
+    m.frameRendered(10, 1, { submittedAt: 11, gpuDone: null, compositedTiles: 0, compositeCpuMs: 0 });
     expect(m.frames[0]!.inputToSubmitMs).toBeNull();
     expect(m.counters.implausibleTimestamps).toBe(1);
   });
