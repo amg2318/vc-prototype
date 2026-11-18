@@ -1,4 +1,4 @@
-import { panBy, zoomAt, type ViewTransform } from '../viewport/viewport';
+import { panBy, screenToDoc, zoomAt, type Vec2, type ViewTransform } from '../viewport/viewport';
 import { TouchNavigator } from './gestures';
 import { isEraserEvent, penSampleFromEvent, type PenSample } from './penSample';
 
@@ -13,6 +13,10 @@ export interface InputCallbacks {
   strokeEnd(cancelled: boolean): void;
   /** A touch was ignored because the pen was down (for the HUD). */
   palmRejected(): void;
+  /** True while the eyedropper tool is selected: pen/mouse then sample instead of drawing. */
+  eyedropperActive(): boolean;
+  /** Sample the visible colour at a point (screen CSS px and canvas px). */
+  eyedropper(phase: 'start' | 'move' | 'end', screen: Vec2, doc: Vec2): void;
 }
 
 const supportsCoalesced = typeof PointerEvent !== 'undefined' && 'getCoalescedEvents' in PointerEvent.prototype;
@@ -29,6 +33,7 @@ export const inputCapabilities = { coalescedEvents: supportsCoalesced, predicted
 export class PointerInput {
   readonly touch = new TouchNavigator();
   private drawingPointer: number | null = null;
+  private eyedropperPointer: number | null = null;
   private drawingIsEraser = false;
   private panPointer: { id: number; x: number; y: number } | null = null;
   private spaceHeld = false;
@@ -49,8 +54,9 @@ export class PointerInput {
     this.updateOrigin();
   }
 
+  /** True while a pen or mouse is down for drawing or the eyedropper (touch is ignored then). */
   get penDown(): boolean {
-    return this.drawingPointer !== null;
+    return this.drawingPointer !== null || this.eyedropperPointer !== null;
   }
 
   /** Call after the canvas moves or resizes. */
@@ -80,7 +86,7 @@ export class PointerInput {
     }
 
     // Pen or mouse.
-    if (this.drawingPointer !== null || this.panPointer !== null) return;
+    if (this.drawingPointer !== null || this.panPointer !== null || this.eyedropperPointer !== null) return;
     const wantsPan = e.button === 1 || (e.button === 0 && this.spaceHeld);
     if (wantsPan) {
       this.panPointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
@@ -94,6 +100,13 @@ export class PointerInput {
     // Pen wins over any touches already on the glass (likely a palm).
     const restore = this.touch.rejectAllForPen();
     if (restore) this.callbacks.setView(restore);
+
+    if (this.callbacks.eyedropperActive() && !eraser) {
+      this.eyedropperPointer = e.pointerId;
+      this.canvas.setPointerCapture(e.pointerId);
+      this.callEyedropper('start', e);
+      return;
+    }
 
     this.drawingPointer = e.pointerId;
     this.drawingIsEraser = eraser;
@@ -118,6 +131,10 @@ export class PointerInput {
       return;
     }
 
+    if (e.pointerId === this.eyedropperPointer) {
+      this.callEyedropper('move', e);
+      return;
+    }
     if (e.pointerId !== this.drawingPointer) return; // e.g. pen hover
     const coalesced = supportsCoalesced ? e.getCoalescedEvents() : [];
     const raw = coalesced.length > 0 ? coalesced : [e];
@@ -141,12 +158,22 @@ export class PointerInput {
       this.canvas.style.cursor = this.spaceHeld ? 'grab' : '';
       return;
     }
+    if (e.pointerId === this.eyedropperPointer) {
+      this.eyedropperPointer = null;
+      this.callEyedropper('end', e);
+      return;
+    }
     if (e.pointerId === this.drawingPointer) {
       // The pointerup sample itself is not added: it reports pressure 0,
       // which would put a tiny dab at the end of every stroke.
       this.drawingPointer = null;
       this.callbacks.strokeEnd(cancelled);
     }
+  }
+
+  private callEyedropper(phase: 'start' | 'move' | 'end', e: PointerEvent): void {
+    const screen = this.screenPoint(e);
+    this.callbacks.eyedropper(phase, screen, screenToDoc(this.callbacks.getView(), screen));
   }
 
   private onWheel = (e: WheelEvent): void => {

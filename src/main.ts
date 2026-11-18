@@ -2,7 +2,7 @@ import './style.css';
 import { buildCompositeState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from './config';
-import { createControls } from './debug/controls';
+import { Controls } from './debug/controls';
 import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from './debug/exportMeasurements';
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
@@ -11,7 +11,14 @@ import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
 import { createRenderer, requestedRenderer } from './render/createRenderer';
-import { ToolState } from './tools/tools';
+import { ToolState, type Tool } from './tools/tools';
+import { rgbFromPremultiplied8 } from './ui/color';
+import { ColorPicker } from './ui/colorPicker';
+import { LayersPanel } from './ui/layersPanel';
+import { Loupe } from './ui/loupe';
+import { installShortcuts } from './ui/shortcuts';
+import { Thumbnails } from './ui/thumbnails';
+import { Toolbar } from './ui/toolbar';
 import { IDENTITY_VIEW, docToClipMatrix, fitToView, type ViewTransform } from './viewport/viewport';
 
 async function main(): Promise<void> {
@@ -58,9 +65,12 @@ async function main(): Promise<void> {
     renderer.setCompositeState(buildCompositeState(editor.doc, liveStroke));
     requestFrame();
   }
+  const thumbnails = new Thumbnails(editor, renderer, requestFrame);
   editor.onChange((change) => {
     updateCompositeState();
     renderer.invalidateTiles(change.tiles);
+    for (const id of change.layers) thumbnails.schedule(id);
+    refreshUi();
   });
   updateCompositeState();
 
@@ -131,7 +141,33 @@ async function main(): Promise<void> {
     palmRejected() {
       metrics.counters.palmRejections++;
     },
+    eyedropperActive: () => tools.current === 'eyedropper',
+    eyedropper(phase, screen, doc) {
+      sampleColor(phase, screen, doc);
+      if (phase === 'end') tools.returnFromEyedropper();
+    },
   });
+
+  // --- eyedropper: samples the composite (all visible layers + paper) ------------
+
+  const loupe = new Loupe();
+  let sampleSerial = 0;
+  function sampleColor(phase: 'start' | 'move' | 'end', screen: { x: number; y: number }, doc: { x: number; y: number }): void {
+    if (phase === 'end') {
+      loupe.hide();
+      return;
+    }
+    loupe.show(screen, null);
+    const serial = ++sampleSerial;
+    void renderer.readPixel(doc.x, doc.y).then((rgba) => {
+      if (serial !== sampleSerial) return; // a newer sample is on its way
+      const color = rgbFromPremultiplied8(rgba);
+      tools.setColor(color);
+      picker.setColor(color);
+      if (!loupe.element.hidden) loupe.show(screen, color);
+    });
+    requestFrame();
+  }
 
   // --- debug UI -------------------------------------------------------------
 
@@ -159,27 +195,53 @@ async function main(): Promise<void> {
     ];
   });
 
-  const controls = createControls(tools.brush, {
-    clearCanvas() {
-      editor.clearLayer(editor.activeLayerId);
+  const controls = new Controls(
+    () => tools.editableSettings,
+    () => (tools.current === 'eraser' ? 'Eraser' : 'Brush'),
+    {
+      fitView() {
+        setView(fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight));
+      },
+      toggleHud() {
+        hud.setVisible(!hud.visible);
+      },
+      exportMeasurements() {
+        const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
+        void saveMeasurements(buildExport(metrics, session(), tools.brush, label), label);
+      },
+      resetMeasurements() {
+        metrics.reset();
+      },
+      setRotationEnabled(enabled) {
+        input.touch.allowRotation = enabled;
+      },
     },
-    fitView() {
-      setView(fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight));
-    },
-    toggleHud() {
-      hud.setVisible(!hud.visible);
-    },
-    exportMeasurements() {
-      const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
-      void saveMeasurements(buildExport(metrics, session(), tools.brush, label), label);
-    },
-    resetMeasurements() {
-      metrics.reset();
-    },
-    setRotationEnabled(enabled) {
-      input.touch.allowRotation = enabled;
-    },
+  );
+
+  const selectTool = (tool: Tool): void => tools.setTool(tool);
+  const picker = new ColorPicker((color) => tools.setColor(color));
+  picker.setColor(tools.brush.color);
+  const layersPanel = new LayersPanel(editor, thumbnails);
+  const toolbar = new Toolbar({
+    selectTool,
+    undo: () => editor.undo(),
+    redo: () => editor.redo(),
+    toggleColorPicker: () => picker.toggle(),
+    toggleLayers: () => layersPanel.setVisible(!layersPanel.visible),
   });
+
+  function refreshUi(): void {
+    toolbar.update({
+      tool: tools.current,
+      color: tools.brush.color,
+      canUndo: editor.history.canUndo,
+      canRedo: editor.history.canRedo,
+    });
+    layersPanel.update();
+    picker.setRecentColors(tools.recentColors);
+    controls.refresh();
+  }
+  tools.onChange(refreshUi);
 
   const banner = document.createElement('div');
   banner.className = 'banner';
@@ -193,18 +255,16 @@ async function main(): Promise<void> {
   }
   renderer.onLost = (message) => showBanner(message, true);
 
-  ui.append(controls, hud.element, banner);
+  ui.append(toolbar.element, picker.element, controls.element, layersPanel.element, hud.element, loupe.element, banner);
+  refreshUi();
 
-  window.addEventListener('keydown', (e) => {
-    if (e.target instanceof HTMLInputElement && e.target.type === 'text') return;
-    const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.key.toLowerCase() === 'z') {
-      e.preventDefault();
-      if (e.shiftKey) editor.redo();
-      else editor.undo();
-    } else if (e.key === 'h') {
-      hud.setVisible(!hud.visible);
-    }
+  installShortcuts({
+    undo: () => editor.undo(),
+    redo: () => editor.redo(),
+    selectTool,
+    resizeBrush: (factor) => tools.adjustSize(factor),
+    newLayer: () => editor.addLayer(),
+    toggleHud: () => hud.setVisible(!hud.visible),
   });
 
   new ResizeObserver(resize).observe(canvas);

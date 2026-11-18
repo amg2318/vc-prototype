@@ -11,6 +11,8 @@ const MAX_RECENT_COLORS = 8;
  */
 export class ToolState {
   current: Tool = 'brush';
+  /** The tool to go back to after a one-off eyedropper pick. */
+  private lastPaintingTool: Tool = 'brush';
   readonly brush: BrushSettings = { ...DEFAULT_BRUSH, color: [...DEFAULT_BRUSH.color] };
   readonly eraser: BrushSettings = { ...DEFAULT_BRUSH, diameter: 48, color: [0, 0, 0] };
   recentColors: RGB[] = [];
@@ -22,8 +24,14 @@ export class ToolState {
 
   setTool(tool: Tool): void {
     if (tool === this.current) return;
+    if (this.current !== 'eyedropper') this.lastPaintingTool = this.current;
     this.current = tool;
     this.emit();
+  }
+
+  /** After picking a colour with the eyedropper tool, return to brush/eraser. */
+  returnFromEyedropper(): void {
+    if (this.current === 'eyedropper') this.setTool(this.lastPaintingTool);
   }
 
   /** The brush settings the size/opacity controls edit: the eraser's while erasing, otherwise the brush's. */
