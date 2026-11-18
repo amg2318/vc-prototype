@@ -291,7 +291,7 @@ export class RenderCore {
       removedCanvases: this.removed,
       composites,
       downsample: { instances: downInstances, runs: pageRuns(downs.map((d) => d.dst)) },
-      display: this.packDisplay(plan.display, view.workspaceToClip, clipPerDevicePx),
+      display: this.packDisplay(plan.display, view, clipPerDevicePx),
       stats: { composited: plan.composites.length, downsampled: plan.downsamples.length, visibleCanvases },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
@@ -380,8 +380,9 @@ export class RenderCore {
     return 'done';
   }
 
-  /** Display quads in draw order: per canvas a shadow, then its tiles; then the overlay. */
-  private packDisplay(quads: readonly DisplayQuad[], m: Float64Array, clipPerPx: [number, number]): Frame['display'] {
+  /** Display quads in draw order: the background grid; per canvas a shadow, then its tiles; then the overlay. */
+  private packDisplay(quads: readonly DisplayQuad[], view: ViewState, clipPerPx: [number, number]): Frame['display'] {
+    const m = view.workspaceToClip;
     const tiles: number[] = [];
     const solids: number[] = [];
     const runs: DisplayRun[] = [];
@@ -391,6 +392,7 @@ export class RenderCore {
       else runs.push({ kind: 'solid', first: solids.length / SOLID_QUAD_FLOATS, count: 1 });
       solids.push(...corners, ...rgba, 0, 0);
     };
+    for (const line of backgroundGrid(view.visible, view.canvasPxPerDevicePx)) addSolid(clipQuad(m, line.rect), line.color);
     let previousCanvas: CanvasId | null = null;
     for (const q of quads) {
       const c = this.byId.get(q.canvasId)!;
@@ -442,6 +444,29 @@ function pageRuns(slots: readonly TileSlot[]): { page: number; first: number; co
     else runs.push({ page, first: i, count: 1 });
   });
   return runs;
+}
+
+/** Grid spacing (workspace px) is TILE_SIZE × a power of two, at least this many device px apart. */
+const GRID_MIN_DEVICE_PX = 48;
+const GRID_RGBA: [number, number, number, number] = [0.035, 0.035, 0.035, 0.035]; // faint white, premultiplied
+
+/**
+ * Faint grid lines over the visible workspace, 1 device px wide, so empty
+ * space reads as a surface and panning has visible motion. The spacing
+ * doubles as you zoom out, so there are never more than a few dozen lines.
+ */
+export function backgroundGrid(visible: Rect, canvasPxPerDevicePx: number): OverlayRect[] {
+  let spacing = TILE_SIZE;
+  while (spacing / canvasPxPerDevicePx < GRID_MIN_DEVICE_PX) spacing *= 2;
+  const width = canvasPxPerDevicePx;
+  const lines: OverlayRect[] = [];
+  for (let x = Math.ceil(visible.x / spacing) * spacing || 0; x <= visible.x + visible.width; x += spacing) {
+    lines.push({ rect: { x, y: visible.y, width, height: visible.height }, color: GRID_RGBA });
+  }
+  for (let y = Math.ceil(visible.y / spacing) * spacing || 0; y <= visible.y + visible.height; y += spacing) {
+    lines.push({ rect: { x: visible.x, y, width: visible.width, height: width }, color: GRID_RGBA });
+  }
+  return lines;
 }
 
 /** Layer tile ids of every visible source of a canvas at `key`. */

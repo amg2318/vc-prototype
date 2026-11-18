@@ -7,7 +7,7 @@ import { singleCanvasEditor } from '../workspace/workspace';
 import { TileResidency } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
 import { PyramidPlanner } from './pyramid';
-import { clipQuad, RenderCore, retileCopies, SOLID_QUAD_FLOATS } from './renderCore';
+import { backgroundGrid, clipQuad, RenderCore, retileCopies, SOLID_QUAD_FLOATS } from './renderCore';
 import type { CanvasRenderState, ViewState } from './renderer';
 
 function canvas(id: string, x: number, painted: number[] = []): CanvasRenderState {
@@ -224,5 +224,21 @@ describe('undo with evicted tiles', () => {
     // Every evicted "before" tile was reloaded to recomposite the canvas.
     expect(core.residency.stats().reloads - reloadsBefore).toBeGreaterThanOrEqual(evicted.length);
     expect(core.residency.stats().loading).toBe(0);
+  });
+});
+
+describe('backgroundGrid', () => {
+  it('spaces lines by a power of two of the tile size, at least 48 device px apart', () => {
+    // Zoomed out 8×: 256 px would be 32 device px apart, so the spacing is 512.
+    const lines = backgroundGrid({ x: -100, y: 0, width: 1100, height: 600 }, 8);
+    const xs = lines.filter((l) => l.rect.height === 600).map((l) => l.rect.x);
+    expect(xs).toEqual([0, 512]); // the view spans x = -100 … 1000
+  });
+
+  it('keeps the line count small at any zoom', () => {
+    for (const zoom of [0.01, 1, 37, 1000]) {
+      const visible = { x: 0, y: 0, width: 2000 * zoom, height: 1500 * zoom };
+      expect(backgroundGrid(visible, zoom).length).toBeLessThan(100);
+    }
   });
 });

@@ -7,6 +7,7 @@ import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
 import { createStressPanel } from './debug/stress';
 import type { Editor } from './document/editor';
+import type { Anchor } from './document/retile';
 import { hitTest, union, visibleWorkspaceRect } from './workspace/coords';
 import { Workspace } from './workspace/workspace';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
@@ -20,6 +21,9 @@ import { LayersPanel } from './ui/layersPanel';
 import { Loupe } from './ui/loupe';
 import { installShortcuts } from './ui/shortcuts';
 import { CanvasLabels } from './ui/canvasLabels';
+import { CanvasPanel } from './ui/canvasPanel';
+import { selectionOutline } from './ui/selectionOutline';
+import { snapPosition } from './workspace/snap';
 import { Thumbnails } from './ui/thumbnails';
 import { Toolbar } from './ui/toolbar';
 import { IDENTITY_VIEW, docToClipMatrix, fitRectToView, zoomAt, type ViewTransform } from './viewport/viewport';
@@ -61,10 +65,13 @@ async function main(): Promise<void> {
   function frame(rafTime: number): void {
     framePending = false;
     const start = performance.now();
+    const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
+    const selected = active()?.doc;
+    renderer.setOverlay(selected ? selectionOutline(selected.placement, canvasPxPerDevicePx) : []);
     const info = renderer.render({
       workspaceToClip: docToClipMatrix(view, cssWidth, cssHeight),
       visible: visibleWorkspaceRect(view, cssWidth, cssHeight),
-      canvasPxPerDevicePx: 1 / (view.scale * window.devicePixelRatio),
+      canvasPxPerDevicePx,
     });
     metrics.frameRendered(rafTime, performance.now() - start, info);
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
@@ -82,6 +89,55 @@ async function main(): Promise<void> {
     requestFrame();
   }
 
+  function zoomToCanvas(id: string): void {
+    if (workspace.hasCanvas(id)) setView(fitRectToView(workspace.canvas(id).placement, cssWidth, cssHeight));
+  }
+
+  // --- canvas management -----------------------------------------------------
+
+  /** Snap distance while dragging a canvas, in screen CSS px. */
+  const SNAP_PX = 8;
+  const SNAP_GRID = 256;
+  /** The canvas being dragged by its label: where it started, and the undo merge key for this drag. */
+  let canvasDrag: { id: string; from: { x: number; y: number }; key: string } | null = null;
+  let dragCount = 0;
+
+  function dragCanvas(id: string, dx: number, dy: number, phase: 'start' | 'move' | 'end'): void {
+    if (!workspace.hasCanvas(id)) return;
+    const doc = workspace.canvas(id);
+    if (phase === 'start') {
+      workspace.setActiveCanvas(id);
+      canvasDrag = { id, from: { x: doc.x, y: doc.y }, key: `move-canvas-${++dragCount}` };
+      return;
+    }
+    if (phase === 'end' || canvasDrag?.id !== id) {
+      canvasDrag = null;
+      return;
+    }
+    const snap = canvasPanel.snapping;
+    const others = snap.edges ? workspace.canvases.filter((c) => c.id !== id).map((c) => c.placement) : [];
+    const to = snapPosition(
+      { x: canvasDrag.from.x + dx, y: canvasDrag.from.y + dy, width: doc.width, height: doc.height },
+      others,
+      SNAP_PX / view.scale,
+      snap.grid ? SNAP_GRID : null,
+    );
+    workspace.moveCanvas(id, to.x, to.y, canvasDrag.key);
+  }
+
+  /** A new canvas goes to the right of everything, and the view moves to it. */
+  function createCanvas(size: { width: number; height: number }): void {
+    const all = union(workspace.canvases.map((c) => c.placement));
+    const at = all ? { x: all.x + all.width + 300, y: all.y } : { x: 0, y: 0 };
+    zoomToCanvas(workspace.createCanvas(size, at).id);
+  }
+
+  function resizeCanvas(id: string, size: { width: number; height: number }, anchor: Anchor): void {
+    const jobs = workspace.resizeCanvas(id, size, anchor);
+    if (jobs === null) showBanner('Not enough tile memory to resize this canvas.');
+    else renderer.retile(id, jobs);
+  }
+
   // --- workspace → compositor ----------------------------------------------
 
   let liveStroke: ActiveStroke | null = null;
@@ -92,7 +148,14 @@ async function main(): Promise<void> {
     requestFrame();
   }
   const thumbnails = new Thumbnails(workspace, renderer, requestFrame);
-  const labels = new CanvasLabels();
+  const labels = new CanvasLabels(() => view, {
+    select: (id) => workspace.setActiveCanvas(id),
+    zoomTo: (id) => {
+      workspace.setActiveCanvas(id);
+      zoomToCanvas(id);
+    },
+    drag: dragCanvas,
+  });
   workspace.onChange((change) => {
     updateCompositeState();
     renderer.invalidateTiles(change.canvasId, change.tiles);
@@ -276,12 +339,33 @@ async function main(): Promise<void> {
   const picker = new ColorPicker((color) => tools.setColor(color));
   picker.setColor(tools.brush.color);
   const layersPanel = new LayersPanel(active, thumbnails);
+  const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
+    create: createCanvas,
+    show: (id) => {
+      workspace.setActiveCanvas(id);
+      zoomToCanvas(id);
+    },
+    rename: (id, name) => workspace.renameCanvas(id, name),
+    resize: resizeCanvas,
+    duplicate: (id) => workspace.setActiveCanvas(workspace.duplicateCanvas(id).id),
+    remove: (id) => workspace.deleteCanvas(id),
+    bringToFront: (id) => workspace.bringToFront(id),
+    fitAll: () => setView(fitAll()),
+  });
+  // The layers and canvases panels share the right-hand side: one at a time.
   const toolbar = new Toolbar({
     selectTool,
     undo: () => workspace.undo(),
     redo: () => workspace.redo(),
     toggleColorPicker: () => picker.toggle(),
-    toggleLayers: () => layersPanel.setVisible(!layersPanel.visible),
+    toggleLayers: () => {
+      layersPanel.setVisible(!layersPanel.visible);
+      if (layersPanel.visible) canvasPanel.setVisible(false);
+    },
+    toggleCanvases: () => {
+      canvasPanel.setVisible(!canvasPanel.visible);
+      if (canvasPanel.visible) layersPanel.setVisible(false);
+    },
   });
 
   function refreshUi(): void {
@@ -292,6 +376,7 @@ async function main(): Promise<void> {
       canRedo: workspace.history.canRedo,
     });
     layersPanel.update();
+    canvasPanel.update();
     picker.setRecentColors(tools.recentColors);
     controls.refresh();
   }
@@ -323,7 +408,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, hud.element, loupe.element, banner);
+  ui.append(labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
   refreshUi();
 
   installShortcuts({

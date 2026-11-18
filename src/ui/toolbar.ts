@@ -8,6 +8,7 @@ export interface ToolbarActions {
   redo(): void;
   toggleColorPicker(): void;
   toggleLayers(): void;
+  toggleCanvases(): void;
 }
 
 const TOOLS: { tool: Tool; label: string; key: string }[] = [
@@ -43,6 +44,7 @@ export class Toolbar {
       this.undoButton,
       this.redoButton,
       separator(),
+      button('Canvases', actions.toggleCanvases, 'Canvases'),
       button('Layers', actions.toggleLayers, 'Layers'),
     );
   }
