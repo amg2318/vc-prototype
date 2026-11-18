@@ -146,6 +146,10 @@ async function main(): Promise<void> {
       sampleColor(phase, screen, doc);
       if (phase === 'end') tools.returnFromEyedropper();
     },
+    tap(fingers) {
+      if (fingers === 2) editor.undo();
+      else editor.redo();
+    },
   });
 
   // --- eyedropper: samples the composite (all visible layers + paper) ------------
