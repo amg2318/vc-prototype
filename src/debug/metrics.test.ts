@@ -3,8 +3,8 @@ import type { PenSample } from '../input/penSample';
 import { Metrics, computeStats, percentile, plausibleLatency, rateFromTimestamps } from './metrics';
 
 const sample = (timeStamp: number): PenSample => ({
-  x: 0, y: 0, pressure: 0.5, tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null, twist: 0,
-  tangentialPressure: 0, timeStamp, pointerType: 'pen', isEraser: false, isPredicted: false,
+  x: 0, y: 0, pressure: 0.5, hasRealPressure: true, tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null, twist: 0,
+  tangentialPressure: 0, timeStamp, kind: 'pen', isEraser: false, isPredicted: false,
 });
 
 describe('statistics helpers', () => {

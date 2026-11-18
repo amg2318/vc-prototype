@@ -70,8 +70,8 @@ function random(seed: number): () => number {
 
 function sample(x: number, y: number, pressure: number, t: number): PenSample {
   return {
-    x, y, pressure, tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null, twist: 0,
-    tangentialPressure: 0, timeStamp: t, pointerType: 'pen', isEraser: false, isPredicted: false,
+    x, y, pressure, hasRealPressure: true, tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null, twist: 0,
+    tangentialPressure: 0, timeStamp: t, kind: 'pen', isEraser: false, isPredicted: false,
   };
 }
 

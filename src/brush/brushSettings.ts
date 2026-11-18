@@ -16,6 +16,11 @@ export interface BrushSettings {
   minOpacityFraction: number;
   /** Stabilizer amount 0..1. */
   smoothing: number;
+  /**
+   * For input without real pressure (mouse, finger): fake it from speed,
+   * faster = thinner. Off: such input draws at full pressure.
+   */
+  pressureFromSpeed: boolean;
   /** sRGB, 0..1 per channel. */
   color: [number, number, number];
 }
@@ -30,5 +35,6 @@ export const DEFAULT_BRUSH: BrushSettings = {
   minSizeFraction: 0.05,
   minOpacityFraction: 0.15,
   smoothing: 0.15,
+  pressureFromSpeed: false,
   color: [0.08, 0.08, 0.1],
 };

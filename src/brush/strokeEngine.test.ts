@@ -1,21 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import type { PenSample } from '../input/penSample';
+import type { InputKind, PenSample } from '../input/penSample';
 import { DEFAULT_BRUSH, type BrushSettings } from './brushSettings';
 import { StrokeEngine, dabPointFor, rawPressure } from './strokeEngine';
 
-function sample(x: number, time: number, pressure = 0.5, pointerType = 'pen'): PenSample {
+function sample(x: number, time: number, pressure = 0.5, kind: InputKind = 'pen'): PenSample {
   return {
-    x, y: 0, pressure, tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null, twist: 0,
-    tangentialPressure: 0, timeStamp: time, pointerType, isEraser: false, isPredicted: false,
+    x, y: 0, pressure, hasRealPressure: kind === 'pen', tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null,
+    twist: 0, tangentialPressure: 0, timeStamp: time, kind, isEraser: false, isPredicted: false,
   };
 }
 
 const brush: BrushSettings = { ...DEFAULT_BRUSH, smoothing: 0, diameter: 20, spacing: 0.25 };
 
 describe('rawPressure', () => {
-  it('treats the mouse as full pressure', () => {
-    expect(rawPressure(sample(0, 0, 0.5, 'mouse'))).toBe(1);
-    expect(rawPressure(sample(0, 0, 0.3, 'pen'))).toBe(0.3);
+  it('uses pen pressure, and full pressure for mouse and finger', () => {
+    expect(rawPressure(sample(0, 0, 0.3, 'pen'), null, true)).toBe(0.3);
+    expect(rawPressure(sample(0, 0, 0.5, 'mouse'), null, false)).toBe(1);
+    expect(rawPressure(sample(0, 0, 0.2, 'touch'), null, false)).toBe(1);
+  });
+
+  it('can simulate pressure from speed: faster is lighter', () => {
+    const previous = { x: 0, y: 0, pressure: 1, time: 0 };
+    const at = (x: number) => rawPressure(sample(x, 10, 0.5, 'touch'), previous, true);
+    expect(at(0)).toBe(1); // still
+    expect(at(10)).toBeLessThan(1); // 1 px/ms
+    expect(at(10)).toBeGreaterThan(at(20));
+    expect(at(1000)).toBeCloseTo(0.25); // never thinner than the minimum
+    expect(rawPressure(sample(1000, 10, 0.5, 'touch'), previous, false)).toBe(1); // setting off
   });
 });
 

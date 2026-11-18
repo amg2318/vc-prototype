@@ -55,6 +55,7 @@ export class Controls {
         (s, v) => (s.pressureCurve = v as PressureCurvePreset)),
       this.checkbox('Pressure → size', (s) => s.pressureAffectsSize, (s, v) => (s.pressureAffectsSize = v)),
       this.checkbox('Pressure → opacity', (s) => s.pressureAffectsOpacity, (s, v) => (s.pressureAffectsOpacity = v)),
+      this.checkbox('Mouse/finger: pressure from speed', (s) => s.pressureFromSpeed, (s, v) => (s.pressureFromSpeed = v)),
       plainCheckbox('Two-finger rotate', false, actions.setRotationEnabled),
       buttons([
         ['Fit view', actions.fitView],
