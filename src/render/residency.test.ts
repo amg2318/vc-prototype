@@ -5,7 +5,7 @@ import { CompressedTileStore } from './tileBackingStore';
 
 const pixels = (value: number): Uint8Array => new Uint8Array(TILE_BYTES).fill(value);
 /** Let promise callbacks (compression, decompression) run. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
 
 function setup(capacity = 2) {
   const backing = new CompressedTileStore();

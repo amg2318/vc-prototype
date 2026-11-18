@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { TILE_BYTES } from '../config';
 import { TileStore } from '../document/tileStore';
 import { tileKey } from '../document/tiles';
+import { buildCanvasState } from '../app/compositeState';
+import { singleCanvasEditor } from '../workspace/workspace';
 import { TileResidency } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
 import { PyramidPlanner } from './pyramid';
@@ -102,7 +104,7 @@ describe('RenderCore', () => {
 
 describe('RenderCore with tile residency', () => {
   const style = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const };
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
   /** A core whose GPU holds only `capacity` layer tiles. */
   const small = (capacity: number) => new RenderCore(new PyramidPlanner(64, 64, 64), new TileResidency(capacity, new CompressedTileStore()));
   const kinds = (frame: { ops: { kind: string }[] }) => frame.ops.map((o) => o.kind);
@@ -179,5 +181,48 @@ describe('RenderCore with tile residency', () => {
     core.merge('a', [{ key: 0, src: null, dst: id }], style);
     expect(kinds(core.buildFrame(view, px))).toEqual([]);
     expect(core.residency.stats().resident).toBe(0);
+  });
+});
+
+describe('undo with evicted tiles', () => {
+  it('brings back the evicted "before" tiles of an undone stroke', async () => {
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 60));
+    const style = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const };
+    const editor = singleCanvasEditor(undefined, undefined, { width: 512, height: 512 });
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64), new TileResidency(4, new CompressedTileStore()));
+    core.useTileStore(editor.store);
+    const sync = () => core.setCanvases([buildCanvasState(editor.doc, null)]);
+    /** Run frames, answering eviction readbacks with recognisable pixels. */
+    const frames = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        const frame = core.buildFrame(view, px);
+        for (const op of frame.ops) if (op.kind === 'evict') op.done(new Uint8Array(TILE_BYTES).fill(op.slot + 1));
+        await settle();
+      }
+    };
+    sync();
+    const stroke = (keys: number[]) => {
+      core.merge(editor.doc.id, editor.commitStroke(editor.activeLayerId, keys, 'paint')!, style);
+      sync();
+    };
+
+    stroke([0, 1]); // tiles A at keys 0 and 1
+    await frames(1);
+    const before = [...editor.doc.layers[0]!.tiles.values()];
+    stroke([0, 1]); // replaces them; the old ones stay only in history
+    stroke([tileKey(0, 1), tileKey(1, 1)]); // more tiles: the GPU (4 slots) must evict
+    await frames(2);
+    const evicted = before.filter((id) => !core.residency.isResident(id));
+    expect(evicted.length).toBeGreaterThan(0);
+    const reloadsBefore = core.residency.stats().reloads;
+
+    editor.undo();
+    editor.undo(); // the layer shows the evicted "before" tiles again
+    sync();
+    core.invalidate(editor.doc.id, 'all');
+    await frames(4);
+    // Every evicted "before" tile was reloaded to recomposite the canvas.
+    expect(core.residency.stats().reloads - reloadsBefore).toBeGreaterThanOrEqual(evicted.length);
+    expect(core.residency.stats().loading).toBe(0);
   });
 });
