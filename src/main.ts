@@ -6,6 +6,7 @@ import { Controls } from './debug/controls';
 import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from './debug/exportMeasurements';
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
+import { createStressPanel } from './debug/stress';
 import { Editor } from './document/editor';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities } from './input/pointerInput';
@@ -211,7 +212,11 @@ async function main(): Promise<void> {
       },
       exportMeasurements() {
         const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
-        void saveMeasurements(buildExport(metrics, session(), tools.brush, label), label);
+        void saveMeasurements(buildExport(metrics, session(), tools.brush, label, {
+          ...editor.stats(),
+          atlasPages: renderer.pageCount,
+          gpuMemoryBytes: renderer.gpuMemoryBytes(),
+        }), label);
       },
       resetMeasurements() {
         metrics.reset();
@@ -258,6 +263,10 @@ async function main(): Promise<void> {
     if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
   }
   renderer.onLost = (message) => showBanner(message, true);
+
+  if (new URLSearchParams(location.search).has('stress')) {
+    controls.debugBody.append(createStressPanel({ editor, strokes, tools, report: (m) => showBanner(m, true) }));
+  }
 
   ui.append(toolbar.element, picker.element, controls.element, layersPanel.element, hud.element, loupe.element, banner);
   refreshUi();

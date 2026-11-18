@@ -56,6 +56,8 @@ export interface MetricsSummary {
   inputToSubmit: Stats;
   oldestInputToSubmit: Stats;
   inputToGpuDone: Stats;
+  /** Composite pass CPU encode time per frame that recomposited anything. */
+  compositeCpu: Stats;
   /** Composite GPU time per frame that recomposited anything (WebGPU timestamp queries only). */
   compositeGpu: Stats;
   /** Tiles recomposited per frame that recomposited anything. */
@@ -188,6 +190,7 @@ export class Metrics {
       inputToSubmit: computeStats(inputFrames.map((f) => f.inputToSubmitMs)),
       oldestInputToSubmit: computeStats(inputFrames.map((f) => f.oldestInputToSubmitMs)),
       inputToGpuDone: computeStats(inputFrames.map((f) => f.inputToGpuDoneMs)),
+      compositeCpu: computeStats(compositeFrames.map((f) => f.compositeCpuMs)),
       compositeGpu: computeStats(compositeFrames.map((f) => f.compositeGpuMs)),
       compositedTiles: computeStats(compositeFrames.map((f) => f.compositedTiles)),
     };
