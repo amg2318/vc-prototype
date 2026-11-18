@@ -84,6 +84,16 @@ describe('TouchGestures hold', () => {
     expect(g.holdingTouch).toBeNull();
   });
 
+  it('a second finger after a hold can still make a two-finger tap', () => {
+    const g = new TouchGestures();
+    g.down(1, p(0), FINGER, 0);
+    expect(g.checkHold(1)).toBe(true); // eyedropper tool: picks immediately
+    g.down(2, p(100), FINGER, 30);
+    g.releaseHold(); // the app cancels the pick
+    g.up(1, 120);
+    expect(g.up(2, 130)).toEqual({ fingers: 2 });
+  });
+
   it('no hold if the finger moved, a second finger came, or it is a palm', () => {
     const moved = new TouchGestures();
     moved.down(1, p(0), FINGER, 0);

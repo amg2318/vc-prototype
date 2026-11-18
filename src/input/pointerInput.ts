@@ -4,6 +4,9 @@ import { TouchNavigator } from './gestures';
 import { TouchGestures } from './touchGestures';
 import { isEraserEvent, penSampleFromEvent, type PenSample } from './penSample';
 
+/** `cancel`: a second finger landed (a pinch), so the pick should be undone. */
+export type EyedropperPhase = 'start' | 'move' | 'end' | 'cancel';
+
 /** What the input layer needs from the app. */
 export interface InputCallbacks {
   getView(): ViewTransform;
@@ -18,7 +21,7 @@ export interface InputCallbacks {
   /** True while the eyedropper tool is selected: pen/mouse then sample instead of drawing. */
   eyedropperActive(): boolean;
   /** Sample the visible colour at a point (screen CSS px and canvas px). */
-  eyedropper(phase: 'start' | 'move' | 'end', screen: Vec2, doc: Vec2): void;
+  eyedropper(phase: EyedropperPhase, screen: Vec2, doc: Vec2): void;
   /** A multi-finger tap on the canvas (2 = undo, 3 = redo). */
   tap(fingers: 2 | 3): void;
 }
@@ -89,7 +92,8 @@ export class PointerInput {
         this.callbacks.palmRejected();
         return;
       }
-      if (this.gestures.holdingTouch !== null) return; // eyedropper in progress
+      // A second finger during a finger eyedropper means a pinch: cancel the pick and navigate.
+      if (this.gestures.holdingTouch !== null) this.endHold('cancel');
       const p = this.screenPoint(e);
       if (this.touchPoints.size === 0) this.viewAtTouchStart = this.callbacks.getView();
       this.touchPoints.set(e.pointerId, p);
@@ -97,7 +101,10 @@ export class PointerInput {
       this.touch.down(e.pointerId, p, this.callbacks.getView(), e.timeStamp);
       this.canvas.setPointerCapture(e.pointerId);
       const id = e.pointerId;
-      window.setTimeout(() => this.startHold(id), GESTURES.holdDurationMs);
+      // With the eyedropper tool selected, one finger picks straight away;
+      // otherwise it takes a touch-and-hold.
+      if (this.callbacks.eyedropperActive()) this.startHold(id);
+      else window.setTimeout(() => this.startHold(id), GESTURES.holdDurationMs);
       return;
     }
 
@@ -215,15 +222,15 @@ export class PointerInput {
     this.callbacks.eyedropper('start', p, screenToDoc(this.callbacks.getView(), p));
   }
 
-  private endHold(): void {
+  private endHold(phase: 'end' | 'cancel' = 'end'): void {
     const id = this.gestures.holdingTouch;
     if (id === null) return;
-    this.gestures.cancel(id);
+    this.gestures.releaseHold();
     const p = this.touchPoints.get(id) ?? { x: 0, y: 0 };
-    this.callbacks.eyedropper('end', p, screenToDoc(this.callbacks.getView(), p));
+    this.callbacks.eyedropper(phase, p, screenToDoc(this.callbacks.getView(), p));
   }
 
-  private callEyedropper(phase: 'start' | 'move' | 'end', e: PointerEvent): void {
+  private callEyedropper(phase: EyedropperPhase, e: PointerEvent): void {
     const screen = this.screenPoint(e);
     this.callbacks.eyedropper(phase, screen, screenToDoc(this.callbacks.getView(), screen));
   }
