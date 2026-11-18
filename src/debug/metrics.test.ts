@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PenSample } from '../input/penSample';
-import { Metrics, computeStats, percentile, plausibleLatency, rateFromTimestamps } from './metrics';
+import { Metrics, computeStats, percentile, plausibleLatency, rateFromTimestamps, rateOfTotal } from './metrics';
 
 const sample = (timeStamp: number): PenSample => ({
   x: 0, y: 0, pressure: 0.5, hasRealPressure: true, tiltX: 0, tiltY: 0, altitudeAngle: null, azimuthAngle: null, twist: 0,
@@ -72,5 +72,22 @@ describe('Metrics', () => {
     m.frameRendered(10, 1, { submittedAt: 11, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false });
     expect(m.frames[0]!.inputToSubmitMs).toBeNull();
     expect(m.counters.implausibleTimestamps).toBe(1);
+  });
+});
+
+describe('rateOfTotal', () => {
+  it('measures a running total per second over the last second', () => {
+    const points = [
+      { t: 0, total: 0 },
+      { t: 500, total: 100 },
+      { t: 1000, total: 150 },
+      { t: 1500, total: 250 },
+    ];
+    expect(rateOfTotal(points, 1500)).toBeCloseTo(150); // (250 - 100) over 1 s
+  });
+
+  it('is null without two points in the window', () => {
+    expect(rateOfTotal([{ t: 0, total: 5 }], 0)).toBeNull();
+    expect(rateOfTotal([{ t: 0, total: 0 }, { t: 100, total: 9 }], 5000)).toBeNull();
   });
 });

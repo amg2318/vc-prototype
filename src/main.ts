@@ -1,4 +1,5 @@
 import './style.css';
+import { TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
 import { Controls } from './debug/controls';
@@ -79,7 +80,12 @@ async function main(): Promise<void> {
       visible: visibleWorkspaceRect(view, cssWidth, cssHeight),
       canvasPxPerDevicePx,
     });
-    metrics.frameRendered(rafTime, performance.now() - start, info);
+    const memory = renderer.memory();
+    metrics.frameRendered(rafTime, performance.now() - start, info, {
+      evictions: memory.evictions,
+      reloads: memory.reloads,
+      reloadTimes: renderer.takeReloadTimes(),
+    });
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
     if (info.moreWork) requestFrame();
   }
@@ -357,16 +363,21 @@ async function main(): Promise<void> {
   });
 
   const mb = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MB`;
+  const perSecond = (v: number | null): string => (v === null ? '—' : v.toFixed(0));
+  const ms = (v: number | null): string => (v === null ? '—' : v.toFixed(1));
   const hud = new Hud(metrics, rendererLabel, () => {
     const s = workspace.stats();
     const a = active()?.stats();
     const m = renderer.memory();
+    const r = metrics.residency();
     return [
       `canvases ${s.canvases} · active: ${a ? `${a.tileEntries} tiles in ${a.layers} layers` : 'none'}`,
-      `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
-      `evictions ${m.evictions} · reloads ${m.reloads}${m.loadingTiles ? ` (${m.loadingTiles} loading)` : ''}`,
+      `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} (${mb(m.residentTiles * TILE_BYTES)}) · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
+      `visible canvases ${metrics.frames.at(-1)?.visibleCanvases ?? '—'}`,
+      `evictions ${perSecond(r.evictionsPerSecond)}/s · reloads ${perSecond(r.reloadsPerSecond)}/s (total ${m.evictions} / ${m.reloads})${m.loadingTiles ? ` · ${m.loadingTiles} loading` : ''}`,
+      `reload ms ${ms(r.reloadMs.p50)} / ${ms(r.reloadMs.p95)}  (p50 / p95, last ${r.reloadMs.count})`,
       `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
-      `history ${s.historySteps} undo / ${s.redoSteps} redo · ${mb(s.historyBytes)}`,
+      `undo memory ${mb(s.historyBytes)} (${s.historySteps} undo / ${s.redoSteps} redo, at raw tile size)`,
       `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
       `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
     ];
