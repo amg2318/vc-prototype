@@ -27,6 +27,20 @@ export const ATLAS_PAGE_SIZE = 4096;
  */
 export const MAX_ATLAS_PAGES = 8;
 
+/**
+ * Composite cache: each canvas's composite is a pyramid of tiles at full,
+ * ½, ¼, ⅛ and 1/16 resolution (levels 0–4), cached in two GPU pools:
+ *  - level 0 (full resolution), including per-frame scratch tiles;
+ *  - levels 1–4 (previews). Levels from PINNED_PREVIEW_LEVEL up are never
+ *    evicted, so every canvas always has something to show.
+ * Least recently shown tiles are evicted when a pool is full.
+ */
+export const COMPOSITE_LEVEL0_PAGES = 1;
+export const COMPOSITE_PREVIEW_PAGES = 2;
+export const PINNED_PREVIEW_LEVEL = 3;
+/** Level-0 composites the planner may add per frame beyond the visible, already-cached tiles. */
+export const COMPOSITES_PER_FRAME = 48;
+
 /** Undo history may hold this many bytes of tiles that the document no longer uses. */
 export const HISTORY_BUDGET_BYTES = 256 * 1024 * 1024;
 
