@@ -82,6 +82,8 @@ export class RenderCore {
   readonly queue = new FrameQueue();
   readonly planner: PyramidPlanner;
   readonly residency: TileResidency;
+  /** See `Renderer.onCompositeChanged`. */
+  onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null = null;
   private canvases: CanvasRenderState[] = [];
   private readonly byId = new Map<CanvasId, CanvasRenderState>();
   /** Work waiting for tiles to reload, oldest first. */
@@ -142,7 +144,11 @@ export class RenderCore {
   }
 
   invalidate(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void {
-    this.planner.invalidate(canvasId, keys === 'all' ? 'all' : this.insideCanvas(canvasId, keys));
+    const inside = keys === 'all' ? 'all' : this.insideCanvas(canvasId, keys);
+    this.planner.invalidate(canvasId, inside);
+    const c = this.byId.get(canvasId);
+    const dirty = c ? dirtyRect(inside, c.placement) : null;
+    if (dirty) this.onCompositeChanged?.(canvasId, dirty);
   }
 
   setOverlay(rects: readonly OverlayRect[]): void {
@@ -444,6 +450,28 @@ function pageRuns(slots: readonly TileSlot[]): { page: number; first: number; co
     else runs.push({ page, first: i, count: 1 });
   });
   return runs;
+}
+
+/**
+ * The canvas-pixel rectangle covering changed tiles, clipped to the canvas
+ * ('all' = the whole canvas). Null if nothing changed.
+ */
+export function dirtyRect(keys: readonly TileKey[] | 'all', size: { width: number; height: number }): Rect | null {
+  const canvas = { x: 0, y: 0, width: size.width, height: size.height };
+  if (keys === 'all') return canvas;
+  if (keys.length === 0) return null;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const k of keys) {
+    const { tx, ty } = tileCoords(k);
+    x0 = Math.min(x0, tx * TILE_SIZE);
+    y0 = Math.min(y0, ty * TILE_SIZE);
+    x1 = Math.max(x1, (tx + 1) * TILE_SIZE);
+    y1 = Math.max(y1, (ty + 1) * TILE_SIZE);
+  }
+  return intersect(canvas, { x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
 }
 
 /** Grid spacing (workspace px) is TILE_SIZE × a power of two, at least this many device px apart. */

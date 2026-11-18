@@ -124,6 +124,13 @@ export interface Renderer {
   onLost: ((message: string) => void) | null;
   /** Called when work becomes ready without any app change (e.g. a tile finished reloading). */
   onNeedsFrame: (() => void) | null;
+  /**
+   * Phase 3 hook: a canvas's composite changed (or will on the next frame)
+   * inside `dirty`, in canvas pixels. Covers strokes in progress, merges,
+   * undo, layer changes and resizes; it can fire many times per frame while
+   * drawing, so listeners should coalesce.
+   */
+  onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null;
   memory(): RendererMemory;
   /** Reload latencies (ms) since the last call. */
   takeReloadTimes(): number[];

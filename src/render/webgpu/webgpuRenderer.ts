@@ -9,6 +9,7 @@ import {
   TILE_SIZE,
 } from '../../config';
 import type { CanvasId } from '../../document/paintDocument';
+import type { Rect } from '../../workspace/coords';
 import type { TileStore } from '../../document/tileStore';
 import { slotLocation, type TileId, type TileKey, type TileSlot } from '../../document/tiles';
 import {
@@ -124,6 +125,7 @@ export class WebGPURenderer implements Renderer {
   readonly maxCanvasSize: number;
   onLost: ((message: string) => void) | null = null;
   onNeedsFrame: (() => void) | null = null;
+  onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null = null;
 
   private readonly core: RenderCore;
   private lost = false;
@@ -212,6 +214,7 @@ export class WebGPURenderer implements Renderer {
   ) {
     this.core = RenderCore.withLayerBudget(layerSlots);
     this.core.residency.onReloaded = () => this.onNeedsFrame?.();
+    this.core.onCompositeChanged = (canvasId, dirty) => this.onCompositeChanged?.(canvasId, dirty);
     this.canvasFormat = canvasFormat;
     this.maxCanvasSize = device.limits.maxTextureDimension2D;
     void device.lost.then((info) => {

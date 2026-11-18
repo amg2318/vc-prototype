@@ -7,7 +7,7 @@ import { singleCanvasEditor } from '../workspace/workspace';
 import { TileResidency } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
 import { PyramidPlanner } from './pyramid';
-import { backgroundGrid, clipQuad, RenderCore, retileCopies, SOLID_QUAD_FLOATS } from './renderCore';
+import { backgroundGrid, clipQuad, dirtyRect, RenderCore, retileCopies, SOLID_QUAD_FLOATS } from './renderCore';
 import type { CanvasRenderState, ViewState } from './renderer';
 
 function canvas(id: string, x: number, painted: number[] = []): CanvasRenderState {
@@ -240,5 +240,16 @@ describe('backgroundGrid', () => {
       const visible = { x: 0, y: 0, width: 2000 * zoom, height: 1500 * zoom };
       expect(backgroundGrid(visible, zoom).length).toBeLessThan(100);
     }
+  });
+});
+
+describe('dirtyRect', () => {
+  const size = { width: 300, height: 600 };
+  it('covers the changed tiles, clipped to the canvas', () => {
+    expect(dirtyRect([tileKey(1, 0), tileKey(1, 2)], size)).toEqual({ x: 256, y: 0, width: 44, height: 600 });
+  });
+  it('is the whole canvas for "all", and null for nothing', () => {
+    expect(dirtyRect('all', size)).toEqual({ x: 0, y: 0, width: 300, height: 600 });
+    expect(dirtyRect([], size)).toBeNull();
   });
 });
