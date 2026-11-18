@@ -1,14 +1,20 @@
-# VC Prototype: Phase 0 (feasibility spike)
+# VC Prototype: Phase 1 (painting core)
 
 A tablet-first web drawing tool, combining Procreate-style raster painting with Figma-style multi-canvas
-layout. **Phase 0 answers one question:** does pressure-sensitive drawing feel good enough in Safari on iPad
-with Apple Pencil?
+layout. **Phase 1 gate:** a finished sketch can be drawn on one canvas on an iPad, with no crashes.
 
-This phase is deliberately small: one 2048 × 2048 document, one round brush, pan/zoom, a measurement HUD
-and a PWA shell. Layers, tiles, undo, saving and multiple canvases are out of scope.
+Phase 1 adds the painting core on a single 4096 × 4096 canvas:
+- tiled layers (up to 32) with opacity, visibility and blend modes (normal, multiply);
+- an eraser to transparency;
+- undo/redo with a memory budget;
+- a layers panel, colour picker and eyedropper;
+- touch gestures and keyboard shortcuts.
 
-- [On-device test checklist](docs/ipad-checklist.md): what to try on the iPad and which numbers to record
-- [Phase 0 findings](docs/phase0-findings.md): desktop measurements, known issues and concerns
+Saving and multiple canvases are later phases.
+
+- [Phase 1 on-device checklist](docs/phase1-ipad-checklist.md): what to try on the iPad
+- [Phase 1 findings](docs/phase1-findings.md): design decisions, desktop measurements, risks to check on device
+- [Phase 0 checklist](docs/ipad-checklist.md) and [Phase 0 findings](docs/phase0-findings.md)
 
 ## Quick start
 
@@ -87,26 +93,50 @@ push to `main`.
 
 ## Using the app
 
-| Input                         | Action                                                        |
-| ----------------------------- | ------------------------------------------------------------- |
-| Apple Pencil / pen            | Draw (pressure → size and opacity)                            |
-| Pen eraser end (Wacom etc.)   | Erase (paints white; there are no layers yet)                 |
-| Mouse, left button            | Draw at full pressure                                         |
-| Two fingers                   | Pan and pinch-zoom (rotation: tick "Two-finger rotate")       |
-| One finger                    | Nothing, so a resting finger or palm never moves the canvas   |
-| Mouse wheel / trackpad pinch  | Zoom at the cursor                                            |
-| Middle-drag, or Space + drag  | Pan                                                           |
-| `h`                           | Toggle HUD                                                    |
+| Input                              | Action                                                            |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| Apple Pencil / pen                 | Use the current tool (brush, eraser or eyedropper)                |
+| Pen eraser end (Wacom etc.)        | Erase to transparent, whatever tool is selected                   |
+| Mouse, left button                 | Use the current tool at full pressure                             |
+| Two fingers                        | Pan and pinch-zoom (rotation: tick "Two-finger rotate")           |
+| Two-finger tap / three-finger tap  | Undo / redo                                                       |
+| One finger, touch and hold         | Eyedropper (samples what you see: all visible layers + background) |
+| Mouse wheel / trackpad pinch       | Zoom at the cursor                                                |
+| Middle-drag, or Space + drag       | Pan                                                               |
 
-**Palm rejection:** while the pen is down, all touch input is ignored. If two touches (a palm) had already
-started a pinch when the pen lands, the view snaps back to where it was before that pinch.
+| Key                       | Action                       |
+| ------------------------- | ---------------------------- |
+| ⌘Z / Ctrl+Z               | Undo                         |
+| ⇧⌘Z / Ctrl+Shift+Z / Ctrl+Y | Redo                       |
+| B / E / I                 | Brush / eraser / eyedropper  |
+| [ / ]                     | Smaller / larger tool size   |
+| ⇧N                        | New layer                    |
+| H                         | Toggle HUD                   |
 
-**URL parameters:** `?renderer=webgl2` forces the WebGL2 fallback, and `?renderer=webgpu` is the default
-behaviour.
+**Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
+layers.
 
-**Debug panel:** brush size (document px), opacity, dab spacing (fraction of diameter), smoothing, pressure
-curve preset (`linear`, `soft`, `firm`, `sCurve`), pressure → size / opacity toggles, colour, two-finger
-rotate, clear canvas, fit view, toggle HUD, export JSON and reset stats.
+**Layers panel:** the top layer is listed first. Tap a row to select it. Use ● to show or hide a layer, and
+drag ≡ to reorder. The selected layer shows its opacity (one undo step per slider drag), blend mode, rename,
+duplicate, clear and delete. **Background** sets the paper colour, which the eraser never removes.
+
+**Palm rejection:** while the pen is down, all touch input is ignored. If a palm had already started a
+pinch when the pen lands, the view snaps back. Touches with a large contact area
+(`GESTURES.palmContactPx` in `src/config.ts`) never count as taps or holds. All gesture thresholds live in
+that one object.
+
+**Memory limits:** tiles come from a fixed pool of 2048 tiles (512 MB). Undo history may use up to 256 MB
+of it, and the oldest steps are dropped first. If the drawing itself fills the pool, the stroke is refused
+and a banner explains why.
+
+**URL parameters:**
+- `?renderer=webgl2` forces the WebGL2 fallback.
+- `?stress` adds stress tests to the debug section: 200 strokes, fill 32 layers, undo/redo all, and fill the
+  pool.
+
+**Brush panel:** size and opacity of the current tool (the brush and eraser have separate settings). Under
+**Brush details & debug** are spacing, smoothing, the pressure curve, pressure → size / opacity,
+two-finger rotate, fit view, toggle HUD, export JSON and reset stats.
 
 ## Measurement HUD
 
@@ -123,7 +153,11 @@ The HUD shows the last 2 seconds and refreshes 4 times per second. Timing values
 | `in→submit ms`    | Newest input sample's timestamp → this frame's GPU work submitted                                         |
 | `oldest→submit`   | Same, measured from the oldest sample in the frame                                                        |
 | `in→gpu done ms`  | Newest sample → GPU reports the work finished (`onSubmittedWorkDone`, WebGPU only)                        |
+| `composite`       | Tiles recomposited per frame, composite CPU encode time, and composite GPU time (WebGPU with timestamp queries only) |
 | counters          | Strokes, strokes ended by `pointercancel`, and touches ignored by palm rejection                          |
+| `tiles … slots … pages` | Tile entries in the document, used/total pool slots (document + history), allocated atlas pages |
+| `gpu memory`      | Estimate of the textures the app allocated (atlas pages, masks, composite cache)                         |
+| `history`         | Undo/redo steps and the pool memory that only history keeps alive                                        |
 
 > **These latencies are estimates of software latency, not on-glass latency.** They start at the event's
 > timestamp (when the browser received the input) and stop when our GPU work was submitted or completed.
@@ -133,11 +167,12 @@ The HUD shows the last 2 seconds and refreshes 4 times per second. Timing values
 ### JSON export
 
 **Export JSON** asks for a label (for example `webgpu lowpower-off tab`). On the iPad it opens the share
-sheet (choose "Save to Files"). On desktop it downloads `phase0-<label>-<timestamp>.json`, which contains:
+sheet (choose "Save to Files"). On desktop it downloads `measurements-<label>-<timestamp>.json`, which contains:
 
 - `environment`: user agent, renderer and fallback reason, devicePixelRatio, CSS and backing sizes,
   coalesced/predicted event support, and whether the app is running as a home-screen app
 - `brush`: the brush settings at export time
+- `document`: layer/tile/slot counts, history steps and bytes, atlas pages and GPU memory
 - `counters` and `summary`: the HUD statistics over the whole recording, not just the last 2 seconds
 - `frames`: one record per rendered frame, with interval, CPU time, sample/event/dab counts and the
   latency estimates
@@ -148,40 +183,48 @@ Press **Reset stats** before each test run so every file covers exactly one conf
 
 ```
 src/
-  input/      PenSample type, pointer routing, two-finger gestures, browser-gesture blocking
-  brush/      pressure curve, stabilizer, dab interpolation, StrokeEngine (all pure logic)
-  render/     Renderer interface, shared CommandQueue, webgpu/ and webgl2/ backends
-  viewport/   document ↔ screen transform, zoom/pinch/fit math
-  debug/      metrics, HUD, controls, JSON export
-  pwa/        service worker template and registration
-  main.ts     wires everything together
+  config.ts   canvas size, tile size, layer/pool/history limits, gesture thresholds
+  document/   tiles, ref-counted TileStore, PaintDocument + layers, blend maths, Editor
+  history/    Command interface, History (budgeted undo/redo), the commands
+  app/        StrokeController (input → brush → GPU → undo step), composite state builder
+  tools/      current tool, brush/eraser settings, recent colours
+  input/      PenSample, pointer routing, two-finger navigation, tap/hold recogniser
+  brush/      pressure curve, stabilizer, dab interpolation, StrokeEngine (pure logic)
+  render/     Renderer interface, FrameQueue, packing helpers, webgpu/ and webgl2/ backends
+  ui/         toolbar, layers panel, colour picker, thumbnails, loupe, shortcuts
+  viewport/   document ↔ screen transform
+  debug/      metrics, HUD, controls, JSON export, stress tests
 ```
 
-**Data flow:** `PointerEvent` → `PenSample` (document coordinates, every coalesced sample) →
-`StrokeEngine` (stabilizer → pressure curve → size/opacity → evenly spaced dabs) → `Renderer`.
-Predicted samples go through copies of the stabilizer and interpolator, so they never change the real
-stroke.
+**Document model (CPU, no pixels):**
+- A layer is a sparse map from tile key to *tile slot*. Tiles are 256 × 256 and only exist where something
+  was painted.
+- Slots are reference-counted by `TileStore`. Tiles are **immutable**: a stroke never changes a tile in
+  place. It writes "old tile + stroke" into a fresh slot.
+- An undo step therefore just holds references to the old slots. Undo and redo swap references, and
+  duplicating a layer shares its tiles.
+- Every command carries a `canvasId`, ready for multiple canvases.
 
-**Rendering model:**
+**GPU:**
+- **Tile pool.** Slots live in 4096² `rgba8` atlas pages (256 tiles, 64 MB each), allocated on demand up to
+  8 pages. Pixels are 8-bit premultiplied alpha throughout.
+- **Strokes.** While drawing, dabs go into a canvas-sized stroke mask and the compositor shows them on the
+  active layer. On pen-up, each touched tile is copied into its new slot and the mask is blended on: source-over
+  to paint, destination-out to erase.
+- **Freeing erased tiles.** After an eraser stroke, a small GPU reduction finds tiles that became fully
+  transparent so they can be freed.
+- **Compositor.** One instanced draw over the dirty tiles. Per pixel, it starts with the paper colour and
+  blends each visible layer's tile (found through a tile lookup texture) with that layer's opacity and blend
+  mode. The result is cached in a canvas-sized texture, and only dirty tiles are recomposited.
+- **Display.** The display pass draws the cache through the viewport and box-filters it when zoomed out.
+- **Batching.** Input handlers only queue work in a `FrameQueue`, which is drained once per animation frame.
 
-- **Textures.** There are three document-sized textures: the document (`rgba8`), a stroke mask (`r8`) and a
-  prediction mask (`r8`).
-- **Stamping.** Dabs are stamped into the masks as instanced quads with MAX blending, so overlapping dabs
-  keep the highest coverage instead of building up opacity.
-- **Display.** Each frame draws the document through the viewport matrix and mixes the live stroke mask on
-  top.
-- **Merge.** When the stroke ends, the mask is composited into the document once, at the stroke's opacity.
-  The prediction mask is cleared and redrawn every frame.
-- **Batching.** Input handlers only queue work. `render()` runs once per animation frame, and only when
-  something has changed.
+**Data flow:** `PointerEvent` → `PenSample` → `StrokeEngine` (dabs) → `StrokeController` → renderer
+(mask). On pen-up, `Editor.commitStroke` (new slots + undo step) → `renderer.mergeStroke`. The editor's
+change events tell the renderer which tiles to recomposite and which thumbnails to refresh.
 
-**Coordinates:** all brush and document logic works in document pixels. The viewport transform
-(`scale`, `rotation`, `tx`, `ty`) is the only link to the screen, so later phases can give each canvas in
-the workspace its own document space.
-
-**Renderer interface:** the interface is deliberately narrow (`beginStroke`, `addStrokeDabs`,
-`setPredictedDabs`, `endStroke`, `clearDocument`, `render`) so that tiling and layers can change the
-internals later without touching input or brush code.
+**Phase 3 hook:** the compositor takes a list of generic *sources*, not layers. That way, inherited content
+from other canvases can later be added as extra sources at the bottom.
 
 ## Licence
 
