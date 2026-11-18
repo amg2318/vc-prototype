@@ -153,13 +153,14 @@ export function fitToView(
  * (x right, y up, both in [-1, 1]) for a view of the given CSS size.
  * Both WebGPU and WebGL2 use this convention for the final screen pass.
  */
-export function docToClipMatrix(v: ViewTransform, viewWidth: number, viewHeight: number): Float32Array {
+export function docToClipMatrix(v: ViewTransform, viewWidth: number, viewHeight: number): Float64Array {
   const c = Math.cos(v.rotation) * v.scale;
   const s = Math.sin(v.rotation) * v.scale;
   const sx = 2 / viewWidth;
   const sy = -2 / viewHeight; // screen y points down, clip y points up
   // screen = [c -s tx; s c ty];  clip = [sx 0 -1; 0 sy 1] · screen
-  return new Float32Array([
+  // Double precision: the renderer maps far-away canvases on the CPU (see RenderCore).
+  return new Float64Array([
     sx * c, sy * s, 0, // column 0
     -sx * s, sy * c, 0, // column 1
     sx * v.tx - 1, sy * v.ty + 1, 1, // column 2

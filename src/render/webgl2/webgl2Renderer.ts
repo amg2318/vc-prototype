@@ -1,13 +1,13 @@
 import {
   ATLAS_PAGE_SIZE,
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
+  COMPOSITE_LEVEL0_PAGES,
   MAX_ATLAS_PAGES,
   PAGE_BYTES,
   THUMBNAIL_SIZE,
   TILE_COUNT,
   TILE_SIZE,
 } from '../../config';
+import type { CanvasId } from '../../document/paintDocument';
 import { slotLocation, type TileKey, type TileSlot } from '../../document/tiles';
 import {
   COMPOSITE_UNIFORM_VEC4S,
@@ -17,14 +17,24 @@ import {
   MERGE_INSTANCE_FLOATS,
   emptyTilesFromReadback,
   groupByDstPage,
-  packCompositeUniforms,
-  packLookup,
   packMergeInstance,
   packThumbnailInstances,
-  packTileOrigins,
 } from '../compositePacking';
-import { DAB_FLOATS, DAB_HARDNESS, FrameQueue, ensureCapacity, packDabs, type Readback } from '../frameQueue';
-import type { CompositeState, Dab, FrameInfo, MergeJob, Renderer, Rgba8, StrokeStyle } from '../renderer';
+import { DAB_FLOATS, DAB_HARDNESS, ensureCapacity, packDabs, type FrameOp, type Readback } from '../frameQueue';
+import type {
+  CanvasRenderState,
+  Dab,
+  FrameInfo,
+  MergeJob,
+  OverlayRect,
+  Renderer,
+  RendererMemory,
+  RetileJob,
+  Rgba8,
+  StrokeStyle,
+  ViewState,
+} from '../renderer';
+import { RenderCore, type Frame } from '../renderCore';
 import { WORKSPACE_BACKGROUND } from '../workspace';
 import * as S from './shaders';
 
@@ -38,7 +48,14 @@ interface Program {
   uniform(name: string): WebGLUniformLocation | null;
 }
 
+/** Compositor inputs of one canvas. */
+interface CanvasGl {
+  uniforms: Float32Array;
+  lookup: WebGLTexture;
+}
+
 const EMPTY_TARGET_WIDTH = EMPTY_CHECK_BATCH * EMPTY_CHECK_BLOCK;
+const LOOKUP_BYTES = TILE_COUNT * MAX_SOURCES * 4;
 
 export class WebGL2Renderer implements Renderer {
   readonly kind = 'webgl2' as const;
@@ -46,25 +63,26 @@ export class WebGL2Renderer implements Renderer {
   onLost: ((message: string) => void) | null = null;
 
   private readonly gl: WebGL2RenderingContext;
-  private readonly queue = new FrameQueue();
+  private readonly core = new RenderCore();
   private lost = false;
 
-  private readonly pages: Target[] = [];
+  private readonly layerPages: Target[] = [];
+  private readonly level0Pages: Target[] = [];
+  private readonly previewPages: Target[] = [];
+  private readonly canvasGl = new Map<CanvasId, CanvasGl>();
   private readonly dummyPage: WebGLTexture;
-  private readonly composite: Target;
   private readonly strokeMask: Target;
   private readonly predictionMask: Target;
   private readonly scratchTile: Target;
   private readonly emptyTarget: Target;
   private readonly thumbTarget: Target;
-  private readonly lookup: WebGLTexture;
-  private readonly lookupData = new Uint32Array(TILE_COUNT * MAX_SOURCES);
-  private compositeUniforms: Float32Array;
 
   private readonly dabProgram: Program;
   private readonly mergeProgram: Program;
   private readonly compositeProgram: Program;
+  private readonly downsampleProgram: Program;
   private readonly displayProgram: Program;
+  private readonly solidProgram: Program;
   private readonly emptyProgram: Program;
   private readonly thumbProgram: Program;
 
@@ -97,36 +115,34 @@ export class WebGL2Renderer implements Renderer {
     });
 
     this.dummyPage = this.createTexture(1, 1, gl.RGBA8, false);
-    this.composite = this.createTarget(CANVAS_WIDTH, CANVAS_HEIGHT, gl.RGBA8, true);
-    this.strokeMask = this.createTarget(CANVAS_WIDTH, CANVAS_HEIGHT, gl.R8);
-    this.predictionMask = this.createTarget(CANVAS_WIDTH, CANVAS_HEIGHT, gl.R8);
+    this.strokeMask = this.createTarget(S.MASK_SIZE, S.MASK_SIZE, gl.R8);
+    this.predictionMask = this.createTarget(S.MASK_SIZE, S.MASK_SIZE, gl.R8);
     this.scratchTile = this.createTarget(TILE_SIZE, TILE_SIZE, gl.RGBA8);
     this.emptyTarget = this.createTarget(EMPTY_TARGET_WIDTH, EMPTY_CHECK_BLOCK, gl.RGBA8);
     this.thumbTarget = this.createTarget(THUMBNAIL_SIZE, THUMBNAIL_SIZE, gl.RGBA8);
-    this.lookup = this.createTexture(TILE_COUNT, MAX_SOURCES, gl.R32UI, false);
-    this.compositeUniforms = packCompositeUniforms(this.queue.compositeState);
 
     this.dabProgram = this.createProgram(S.DAB_VS, S.DAB_FS);
     this.mergeProgram = this.createProgram(S.MERGE_VS, S.MERGE_FS);
     this.compositeProgram = this.createProgram(S.COMPOSITE_VS, S.COMPOSITE_FS);
+    this.downsampleProgram = this.createProgram(S.DOWNSAMPLE_VS, S.DOWNSAMPLE_FS);
     this.displayProgram = this.createProgram(S.DISPLAY_VS, S.DISPLAY_FS);
+    this.solidProgram = this.createProgram(S.SOLID_VS, S.SOLID_FS);
     this.emptyProgram = this.createProgram(S.EMPTY_CHECK_VS, S.EMPTY_CHECK_FS);
     this.thumbProgram = this.createProgram(S.THUMBNAIL_VS, S.THUMBNAIL_FS);
 
     // Quad corners come from gl_VertexID; all per-instance data goes through one buffer.
     this.vao = gl.createVertexArray()!;
     this.instanceBuffer = gl.createBuffer()!;
-
-    for (const t of [this.composite, this.strokeMask, this.predictionMask]) this.clear(t, 0, 0, 0, 0);
   }
 
-  get pageCount(): number {
-    return this.pages.length;
-  }
-
-  gpuMemoryBytes(): number {
-    const canvasPixels = CANVAS_WIDTH * CANVAS_HEIGHT;
-    return this.pages.length * PAGE_BYTES + canvasPixels * 4 + canvasPixels * 2 + TILE_COUNT * MAX_SOURCES * 4;
+  memory(): RendererMemory {
+    const compositePages = this.level0Pages.length + this.previewPages.length;
+    const masks = S.MASK_SIZE * S.MASK_SIZE * 2;
+    return {
+      layerPages: this.layerPages.length,
+      compositePages,
+      bytes: (this.layerPages.length + compositePages) * PAGE_BYTES + masks + this.canvasGl.size * LOOKUP_BYTES,
+    };
   }
 
   resize(pixelWidth: number, pixelHeight: number): void {
@@ -135,87 +151,108 @@ export class WebGL2Renderer implements Renderer {
     if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   }
 
-  beginStroke(): void {
-    this.queue.clearMask();
+  setCanvases(canvases: readonly CanvasRenderState[]): void {
+    this.core.setCanvases(canvases);
+  }
+
+  invalidateTiles(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void {
+    this.core.invalidate(canvasId, keys);
+  }
+
+  setOverlay(rects: readonly OverlayRect[]): void {
+    this.core.setOverlay(rects);
+  }
+
+  beginStroke(canvasId: CanvasId): void {
+    this.core.beginStroke(canvasId);
   }
 
   addStrokeDabs(dabs: readonly Dab[]): void {
-    this.queue.addDabs(dabs);
+    this.core.addDabs(dabs);
   }
 
   setPredictedDabs(dabs: readonly Dab[]): void {
-    this.queue.setPrediction(dabs);
+    this.core.setPrediction(dabs);
   }
 
-  mergeStroke(jobs: readonly MergeJob[], style: StrokeStyle): void {
-    if (jobs.length === 0) return;
-    this.ensurePages(Math.max(...jobs.map((j) => slotLocation(j.dst).page)) + 1);
-    this.queue.merge(jobs, style);
+  mergeStroke(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void {
+    this.ensureLayerPages(jobs.map((j) => j.dst));
+    this.core.merge(canvasId, jobs, style);
   }
 
-  setCompositeState(state: CompositeState): void {
-    this.queue.setState(state);
+  retile(canvasId: CanvasId, jobs: readonly RetileJob[]): void {
+    this.ensureLayerPages(jobs.map((j) => j.dst));
+    this.core.retile(jobs);
+    this.core.invalidate(canvasId, 'all');
   }
 
-  invalidateTiles(keys: readonly TileKey[] | 'all'): void {
-    this.queue.invalidate(keys);
-  }
-
-  readPixel(x: number, y: number): Promise<Rgba8> {
-    return new Promise((resolve) => this.queue.addReadback({ kind: 'pixel', x, y, resolve }));
+  readScreenPixel(x: number, y: number): Promise<Rgba8> {
+    return new Promise((resolve) => this.core.queue.addReadback({ kind: 'screenPixel', x, y, resolve }));
   }
 
   findEmptyTiles(slots: readonly TileSlot[]): Promise<boolean[]> {
-    return new Promise((resolve) => this.queue.addReadback({ kind: 'empty', slots: [...slots], resolve }));
+    return new Promise((resolve) => this.core.queue.addReadback({ kind: 'empty', slots: [...slots], resolve }));
   }
 
   readThumbnail(tiles: ReadonlyMap<TileKey, TileSlot>): Promise<Uint8Array> {
-    return new Promise((resolve) => this.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
+    return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
-  render(docToClip: Float32Array, texelsPerPixel: number): FrameInfo {
+  render(view: ViewState): FrameInfo {
     const gl = this.gl;
-    if (this.lost) return { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, compositeCpuMs: 0 };
-    const frame = this.queue.drain();
-
-    for (const op of frame.ops) {
-      if (op.kind === 'clearMask') this.clear(this.strokeMask, 0, 0, 0, 0);
-      else if (op.kind === 'dabs') this.drawDabs(this.strokeMask, op.dabs);
-      else this.merge(op.jobs, op.style);
-    }
-    if (frame.prediction) {
-      this.clear(this.predictionMask, 0, 0, 0, 0);
-      this.drawDabs(this.predictionMask, frame.prediction);
-    }
-
+    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0 };
+    if (this.lost) return idle;
     const compositeStart = performance.now();
-    if (frame.state) {
-      this.compositeUniforms = packCompositeUniforms(frame.state);
-      packLookup(frame.state, this.lookupData);
-      gl.bindTexture(gl.TEXTURE_2D, this.lookup);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE_COUNT, MAX_SOURCES, gl.RED_INTEGER, gl.UNSIGNED_INT, this.lookupData);
-    }
-    if (frame.dirty.length > 0) this.compositeTiles(frame.dirty);
+    const frame = this.core.buildFrame(view, [2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight]);
+    this.syncCompositePages();
+    for (const id of frame.removedCanvases) this.releaseCanvas(id);
+
+    this.runLayerOps(frame.ops, frame.prediction);
+    this.runComposites(frame);
     const compositeCpuMs = performance.now() - compositeStart;
 
-    this.drawDisplay(docToClip, texelsPerPixel);
+    this.drawDisplay(frame.display);
+    // Readbacks run after the display pass, so a screen pixel shows this frame.
     for (const r of frame.readbacks) this.runReadback(r);
     gl.flush();
-    return { submittedAt: performance.now(), gpuDone: null, compositedTiles: frame.dirty.length, compositeCpuMs };
+    return {
+      submittedAt: performance.now(),
+      gpuDone: null,
+      compositedTiles: frame.stats.composited,
+      downsampledTiles: frame.stats.downsampled,
+      visibleCanvases: frame.stats.visibleCanvases,
+      compositeCpuMs,
+    };
   }
 
   destroy(): void {
     this.gl.getExtension('WEBGL_lose_context')?.loseContext();
   }
 
-  // --- passes -------------------------------------------------------------
+  // --- layer tile work ----------------------------------------------------------
+
+  private runLayerOps(ops: readonly FrameOp[], prediction: Dab[] | null): void {
+    for (const op of ops) {
+      if (op.kind === 'clearMask') this.clear(this.strokeMask, 0, 0, 0, 0);
+      else if (op.kind === 'dabs') this.drawDabs(this.strokeMask, op.dabs);
+      else if (op.kind === 'merge') this.merge(op);
+      else {
+        for (const slot of op.zero) this.clearSlot(slot);
+        for (const c of op.copies) this.copyRegion(c.src, c.sx, c.sy, c.dst, c.dx, c.dy, c.width, c.height);
+      }
+    }
+    if (prediction) {
+      this.clear(this.predictionMask, 0, 0, 0, 0);
+      this.drawDabs(this.predictionMask, prediction);
+    }
+  }
 
   private drawDabs(target: Target, dabs: readonly Dab[]): void {
     if (dabs.length === 0) return;
     const gl = this.gl;
     this.staging = ensureCapacity(this.staging, dabs.length * DAB_FLOATS);
     packDabs(dabs, this.staging, 0);
-    this.bindTarget(target, CANVAS_WIDTH, CANVAS_HEIGHT);
+    this.bindTarget(target, S.MASK_SIZE, S.MASK_SIZE);
     gl.useProgram(this.dabProgram.program);
     gl.uniform1f(this.dabProgram.uniform('u_hardness'), DAB_HARDNESS);
     this.setInstances(this.staging, dabs.length * DAB_FLOATS, [4]);
@@ -231,73 +268,111 @@ export class WebGL2Renderer implements Renderer {
    * source tile into place, then blend the mask on top with premultiplied
    * source-over, which is exactly paint (colour·m) or erase (0, alpha m).
    */
-  private merge(jobs: readonly MergeJob[], style: StrokeStyle): void {
+  private merge(op: Extract<FrameOp, { kind: 'merge' }>): void {
     const gl = this.gl;
-    for (const job of jobs) {
-      const dst = slotLocation(job.dst);
-      const dstFb = this.pages[dst.page]!.framebuffer;
-      if (job.src === null) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, dstFb);
-        gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(dst.x, dst.y, TILE_SIZE, TILE_SIZE);
-        gl.clearColor(0, 0, 0, 0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.disable(gl.SCISSOR_TEST);
-        continue;
-      }
-      const src = slotLocation(job.src);
-      const srcFb = this.pages[src.page]!.framebuffer;
-      if (src.page === dst.page) {
-        // A framebuffer can't be blitted onto itself: go through the scratch tile.
-        this.blit(srcFb, src.x, src.y, this.scratchTile.framebuffer, 0, 0);
-        this.blit(this.scratchTile.framebuffer, 0, 0, dstFb, dst.x, dst.y);
-      } else {
-        this.blit(srcFb, src.x, src.y, dstFb, dst.x, dst.y);
-      }
+    for (const job of op.jobs) {
+      if (job.src === null) this.clearSlot(job.dst);
+      else this.copyRegion(job.src, 0, 0, job.dst, 0, 0, TILE_SIZE, TILE_SIZE);
     }
 
     gl.useProgram(this.mergeProgram.program);
     this.bindTexture(0, this.strokeMask.texture, this.mergeProgram, 'u_strokeMask');
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    for (const [page, pageJobs] of groupByDstPage(jobs)) {
+    for (const [page, pageJobs] of groupByDstPage(op.jobs)) {
       this.staging = ensureCapacity(this.staging, pageJobs.length * MERGE_INSTANCE_FLOATS);
-      pageJobs.forEach((job, i) => packMergeInstance(job, style, this.staging, i));
-      this.bindTarget(this.pages[page]!, ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE);
+      pageJobs.forEach((job, i) => packMergeInstance(job, op.style, op.canvas, this.staging, i));
+      this.bindTarget(this.layerPages[page]!, ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE);
       this.setInstances(this.staging, pageJobs.length * MERGE_INSTANCE_FLOATS, [4, 4, 4]);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, pageJobs.length);
     }
     gl.disable(gl.BLEND);
   }
 
-  private compositeTiles(dirty: readonly TileKey[]): void {
+  private clearSlot(slot: TileSlot): void {
     const gl = this.gl;
-    const p = this.compositeProgram;
-    this.bindTarget(this.composite, CANVAS_WIDTH, CANVAS_HEIGHT);
-    gl.useProgram(p.program);
-    gl.uniform4fv(p.uniform('u_v'), this.compositeUniforms, 0, COMPOSITE_UNIFORM_VEC4S * 4);
-    this.bindTexture(0, this.lookup, p, 'u_lookup');
-    this.bindTexture(1, this.strokeMask.texture, p, 'u_strokeMask');
-    this.bindTexture(2, this.predictionMask.texture, p, 'u_predictionMask');
-    this.bindPages(3, p);
-    const origins = packTileOrigins(dirty);
-    this.setInstances(origins, origins.length, [2]);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, dirty.length);
+    const d = slotLocation(slot);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.layerPages[d.page]!.framebuffer);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(d.x, d.y, TILE_SIZE, TILE_SIZE);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
   }
 
-  private drawDisplay(docToClip: Float32Array, texelsPerPixel: number): void {
+  /** Copy a region between layer slots; a framebuffer can't be blitted onto itself, so same-page copies use a scratch tile. */
+  private copyRegion(src: TileSlot, sx: number, sy: number, dst: TileSlot, dx: number, dy: number, width: number, height: number): void {
+    const s = slotLocation(src);
+    const d = slotLocation(dst);
+    const srcFb = this.layerPages[s.page]!.framebuffer;
+    const dstFb = this.layerPages[d.page]!.framebuffer;
+    if (s.page === d.page) {
+      this.blit(srcFb, s.x + sx, s.y + sy, this.scratchTile.framebuffer, 0, 0, width, height);
+      this.blit(this.scratchTile.framebuffer, 0, 0, dstFb, d.x + dx, d.y + dy, width, height);
+    } else {
+      this.blit(srcFb, s.x + sx, s.y + sy, dstFb, d.x + dx, d.y + dy, width, height);
+    }
+  }
+
+  // --- composite pyramid ----------------------------------------------------------
+
+  private runComposites(frame: Frame): void {
     const gl = this.gl;
-    const p = this.displayProgram;
+    const p = this.compositeProgram;
+    for (const batch of frame.composites) {
+      const canvas = this.canvasResources(batch.canvasId);
+      if (batch.upload) {
+        canvas.uniforms = batch.upload.uniforms;
+        gl.bindTexture(gl.TEXTURE_2D, canvas.lookup);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE_COUNT, MAX_SOURCES, gl.RED_INTEGER, gl.UNSIGNED_INT, batch.upload.lookup);
+      }
+      gl.useProgram(p.program);
+      gl.uniform4fv(p.uniform('u_v'), canvas.uniforms, 0, COMPOSITE_UNIFORM_VEC4S * 4);
+      this.bindTexture(0, canvas.lookup, p, 'u_lookup');
+      this.bindTexture(1, this.strokeMask.texture, p, 'u_strokeMask');
+      this.bindTexture(2, this.predictionMask.texture, p, 'u_predictionMask');
+      this.bindPages(3, p, S.PAGE_UNIFORMS, this.layerPages);
+      for (const run of batch.runs) {
+        this.bindTarget(this.level0Pages[run.page]!, ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE);
+        this.setInstances(batch.instances.subarray(run.first * 4, (run.first + run.count) * 4), run.count * 4, [4]);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, run.count);
+      }
+    }
+
+    const down = frame.downsample;
+    if (down.runs.length === 0) return;
+    const dp = this.downsampleProgram;
+    gl.useProgram(dp.program);
+    this.bindPages(0, dp, S.LEVEL0_UNIFORMS, this.level0Pages);
+    for (const run of down.runs) {
+      this.bindTarget(this.previewPages[run.page]!, ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE);
+      this.setInstances(down.instances.subarray(run.first * 12, (run.first + run.count) * 12), run.count * 12, [4, 4, 4]);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, run.count);
+    }
+  }
+
+  private drawDisplay(display: Frame['display']): void {
+    const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     gl.clearColor(...WORKSPACE_BACKGROUND, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(p.program);
-    gl.uniformMatrix3fv(p.uniform('u_docToClip'), false, docToClip);
-    gl.uniform4f(p.uniform('u_params'), CANVAS_WIDTH, CANVAS_HEIGHT, texelsPerPixel, 0);
-    this.bindTexture(0, this.composite.texture, p, 'u_composite');
-    gl.bindVertexArray(this.vao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    for (const run of display.runs) {
+      if (run.kind === 'solid') {
+        gl.useProgram(this.solidProgram.program);
+        this.setInstances(display.solids.subarray(run.first * 12, (run.first + run.count) * 12), run.count * 12, [4, 4, 4]);
+      } else {
+        const p = this.displayProgram;
+        gl.useProgram(p.program);
+        const page = (run.pool === 'level0' ? this.level0Pages : this.previewPages)[run.page]!;
+        this.bindTexture(0, page.texture, p, 'u_tiles');
+        this.setInstances(display.tiles.subarray(run.first * 16, (run.first + run.count) * 16), run.count * 16, [4, 4, 4, 4]);
+      }
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, run.count);
+    }
+    gl.disable(gl.BLEND);
   }
 
   // --- readbacks (synchronous readPixels on small targets) -----------------------
@@ -305,13 +380,13 @@ export class WebGL2Renderer implements Renderer {
   private runReadback(r: Readback): void {
     const gl = this.gl;
     switch (r.kind) {
-      case 'pixel': {
+      case 'screenPixel': {
         const out = new Uint8Array(4);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this.composite.framebuffer);
-        const x = Math.min(CANVAS_WIDTH - 1, Math.max(0, Math.floor(r.x)));
-        const y = Math.min(CANVAS_HEIGHT - 1, Math.max(0, Math.floor(r.y)));
-        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
-        r.resolve([out[0]!, out[1]!, out[2]!, out[3]!]);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        const x = Math.min(gl.drawingBufferWidth - 1, Math.max(0, Math.floor(r.x)));
+        const y = Math.min(gl.drawingBufferHeight - 1, Math.max(0, Math.floor(r.y)));
+        gl.readPixels(x, gl.drawingBufferHeight - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out); // GL rows go bottom-up
+        r.resolve([out[0]!, out[1]!, out[2]!, 255]);
         return;
       }
       case 'thumbnail': {
@@ -321,7 +396,7 @@ export class WebGL2Renderer implements Renderer {
           this.bindTarget(this.thumbTarget, THUMBNAIL_SIZE, THUMBNAIL_SIZE);
           gl.useProgram(p.program);
           gl.uniform2f(p.uniform('u_targetSize'), THUMBNAIL_SIZE, THUMBNAIL_SIZE);
-          this.bindPages(0, p);
+          this.bindPages(0, p, S.PAGE_UNIFORMS, this.layerPages);
           const instances = packThumbnailInstances(r.tiles);
           this.setInstances(instances, instances.length, [4]);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, r.tiles.length);
@@ -342,7 +417,7 @@ export class WebGL2Renderer implements Renderer {
           this.bindTarget(this.emptyTarget, EMPTY_TARGET_WIDTH, EMPTY_CHECK_BLOCK);
           gl.useProgram(p.program);
           gl.uniform2f(p.uniform('u_targetSize'), EMPTY_TARGET_WIDTH, EMPTY_CHECK_BLOCK);
-          this.bindPages(0, p);
+          this.bindPages(0, p, S.PAGE_UNIFORMS, this.layerPages);
           const instances = new Float32Array(slots);
           this.setInstances(instances, instances.length, [1]);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, slots.length);
@@ -357,11 +432,37 @@ export class WebGL2Renderer implements Renderer {
 
   // --- resources and state helpers ---------------------------------------------
 
-  private ensurePages(count: number): void {
+  private ensureLayerPages(slots: readonly TileSlot[]): void {
+    if (slots.length === 0) return;
+    const count = Math.max(...slots.map((s) => slotLocation(s).page)) + 1;
     if (count > MAX_ATLAS_PAGES) throw new Error(`Tile pool limit: ${count} > ${MAX_ATLAS_PAGES} pages`);
-    while (this.pages.length < count) {
-      this.pages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8));
+    while (this.layerPages.length < count) this.layerPages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8));
+  }
+
+  /** Composite pages are sampled with bilinear filtering by the display pass. */
+  private syncCompositePages(): void {
+    const { level0Pool, previewPool } = this.core.planner;
+    const level0 = Math.min(level0Pool.pagesNeeded, COMPOSITE_LEVEL0_PAGES);
+    while (this.level0Pages.length < level0) this.level0Pages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8, true));
+    while (this.previewPages.length < previewPool.pagesNeeded) {
+      this.previewPages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8, true));
     }
+  }
+
+  private canvasResources(id: CanvasId): CanvasGl {
+    let c = this.canvasGl.get(id);
+    if (!c) {
+      c = { uniforms: new Float32Array(COMPOSITE_UNIFORM_VEC4S * 4), lookup: this.createTexture(TILE_COUNT, MAX_SOURCES, this.gl.R32UI, false) };
+      this.canvasGl.set(id, c);
+    }
+    return c;
+  }
+
+  private releaseCanvas(id: CanvasId): void {
+    const c = this.canvasGl.get(id);
+    if (!c) return;
+    this.gl.deleteTexture(c.lookup);
+    this.canvasGl.delete(id);
   }
 
   /** Point the vertex array at `floats` of `data`, split into instanced attributes of the given sizes. */
@@ -397,18 +498,16 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(program.uniform(name), unit);
   }
 
-  /** Bind every atlas page (unallocated ones to a 1×1 dummy) starting at texture unit `firstUnit`. */
-  private bindPages(firstUnit: number, program: Program): void {
-    S.PAGE_UNIFORMS.forEach((name, i) => {
-      this.bindTexture(firstUnit + i, this.pages[i]?.texture ?? this.dummyPage, program, name);
-    });
+  /** Bind a set of page textures (missing ones to a 1×1 dummy) starting at texture unit `firstUnit`. */
+  private bindPages(firstUnit: number, program: Program, names: readonly string[], pages: readonly Target[]): void {
+    names.forEach((name, i) => this.bindTexture(firstUnit + i, pages[i]?.texture ?? this.dummyPage, program, name));
   }
 
-  private blit(src: WebGLFramebuffer, sx: number, sy: number, dst: WebGLFramebuffer, dx: number, dy: number): void {
+  private blit(src: WebGLFramebuffer, sx: number, sy: number, dst: WebGLFramebuffer, dx: number, dy: number, w: number, h: number): void {
     const gl = this.gl;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst);
-    gl.blitFramebuffer(sx, sy, sx + TILE_SIZE, sy + TILE_SIZE, dx, dy, dx + TILE_SIZE, dy + TILE_SIZE, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.blitFramebuffer(sx, sy, sx + w, sy + h, dx, dy, dx + w, dy + h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
   }
@@ -421,8 +520,8 @@ export class WebGL2Renderer implements Renderer {
   }
 
   /**
-   * Immutable-storage texture. `linear` filtering is only used for the
-   * composite (sampled by the display pass); everything else is read with
+   * Immutable-storage texture. `linear` filtering is only used for composite
+   * pages (sampled by the display pass); everything else is read with
    * texelFetch, and integer textures must be NEAREST anyway.
    */
   private createTexture(width: number, height: number, internalFormat: number, linear: boolean): WebGLTexture {

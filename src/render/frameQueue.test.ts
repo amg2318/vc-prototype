@@ -1,48 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { TILE_COUNT, TILE_SIZE } from '../config';
-import { tileKey } from '../document/tiles';
 import { FrameQueue, packDabs } from './frameQueue';
 
 const dab = (x: number, y = 10) => ({ x, y, radius: 2, opacity: 1 });
-const paintStyle = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const };
 
 describe('FrameQueue', () => {
-  it('composites everything on the first frame, then only dirty tiles', () => {
+  it('records ops in order, coalescing consecutive dab batches', () => {
     const q = new FrameQueue();
-    expect(q.drain().dirty).toHaveLength(TILE_COUNT);
-    expect(q.drain().dirty).toEqual([]);
-    expect(q.hasWork).toBe(false);
-  });
-
-  it('records ops in order, coalescing consecutive dab batches, and marks dab tiles dirty', () => {
-    const q = new FrameQueue();
-    q.drain();
     q.clearMask();
     q.addDabs([dab(10)]);
-    q.addDabs([dab(TILE_SIZE + 10)]);
-    q.merge([{ key: 0, src: null, dst: 3 }], paintStyle);
+    q.addDabs([dab(20)]);
+    q.push({ kind: 'copies', zero: [1], copies: [] });
     const frame = q.drain();
-    expect(frame.ops.map((o) => o.kind)).toEqual(['clearMask', 'dabs', 'merge']);
-    expect(frame.dirty.sort()).toEqual([tileKey(0, 0), tileKey(1, 0)]);
+    expect(frame.ops.map((o) => o.kind)).toEqual(['clearMask', 'dabs', 'copies']);
+    expect(frame.ops[1]!.kind === 'dabs' && frame.ops[1]!.dabs).toHaveLength(2);
+    expect(q.drain().ops).toEqual([]);
   });
 
-  it('dirties both the old and the new prediction', () => {
+  it('reports the prediction only when it changed', () => {
     const q = new FrameQueue();
-    q.drain();
     q.setPrediction([dab(10)]);
-    q.drain();
-    q.setPrediction([dab(TILE_SIZE * 2 + 10)]);
-    const frame = q.drain();
-    expect(frame.prediction).toHaveLength(1);
-    expect(frame.dirty.sort()).toEqual([tileKey(0, 0), tileKey(2, 0)]);
-  });
-
-  it('reports composite state only when it changed', () => {
-    const q = new FrameQueue();
-    expect(q.drain().state).not.toBeNull();
-    expect(q.drain().state).toBeNull();
-    q.setState({ paper: [1, 1, 1], sources: [], liveStroke: null });
-    expect(q.drain().state).not.toBeNull();
+    expect(q.drain().prediction).toHaveLength(1);
+    expect(q.drain().prediction).toBeNull();
+    q.setPrediction([]);
+    expect(q.drain().prediction).toEqual([]);
+    q.setPrediction([]);
+    expect(q.drain().prediction).toBeNull();
   });
 });
 

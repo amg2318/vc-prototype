@@ -1,11 +1,12 @@
 import './style.css';
-import { buildCompositeState } from './app/compositeState';
+import { buildCanvasState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
 import { Controls } from './debug/controls';
 import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from './debug/exportMeasurements';
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
 import { createStressPanel } from './debug/stress';
+import { containsPoint, visibleWorkspaceRect } from './workspace/coords';
 import { singleCanvasEditor } from './workspace/workspace';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
@@ -48,8 +49,11 @@ async function main(): Promise<void> {
   function frame(rafTime: number): void {
     framePending = false;
     const start = performance.now();
-    const texelsPerPixel = 1 / (view.scale * window.devicePixelRatio);
-    const info = renderer.render(docToClipMatrix(view, cssWidth, cssHeight), texelsPerPixel);
+    const info = renderer.render({
+      workspaceToClip: docToClipMatrix(view, cssWidth, cssHeight),
+      visible: visibleWorkspaceRect(view, cssWidth, cssHeight),
+      canvasPxPerDevicePx: 1 / (view.scale * window.devicePixelRatio),
+    });
     metrics.frameRendered(rafTime, performance.now() - start, info);
   }
 
@@ -58,23 +62,26 @@ async function main(): Promise<void> {
     requestFrame();
   }
 
-  // --- document → compositor ----------------------------------------------
+  // --- workspace → compositor ----------------------------------------------
 
+  const workspace = editor.workspace;
   let liveStroke: ActiveStroke | null = null;
   function updateCompositeState(): void {
-    renderer.setCompositeState(buildCompositeState(editor.doc, liveStroke));
+    renderer.setCanvases(
+      workspace.canvases.map((doc) => buildCanvasState(doc, liveStroke?.canvasId === doc.id ? liveStroke : null)),
+    );
     requestFrame();
   }
   const thumbnails = new Thumbnails(editor, renderer, requestFrame);
   editor.onChange((change) => {
     updateCompositeState();
-    renderer.invalidateTiles(change.tiles);
+    renderer.invalidateTiles(change.canvasId, change.tiles);
     for (const id of change.layers) thumbnails.schedule(id);
     refreshUi();
   });
   updateCompositeState();
 
-  const strokes = new StrokeController(editor, renderer, tools, {
+  const strokes = new StrokeController(renderer, tools, {
     liveStrokeChanged(stroke) {
       liveStroke = stroke;
       updateCompositeState();
@@ -86,7 +93,7 @@ async function main(): Promise<void> {
       showBanner('Tile memory is full: that stroke could not be kept. Delete or clear layers to free memory.');
     },
     requestFrame,
-  });
+  }, (p) => (containsPoint(editor.doc.placement, p) ? editor : null));
 
   // --- canvas size and devicePixelRatio -----------------------------------
 
@@ -142,8 +149,8 @@ async function main(): Promise<void> {
       metrics.counters.palmRejections++;
     },
     eyedropperActive: () => tools.current === 'eyedropper',
-    eyedropper(phase, screen, doc) {
-      sampleColor(phase, screen, doc);
+    eyedropper(phase, screen) {
+      sampleColor(phase, screen);
       if (phase === 'end') tools.returnFromEyedropper();
     },
     tap(fingers) {
@@ -152,12 +159,12 @@ async function main(): Promise<void> {
     },
   });
 
-  // --- eyedropper: samples the composite (all visible layers + paper) ------------
+  // --- eyedropper: samples what is on screen (all visible layers + paper) ------------
 
   const loupe = new Loupe();
   let sampleSerial = 0;
   let colorBeforePick = tools.brush.color;
-  function sampleColor(phase: EyedropperPhase, screen: { x: number; y: number }, doc: { x: number; y: number }): void {
+  function sampleColor(phase: EyedropperPhase, screen: { x: number; y: number }): void {
     if (phase === 'end' || phase === 'cancel') {
       loupe.hide();
       if (phase === 'cancel') {
@@ -170,7 +177,8 @@ async function main(): Promise<void> {
     if (phase === 'start') colorBeforePick = [...tools.brush.color];
     loupe.show(screen, null);
     const serial = ++sampleSerial;
-    void renderer.readPixel(doc.x, doc.y).then((rgba) => {
+    const dpr = window.devicePixelRatio || 1;
+    void renderer.readScreenPixel(screen.x * dpr, screen.y * dpr).then((rgba) => {
       if (serial !== sampleSerial) return; // a newer sample is on its way
       const color = rgbFromPremultiplied8(rgba);
       tools.setColor(color);
@@ -198,8 +206,8 @@ async function main(): Promise<void> {
   const hud = new Hud(metrics, rendererLabel, () => {
     const s = editor.stats();
     return [
-      `tiles ${s.tileEntries} in ${s.layers} layers · slots ${s.usedSlots}/${s.capacitySlots} · pages ${renderer.pageCount}`,
-      `gpu memory ≈ ${mb(renderer.gpuMemoryBytes())}`,
+      `tiles ${s.tileEntries} in ${s.layers} layers · slots ${s.usedSlots}/${s.capacitySlots} · pages ${renderer.memory().layerPages}`,
+      `gpu memory ≈ ${mb(renderer.memory().bytes)} (composite pages ${renderer.memory().compositePages})`,
       `history ${s.historySteps} undo / ${s.redoSteps} redo · ${mb(s.historyBytes)}`,
       `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
       `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
@@ -220,8 +228,8 @@ async function main(): Promise<void> {
         const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
         void saveMeasurements(buildExport(metrics, session(), tools.brush, label, {
           ...editor.stats(),
-          atlasPages: renderer.pageCount,
-          gpuMemoryBytes: renderer.gpuMemoryBytes(),
+          atlasPages: renderer.memory().layerPages,
+          gpuMemoryBytes: renderer.memory().bytes,
         }), label);
       },
       resetMeasurements() {

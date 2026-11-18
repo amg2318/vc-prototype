@@ -2,16 +2,20 @@ import type { BrushSettings } from '../brush/brushSettings';
 import type { Dab } from '../brush/dabs';
 import { StrokeEngine } from '../brush/strokeEngine';
 import type { Editor, StrokeMode } from '../document/editor';
-import type { LayerId } from '../document/paintDocument';
+import type { CanvasId, LayerId } from '../document/paintDocument';
 import { DirtyTiles } from '../document/tiles';
 import type { PenSample } from '../input/penSample';
 import type { Renderer, StrokeStyle } from '../render/renderer';
 import type { ToolState } from '../tools/tools';
 
 export interface ActiveStroke {
+  canvasId: CanvasId;
   layerId: LayerId;
   style: StrokeStyle;
 }
+
+/** Finds the canvas a stroke starting at a workspace point draws on (null: none, the stroke does nothing). */
+export type StrokeTarget = (p: { x: number; y: number }) => Editor | null;
 
 export interface StrokeEvents {
   /** The live stroke started or ended (the composite state must be rebuilt). */
@@ -24,7 +28,9 @@ export interface StrokeEvents {
 }
 
 /**
- * One brush or eraser stroke from pen-down to pen-up:
+ * One brush or eraser stroke from pen-down to pen-up, on the canvas where it
+ * started (samples arrive in workspace coordinates and are converted to that
+ * canvas's pixels; the merge clips the stroke to the canvas):
  *
  *  - while drawing, dabs go into the renderer's stroke mask and the
  *    compositor shows them on the active layer (nothing is written to tiles);
@@ -38,12 +44,13 @@ export class StrokeController {
   private readonly engine: StrokeEngine;
   private readonly dirty = new DirtyTiles();
   private active: ActiveStroke | null = null;
+  private editor: Editor | null = null;
 
   constructor(
-    private readonly editor: Editor,
     private readonly renderer: Renderer,
     private readonly tools: ToolState,
     private readonly events: StrokeEvents,
+    private readonly targetAt: StrokeTarget,
   ) {
     this.engine = new StrokeEngine(tools.brush);
   }
@@ -52,42 +59,50 @@ export class StrokeController {
     return this.active;
   }
 
-  begin(sample: PenSample): void {
+  begin(workspaceSample: PenSample): void {
+    const editor = this.targetAt(workspaceSample);
+    if (!editor) return;
+    this.editor = editor;
+    const sample = this.toCanvas(workspaceSample);
     // The eraser end of a pen erases for this stroke, whatever tool is selected.
     const mode: StrokeMode = sample.isEraser || this.tools.current === 'eraser' ? 'erase' : 'paint';
     const settings: BrushSettings = mode === 'erase' ? this.tools.eraser : this.tools.brush;
     this.active = {
-      layerId: this.editor.activeLayerId,
+      canvasId: editor.doc.id,
+      layerId: editor.activeLayerId,
       style: { color: [...settings.color], opacity: settings.opacity, mode },
     };
     this.dirty.clear();
-    this.renderer.beginStroke();
+    this.renderer.beginStroke(editor.doc.id);
     this.queueDabs(this.engine.begin(sample, settings), []);
     this.events.liveStrokeChanged(this.active);
   }
 
   move(samples: readonly PenSample[], predicted: readonly PenSample[]): void {
     if (!this.active) return;
-    this.queueDabs(this.engine.add(samples), this.engine.predict(predicted));
+    this.queueDabs(this.engine.add(samples.map((s) => this.toCanvas(s))), this.engine.predict(predicted.map((s) => this.toCanvas(s))));
   }
 
   end(): void {
     const stroke = this.active;
-    if (!stroke) return;
+    const editor = this.editor;
+    if (!stroke || !editor) return;
     this.queueDabs(this.engine.end(), []);
     this.active = null;
+    this.editor = null;
     this.events.liveStrokeChanged(null);
+    if (!editor.workspace.hasCanvas(stroke.canvasId)) return; // deleted mid-stroke
 
     // Committing updates the document (and, through the editor's change event,
     // the composite state) before the merge runs on the GPU in the next frame.
-    const jobs = this.editor.commitStroke(stroke.layerId, this.dirty.keys, stroke.style.mode);
+    const jobs = editor.commitStroke(stroke.layerId, this.dirty.keys, stroke.style.mode);
     if (jobs === null) {
-      this.renderer.invalidateTiles([...this.dirty.keys]); // drop the preview
+      this.renderer.invalidateTiles(stroke.canvasId, [...this.dirty.keys]); // drop the preview
       this.events.poolFull();
     } else {
-      this.renderer.mergeStroke(jobs, stroke.style);
+      this.renderer.mergeStroke(stroke.canvasId, jobs, stroke.style);
       if (stroke.style.mode === 'paint') this.tools.rememberColor(stroke.style.color);
-      if (stroke.style.mode === 'erase' && jobs.length > 0) this.checkForEmptyTiles(jobs.map((j) => j.dst));
+      if (stroke.style.mode === 'erase' && jobs.length > 0) this.checkForEmptyTiles(editor, jobs.map((j) => j.dst));
     }
     this.events.requestFrame();
   }
@@ -100,12 +115,17 @@ export class StrokeController {
     this.events.requestFrame();
   }
 
-  private checkForEmptyTiles(slots: number[]): void {
-    const store = this.editor.store;
+  private toCanvas(s: PenSample): PenSample {
+    const doc = this.editor!.doc;
+    return { ...s, x: s.x - doc.x, y: s.y - doc.y };
+  }
+
+  private checkForEmptyTiles(editor: Editor, slots: number[]): void {
+    const store = editor.store;
     const generations = slots.map((s) => store.generation(s));
     void this.renderer.findEmptyTiles(slots).then((empty) => {
       const found = slots.flatMap((slot, i) => (empty[i] ? [{ slot, generation: generations[i]! }] : []));
-      if (found.length > 0) this.editor.forgetEmptyTiles(found);
+      if (found.length > 0) editor.forgetEmptyTiles(found);
     });
   }
 }

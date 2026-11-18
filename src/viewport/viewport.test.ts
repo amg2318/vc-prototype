@@ -113,7 +113,7 @@ describe('fitToView', () => {
 });
 
 describe('docToClipMatrix', () => {
-  function apply(m: Float32Array, p: Vec2): Vec2 {
+  function apply(m: Float64Array, p: Vec2): Vec2 {
     return {
       x: m[0]! * p.x + m[3]! * p.y + m[6]!,
       y: m[1]! * p.x + m[4]! * p.y + m[7]!,

@@ -1,9 +1,12 @@
 import type { Dab } from '../brush/dabs';
 import type { BlendMode, RGB } from '../document/blend';
 import type { MergeJob, StrokeMode } from '../document/editor';
+import type { CanvasId } from '../document/paintDocument';
+import type { RetileJob } from '../document/retile';
 import type { TileKey, TileSlot } from '../document/tiles';
+import type { Placement, Rect } from '../workspace/coords';
 
-export type { Dab, MergeJob };
+export type { Dab, MergeJob, RetileJob };
 
 export type RendererKind = 'webgpu' | 'webgl2';
 
@@ -16,9 +19,9 @@ export interface StrokeStyle {
 }
 
 /**
- * One entry in the compositor's layer stack. Phase 1 only has raster layers;
- * Phase 3 adds inherited blocks (a transformed, filtered image of another
- * canvas) as another `kind`, inserted at the bottom.
+ * One entry in a canvas's layer stack. Phase 2 only has raster layers;
+ * Phase 3 adds inherited blocks (a transformed, read-only image of another
+ * canvas's composite) as another `kind`, inserted at the bottom.
  */
 export interface RasterSource {
   kind: 'raster';
@@ -28,13 +31,32 @@ export interface RasterSource {
 }
 export type CompositeSource = RasterSource;
 
-export interface CompositeState {
+/** What the compositor needs to know about one canvas. */
+export interface CanvasRenderState {
+  id: CanvasId;
+  placement: Placement;
   /** Non-erasable background colour, below every source. */
   paper: RGB;
   /** Visible sources, bottom to top. */
   sources: CompositeSource[];
-  /** The stroke being drawn, shown on top of `sources[sourceIndex]` until it is merged. */
+  /** The stroke being drawn on this canvas, shown on `sources[sourceIndex]` until merged. */
   liveStroke: { sourceIndex: number; style: StrokeStyle } | null;
+}
+
+/** A flat-coloured rectangle in workspace coordinates (premultiplied RGBA), drawn above all canvases. */
+export interface OverlayRect {
+  rect: Rect;
+  color: [number, number, number, number];
+}
+
+/** What to draw: the camera as a workspace → clip matrix (double precision) and the zoom level. */
+export interface ViewState {
+  /** Column-major 3×3 matrix from workspace coordinates to clip space. */
+  workspaceToClip: Float64Array;
+  /** The workspace rect on screen (for culling). */
+  visible: Rect;
+  /** Canvas pixels per device pixel (above 1 = zoomed out). */
+  canvasPxPerDevicePx: number;
 }
 
 export interface FrameInfo {
@@ -42,67 +64,74 @@ export interface FrameInfo {
   submittedAt: number;
   /** Resolves with performance.now() when the GPU has finished (WebGPU only). */
   gpuDone: Promise<number> | null;
-  /** Tiles recomposited this frame. */
+  /** Level-0 tiles composited this frame. */
   compositedTiles: number;
-  /** CPU time spent encoding the composite pass. */
+  /** Preview regions downsampled this frame. */
+  downsampledTiles: number;
+  /** Canvases on screen. */
+  visibleCanvases: number;
+  /** CPU time spent planning and encoding the composite work. */
   compositeCpuMs: number;
-  /** GPU time of the composite pass in ms, when the device supports timestamp queries. */
+  /** GPU time of the composite passes in ms, when the device supports timestamp queries. */
   compositeGpuMs?: Promise<number>;
 }
 
-/** 0..255 per channel, premultiplied. */
+/** 0..255 per channel. */
 export type Rgba8 = [number, number, number, number];
+
+export interface RendererMemory {
+  layerPages: number;
+  compositePages: number;
+  bytes: number;
+}
 
 /**
  * The narrow interface the app draws through.
  *
  * GPU model:
- *  - Tile pool: atlas page textures, each holding many 256² tile slots. Tile
- *    slots are immutable once written; `mergeStroke` writes new slots.
- *  - Stroke mask: canvas-sized coverage of the stroke in progress (dabs use
- *    MAX blending so a stroke never builds up on itself), plus a prediction
+ *  - Layer tile pool: atlas page textures of 256² tile slots. Slots are
+ *    immutable once written; strokes and resizes write new slots.
+ *  - Stroke mask: coverage of the stroke in progress, in the coordinates of
+ *    the canvas being drawn on (dabs use MAX blending), plus a prediction
  *    mask redrawn every frame.
- *  - Composite cache: canvas-sized image of paper + all sources. Only dirty
- *    tiles are recomposited, in one draw call.
+ *  - Composite cache: a tile pyramid per canvas (see `PyramidPlanner`).
  *
- * Calls only queue work. `render()` runs it once per animation frame, so GPU
- * work is batched no matter how many input events arrived. Tiles touched by
- * dabs, predictions and merges are marked dirty automatically; anything else
- * (layer property changes, undo) is reported through `invalidateTiles`.
+ * Calls only queue work; `render()` runs it once per animation frame.
+ * Tiles touched by dabs, predictions, merges and resizes are invalidated
+ * automatically; anything else (layer properties, undo) is reported through
+ * `invalidateTiles`.
  */
 export interface Renderer {
   readonly kind: RendererKind;
   readonly maxCanvasSize: number;
   onLost: ((message: string) => void) | null;
-  /** Estimated GPU memory held by this renderer's textures. */
-  gpuMemoryBytes(): number;
-  /** Atlas pages currently allocated on the GPU. */
-  readonly pageCount: number;
+  memory(): RendererMemory;
 
   /** Resize the canvas backing store (device pixels). */
   resize(pixelWidth: number, pixelHeight: number): void;
 
-  /** Clear the stroke mask for a new stroke. */
-  beginStroke(): void;
+  /** All canvases, back to front. Call whenever any of them changes. */
+  setCanvases(canvases: readonly CanvasRenderState[]): void;
+  invalidateTiles(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void;
+  /** Rectangles drawn above the canvases (selection, highlights; Phase 3 arrows). */
+  setOverlay(rects: readonly OverlayRect[]): void;
+
+  /** Clear the stroke mask for a new stroke on `canvasId` (dab coordinates are that canvas's pixels). */
+  beginStroke(canvasId: CanvasId): void;
   addStrokeDabs(dabs: readonly Dab[]): void;
   /** Replace the temporary predicted dabs ([] clears them). */
   setPredictedDabs(dabs: readonly Dab[]): void;
-  /** Write `src tile + stroke mask` into each job's `dst` slot. Allocates atlas pages as needed. */
-  mergeStroke(jobs: readonly MergeJob[], style: StrokeStyle): void;
+  /** Write `src tile + stroke mask` (clipped to the canvas) into each job's `dst` slot. */
+  mergeStroke(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void;
+  /** Produce the new tiles of a resized canvas. */
+  retile(canvasId: CanvasId, jobs: readonly RetileJob[]): void;
 
-  setCompositeState(state: CompositeState): void;
-  invalidateTiles(keys: readonly TileKey[] | 'all'): void;
+  /** Run queued work and draw the view. */
+  render(view: ViewState): FrameInfo;
 
-  /**
-   * Run queued work and draw the view.
-   * @param docToClip column-major 3×3 matrix from viewport/docToClipMatrix
-   * @param texelsPerPixel canvas pixels per device pixel (above 1 = zoomed out; used for filtering)
-   */
-  render(docToClip: Float32Array, texelsPerPixel: number): FrameInfo;
-
-  /** The composited colour at a canvas pixel (paper + all visible layers). */
-  readPixel(x: number, y: number): Promise<Rgba8>;
-  /** For each slot, whether it is completely transparent. */
+  /** The colour on screen at a device pixel (what the user sees). */
+  readScreenPixel(x: number, y: number): Promise<Rgba8>;
+  /** For each layer slot, whether it is completely transparent. */
   findEmptyTiles(slots: readonly TileSlot[]): Promise<boolean[]>;
   /** A THUMBNAIL_SIZE² premultiplied RGBA image of a layer. */
   readThumbnail(tiles: ReadonlyMap<TileKey, TileSlot>): Promise<Uint8Array>;
