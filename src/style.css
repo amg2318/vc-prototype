@@ -516,3 +516,28 @@ body {
   min-height: 32px;
   padding: 0;
 }
+
+/* --- undo / redo indicator for off-screen canvases ------------------------- */
+
+.undo-indicator {
+  pointer-events: auto;
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 22px;
+  background: rgba(255, 184, 26, 0.92);
+  color: #1c1c1e;
+  font: 600 13px/1 system-ui, sans-serif;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+
+.undo-indicator-arrow {
+  display: inline-block;
+}

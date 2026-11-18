@@ -81,13 +81,14 @@ export class Controls {
     const s = this.settings();
     for (const b of this.bindings) b.refresh(s);
     this.fingerSelect.value = this.fingers.setting;
-    this.fingerSelect.title = this.fingers.enabled ? 'One finger draws' : 'One finger pans';
+    // Auto: one finger draws until a pen is used, then pans.
+    this.fingerSelect.title = `${this.fingers.setting === 'auto' ? 'Auto: ' : ''}one finger ${this.fingers.enabled ? 'draws' : 'pans'}`;
   }
 
   /** Finger drawing: Auto (on until a pen is used) / On / Off. */
   private fingerSetting(): HTMLElement {
     const el = this.fingerSelect;
-    el.append(new Option('Auto (off once a pen is used)', 'auto'), new Option('On', 'on'), new Option('Off', 'off'));
+    el.append(new Option('Auto', 'auto'), new Option('On', 'on'), new Option('Off', 'off'));
     el.addEventListener('change', () => (this.fingers.setting = el.value as FingerDrawingSetting));
     return row('Finger draws', el);
   }

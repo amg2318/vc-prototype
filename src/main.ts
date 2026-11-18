@@ -22,11 +22,13 @@ import { Loupe } from './ui/loupe';
 import { installShortcuts } from './ui/shortcuts';
 import { CanvasLabels } from './ui/canvasLabels';
 import { CanvasPanel } from './ui/canvasPanel';
-import { selectionOutline } from './ui/selectionOutline';
+import { HIGHLIGHT, selectionOutline } from './ui/selectionOutline';
+import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicator';
+import type { Change } from './history/command';
 import { snapPosition } from './workspace/snap';
 import { Thumbnails } from './ui/thumbnails';
 import { Toolbar } from './ui/toolbar';
-import { IDENTITY_VIEW, docToClipMatrix, fitRectToView, zoomAt, type ViewTransform } from './viewport/viewport';
+import { IDENTITY_VIEW, docToClipMatrix, docToScreen, fitRectToView, zoomAt, type ViewTransform } from './viewport/viewport';
 
 async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
@@ -67,7 +69,11 @@ async function main(): Promise<void> {
     const start = performance.now();
     const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
     const selected = active()?.doc;
-    renderer.setOverlay(selected ? selectionOutline(selected.placement, canvasPxPerDevicePx) : []);
+    const overlay = selected ? selectionOutline(selected.placement, canvasPxPerDevicePx) : [];
+    if (highlighted && workspace.hasCanvas(highlighted)) {
+      overlay.push(...selectionOutline(workspace.canvas(highlighted).placement, canvasPxPerDevicePx, HIGHLIGHT));
+    }
+    renderer.setOverlay(overlay);
     const info = renderer.render({
       workspaceToClip: docToClipMatrix(view, cssWidth, cssHeight),
       visible: visibleWorkspaceRect(view, cssWidth, cssHeight),
@@ -91,6 +97,60 @@ async function main(): Promise<void> {
 
   function zoomToCanvas(id: string): void {
     if (workspace.hasCanvas(id)) setView(fitRectToView(workspace.canvas(id).placement, cssWidth, cssHeight));
+  }
+
+  // --- undo / redo: show where the change happened, without moving the camera ---
+
+  /** Canvas briefly outlined because an undo/redo changed it. */
+  let highlighted: string | null = null;
+  let highlightTimer = 0;
+  const undoIndicator = new UndoIndicator((id) => {
+    workspace.setActiveCanvas(id);
+    zoomToCanvas(id);
+  });
+
+  function undo(): void {
+    const activeBefore = workspace.activeCanvasId;
+    showWhereChanged(workspace.undo(), '↶', activeBefore);
+  }
+
+  function redo(): void {
+    const activeBefore = workspace.activeCanvasId;
+    showWhereChanged(workspace.redo(), '↷', activeBefore);
+  }
+
+  /**
+   * Off screen: an arrow chip at the screen edge pointing at the canvas.
+   * On screen but not the canvas being worked on: a short amber outline.
+   */
+  function showWhereChanged(change: Change | null, symbol: string, activeBefore: string | null): void {
+    if (!change || !workspace.hasCanvas(change.canvasId)) return;
+    const doc = workspace.canvas(change.canvasId);
+    const corners = [
+      docToScreen(view, { x: doc.x, y: doc.y }),
+      docToScreen(view, { x: doc.x + doc.width, y: doc.y }),
+      docToScreen(view, { x: doc.x, y: doc.y + doc.height }),
+      docToScreen(view, { x: doc.x + doc.width, y: doc.y + doc.height }),
+    ];
+    const xs = corners.map((c) => c.x);
+    const ys = corners.map((c) => c.y);
+    const onScreen = {
+      x: Math.min(...xs), y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys),
+    };
+    const edge = edgeIndicator(onScreen, cssWidth, cssHeight, 48);
+    if (edge) {
+      undoIndicator.show(doc.id, `${symbol} ${doc.name}`, edge);
+      return;
+    }
+    if (doc.id === activeBefore) return; // the change is right where the user is looking
+    highlighted = doc.id;
+    clearTimeout(highlightTimer);
+    highlightTimer = window.setTimeout(() => {
+      highlighted = null;
+      requestFrame();
+    }, UNDO_FEEDBACK_MS / 2);
+    requestFrame();
   }
 
   // --- canvas management -----------------------------------------------------
@@ -248,8 +308,8 @@ async function main(): Promise<void> {
     },
     canDrawAt: (p) => hitTest(workspace.canvases, p) !== null,
     tap(fingers) {
-      if (fingers === 2) workspace.undo();
-      else workspace.redo();
+      if (fingers === 2) undo();
+      else redo();
     },
   });
 
@@ -360,8 +420,8 @@ async function main(): Promise<void> {
   // The layers and canvases panels share the right-hand side: one at a time.
   const toolbar = new Toolbar({
     selectTool,
-    undo: () => workspace.undo(),
-    redo: () => workspace.redo(),
+    undo,
+    redo,
     toggleColorPicker: () => picker.toggle(),
     toggleLayers: () => {
       layersPanel.setVisible(!layersPanel.visible);
@@ -418,12 +478,12 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
+  ui.append(undoIndicator.element, labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
   refreshUi();
 
   installShortcuts({
-    undo: () => workspace.undo(),
-    redo: () => workspace.redo(),
+    undo,
+    redo,
     selectTool,
     resizeBrush: (factor) => tools.adjustSize(factor),
     newLayer: () => active()?.addLayer(),
