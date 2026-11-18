@@ -60,9 +60,9 @@ ______
 
 - [ ] HSV picker: square and hue strip respond to Pencil and to a finger. Recent colours fill in after
       strokes.
-- [ ] Eyedropper tool: the loupe shows the colour under the Pencil **or a finger**. Lifting returns to the
+- [ ] Eyedropper tool: the loupe shows the colour under the Pencil. Lifting returns to the
       previous tool, and selecting the eyedropper never changes the brush panel.
-- [ ] With the eyedropper tool selected, a pinch still zooms and doesn't change the colour.
+- [ ] Adding a second finger during a touch-and-hold cancels the pick (colour restored) and pinches.
 - [ ] Touch-and-hold with one finger (about ½ s) starts the eyedropper. A resting palm does **not**.
 - [ ] Picked colours match what is on screen, including over multiply layers and reduced opacity.
 

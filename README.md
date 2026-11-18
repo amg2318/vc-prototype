@@ -100,8 +100,7 @@ push to `main`.
 | Mouse, left button                 | Use the current tool at full pressure                             |
 | Two fingers                        | Pan and pinch-zoom (rotation: tick "Two-finger rotate")           |
 | Two-finger tap / three-finger tap  | Undo / redo                                                       |
-| One finger, touch and hold         | Eyedropper (samples what you see: all visible layers + background) |
-| One finger, eyedropper tool selected | Pick straight away; a second finger cancels the pick and pinches |
+| One finger, touch and hold         | Eyedropper (samples what you see: all visible layers + background); a second finger cancels it |
 | Mouse wheel / trackpad pinch       | Zoom at the cursor                                                |
 | Middle-drag, or Space + drag       | Pan                                                               |
 
