@@ -40,6 +40,7 @@ export class History {
   /** Apply a new command and record it. Clears the redo stack. */
   execute(command: Command): Change {
     const change = command.apply(this.ctx);
+    // Newest first: a canvas's creation step is disposed after the steps that edited it.
     for (const c of this.redoStack) c.dispose(this.ctx, false);
     this.redoStack = [];
 

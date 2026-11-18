@@ -1,10 +1,21 @@
-import { HISTORY_BUDGET_BYTES, TILE_BYTES } from '../config';
+import { HISTORY_BUDGET_BYTES, MAX_CANVAS_SIZE, TILE_BYTES } from '../config';
 import { Editor } from '../document/editor';
 import { PaintDocument, setLayerTile, type CanvasId } from '../document/paintDocument';
 import type { TileSlot } from '../document/tiles';
 import { TileStore } from '../document/tileStore';
 import type { Change, Command, CommandContext } from '../history/command';
+import {
+  AddCanvasCommand,
+  DeleteCanvasCommand,
+  MoveCanvasCommand,
+  RenameCanvasCommand,
+  ReorderCanvasCommand,
+  ResizeCanvasCommand,
+} from '../history/canvasCommands';
 import { History } from '../history/history';
+import { planResize, retileLayer, type Anchor, type RetileJob } from '../document/retile';
+import type { LayerId } from '../document/paintDocument';
+import type { TileKey } from '../document/tiles';
 
 export interface WorkspaceStats {
   canvases: number;
@@ -40,7 +51,13 @@ export class Workspace {
 
   constructor(store = new TileStore(), historyBudgetBytes = HISTORY_BUDGET_BYTES) {
     this.store = store;
-    this.ctx = { canvas: (id) => this.canvas(id) };
+    this.ctx = {
+      canvas: (id) => this.canvas(id),
+      attachCanvas: (doc, index) => this.attachCanvas(doc, index),
+      detachCanvas: (id) => this.detachCanvas(id),
+      forgetCanvas: (id) => this.forgetCanvas(id),
+      canvasIndex: (id) => this.canvases.findIndex((c) => c.id === id),
+    };
     this.history = new History(this.ctx, historyBudgetBytes, () => this.historyBytes());
   }
 
@@ -74,10 +91,15 @@ export class Workspace {
 
   /** A new, empty canvas object (not yet in the workspace) with one layer. */
   newCanvas(size: { width: number; height: number }, name?: string): PaintDocument {
-    this.canvasCounter++;
-    const doc = new PaintDocument(`canvas-${this.canvasCounter}`, this.store, size, name ?? `Canvas ${this.canvasCounter}`);
+    const id = this.nextCanvasId();
+    const doc = new PaintDocument(id, this.store, size, name ?? `Canvas ${this.canvasCounter}`);
     doc.insertLayer(doc.createLayer(), 0);
     return doc;
+  }
+
+  private nextCanvasId(): CanvasId {
+    this.canvasCounter++;
+    return `canvas-${this.canvasCounter}`;
   }
 
   /** Put a canvas into the workspace at z-index `index` (used by commands and setup). */
@@ -100,6 +122,97 @@ export class Workspace {
   forgetCanvas(id: CanvasId): void {
     this.detached.delete(id);
     this.editors.delete(id);
+  }
+
+  // --- canvas operations (each one undoable) ----------------------------------
+
+  /** Create an empty canvas in front of all others, and select it. */
+  createCanvas(size: { width: number; height: number }, at: { x: number; y: number }, name?: string): PaintDocument {
+    const doc = this.newCanvas(clampSize(size), name);
+    doc.x = Math.round(at.x);
+    doc.y = Math.round(at.y);
+    this.execute(new AddCanvasCommand(doc, this.canvases.length));
+    return doc;
+  }
+
+  /** Copy a canvas (sharing its tiles) and place it to the right of the original. */
+  duplicateCanvas(id: CanvasId): PaintDocument {
+    const source = this.canvas(id);
+    const copy = new PaintDocument(this.nextCanvasId(), this.store, source, `${source.name} copy`);
+    copy.x = source.x + source.width + 100;
+    copy.y = source.y;
+    copy.paper = [...source.paper];
+    for (const layer of source.layers) {
+      const l = copy.createLayer(layer.name);
+      Object.assign(l, layer.props());
+      for (const [key, slot] of layer.tiles) {
+        this.store.retain(slot);
+        l.tiles.set(key, slot);
+      }
+      copy.insertLayer(l, copy.layers.length);
+    }
+    this.execute(new AddCanvasCommand(copy, this.canvases.length, 'Duplicate canvas'));
+    return copy;
+  }
+
+  deleteCanvas(id: CanvasId): void {
+    if (this.hasCanvas(id)) this.execute(new DeleteCanvasCommand(id));
+  }
+
+  /** `mergeKey`: moves with the same key in a row (one drag) become one undo step. */
+  moveCanvas(id: CanvasId, x: number, y: number, mergeKey: string | null = null): void {
+    const doc = this.canvas(id);
+    const to = { x: Math.round(x), y: Math.round(y) };
+    if (to.x === doc.x && to.y === doc.y) return;
+    this.execute(new MoveCanvasCommand(id, { x: doc.x, y: doc.y }, to, mergeKey));
+  }
+
+  renameCanvas(id: CanvasId, name: string): void {
+    const doc = this.canvas(id);
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== doc.name) this.execute(new RenameCanvasCommand(id, doc.name, trimmed));
+  }
+
+  bringToFront(id: CanvasId): void {
+    const from = this.canvases.findIndex((c) => c.id === id);
+    const to = this.canvases.length - 1;
+    if (from >= 0 && from !== to) this.execute(new ReorderCanvasCommand(id, from, to));
+  }
+
+  /**
+   * Change a canvas's dimensions around `anchor` (content stays put in the
+   * workspace). Returns the GPU work that produces the new tiles, or null if
+   * the tile pool is full even after dropping all undo history.
+   */
+  resizeCanvas(id: CanvasId, size: { width: number; height: number }, anchor: Anchor): RetileJob[] | null {
+    const doc = this.canvas(id);
+    const { width, height } = clampSize(size);
+    if (width === doc.width && height === doc.height) return [];
+    const plan = planResize(doc.placement, width, height, anchor);
+    const perLayer = doc.layers.map((layer) => ({ layer, ...retileLayer(layer.tiles, doc.placement, plan) }));
+    const needed = perLayer.reduce((n, l) => n + l.jobs.length, 0);
+    while (this.store.freeSlots < needed && this.history.dropOldest()) {
+      // Make room by forgetting the oldest undo steps.
+    }
+    if (this.store.freeSlots < needed) return null;
+
+    const jobs: RetileJob[] = [];
+    const tiles = new Map<LayerId, Map<TileKey, TileSlot>>();
+    for (const { layer, reused, jobs: layerJobs } of perLayer) {
+      const next = new Map<TileKey, TileSlot>();
+      for (const [key, slot] of reused) {
+        this.store.retain(slot);
+        next.set(key, slot);
+      }
+      for (const job of layerJobs) {
+        const dst = this.store.allocate()!;
+        next.set(job.key, dst);
+        jobs.push({ ...job, dst });
+      }
+      tiles.set(layer.id, next);
+    }
+    this.execute(new ResizeCanvasCommand(id, { placement: plan.placement, tiles }));
+    return jobs;
   }
 
   setActiveCanvas(id: CanvasId | null): void {
@@ -132,6 +245,7 @@ export class Workspace {
 
   /** Report a change that didn't go through the history (e.g. selecting a layer). */
   emit(change: Change): void {
+    if (change.selectCanvas && this.hasCanvas(change.selectCanvas)) this.activeCanvasId = change.selectCanvas;
     if (this.hasCanvas(change.canvasId)) this.editor(change.canvasId).noteChange(change);
     for (const l of this.listeners) l(change);
   }
@@ -178,6 +292,11 @@ export class Workspace {
       this.history.forEachCommand((c) => c.forgetEmptySlot?.(this.ctx, slot));
     }
   }
+}
+
+function clampSize(size: { width: number; height: number }): { width: number; height: number } {
+  const clamp = (v: number): number => Math.max(1, Math.min(MAX_CANVAS_SIZE, Math.round(v)));
+  return { width: clamp(size.width), height: clamp(size.height) };
 }
 
 /** A workspace with one canvas, and that canvas's editor (tests and simple setups). */

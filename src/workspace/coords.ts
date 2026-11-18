@@ -64,6 +64,15 @@ export function containsPoint(r: Rect, p: Vec2): boolean {
   return p.x >= r.x && p.y >= r.y && p.x < r.x + r.width && p.y < r.y + r.height;
 }
 
+export function containsRect(outer: Rect, inner: Rect): boolean {
+  return (
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width &&
+    inner.y + inner.height <= outer.y + outer.height
+  );
+}
+
 /** The overlap of two rectangles, or null if they don't overlap. */
 export function intersect(a: Rect, b: Rect): Rect | null {
   const x = Math.max(a.x, b.x);

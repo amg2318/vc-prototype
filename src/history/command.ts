@@ -2,12 +2,21 @@ import type { CanvasId, LayerId, PaintDocument } from '../document/paintDocument
 import type { TileKey, TileSlot } from '../document/tiles';
 
 /**
- * What a command needs to find the things it changes. Phase 1 has one canvas;
- * the workspace in later phases resolves many, so commands always look their
- * canvas up by id instead of holding the document directly.
+ * What a command needs to find and change things. Commands always look their
+ * canvas up by id instead of holding the document directly. The workspace
+ * provides this.
  */
 export interface CommandContext {
+  /** A canvas by id, including deleted canvases that undo can bring back. */
   canvas(id: CanvasId): PaintDocument;
+  /** Put a canvas into the workspace at z-index `index`. */
+  attachCanvas(doc: PaintDocument, index: number): void;
+  /** Take a canvas out of the workspace (it stays findable); returns its z-index. */
+  detachCanvas(id: CanvasId): number;
+  /** A deleted canvas will never come back: stop tracking it. */
+  forgetCanvas(id: CanvasId): void;
+  /** Z-index of a canvas in the workspace (0 = back). */
+  canvasIndex(id: CanvasId): number;
 }
 
 /** What changed, so the app knows what to recomposite and refresh. */
@@ -21,6 +30,10 @@ export interface Change {
   structure: boolean;
   /** Layer that should become active, if any. */
   select?: LayerId;
+  /** True if canvases were added, removed, moved, resized, renamed or reordered. */
+  workspace?: boolean;
+  /** Canvas that should become active, if any. */
+  selectCanvas?: CanvasId;
 }
 
 /**

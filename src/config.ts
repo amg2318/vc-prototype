@@ -7,6 +7,9 @@
 export const CANVAS_WIDTH = 4096;
 export const CANVAS_HEIGHT = 4096;
 
+/** Largest canvas side in pixels (tile keys assume at most 4096 / TILE_SIZE tiles per row). */
+export const MAX_CANVAS_SIZE = 4096;
+
 /** Raster layers are sparse grids of TILE_SIZE × TILE_SIZE tiles. */
 export const TILE_SIZE = 256;
 export const MAX_LAYERS = 32;
