@@ -59,6 +59,8 @@ async function main(): Promise<void> {
 
   // --- render loop: only runs when something changed ----------------------
 
+  const MEMORY_SAMPLE_MS = 250;
+  let lastMemorySample = -Infinity;
   let framePending = false;
   function requestFrame(): void {
     if (framePending) return;
@@ -86,6 +88,17 @@ async function main(): Promise<void> {
       reloads: memory.reloads,
       reloadTimes: renderer.takeReloadTimes(),
     });
+    if (rafTime - lastMemorySample >= MEMORY_SAMPLE_MS) {
+      lastMemorySample = rafTime;
+      metrics.noteMemory({
+        t: rafTime,
+        residentTiles: memory.residentTiles,
+        gpuBytes: memory.bytes,
+        compressedTiles: memory.compressedTiles,
+        compressedBytes: memory.compressedBytes,
+        historyBytes: workspace.stats().historyBytes,
+      });
+    }
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
     if (info.moreWork) requestFrame();
   }
@@ -482,8 +495,12 @@ async function main(): Promise<void> {
         get editor() {
           return active() ?? workspace.editor(workspace.canvases[0]!.id);
         },
+        workspace,
         strokes,
         tools,
+        metrics,
+        fitRect: (rect) => fitRectToView(rect, cssWidth, cssHeight),
+        setView,
         report: (m) => showBanner(m, true),
       }),
     );

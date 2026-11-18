@@ -24,7 +24,7 @@ export function buildExport(
 ): object {
   return {
     format: 'vc-prototype-measurements',
-    version: 2,
+    version: 3,
     note:
       'Latencies are software estimates (input event timestamp → GPU work submitted / GPU work done). ' +
       'They exclude display scan-out and digitizer latency; true on-glass latency is higher.',
@@ -41,7 +41,11 @@ export function buildExport(
     document,
     counters: metrics.counters,
     summary: metrics.summary(),
+    residency: metrics.residency(),
     frames: metrics.frames,
+    /** Reload latencies (ms): evicted tile requested → pixels ready to upload. */
+    reloadTimes: metrics.reloadTimes,
+    memory: metrics.memory,
   };
 }
 

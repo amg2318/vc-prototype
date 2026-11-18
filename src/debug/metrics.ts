@@ -77,6 +77,18 @@ export interface MetricsSummary {
   compositedTiles: Stats;
 }
 
+/** Memory use at one moment (logged a few times a second while frames render). */
+export interface MemorySample {
+  t: number;
+  residentTiles: number;
+  /** Bytes the renderer holds on the GPU (layer and composite pages, screen-sized buffers). */
+  gpuBytes: number;
+  compressedTiles: number;
+  compressedBytes: number;
+  /** Undo history, counted at raw tile size. */
+  historyBytes: number;
+}
+
 /** Frames further apart than this are not "consecutive" (the app was idle). */
 const IDLE_GAP_MS = 100;
 /** Latencies outside 0..this are treated as clock mismatches and discarded. */
@@ -127,6 +139,11 @@ export class Metrics {
   readonly frames: FrameRecord[] = [];
   /** Every reload latency (ms) since the last reset, in order. */
   readonly reloadTimes: number[] = [];
+  readonly memory: MemorySample[] = [];
+
+  noteMemory(sample: MemorySample): void {
+    if (this.memory.length < MAX_RECORDS) this.memory.push(sample);
+  }
   counters = { strokes: 0, cancelledStrokes: 0, palmRejections: 0, implausibleTimestamps: 0 };
 
   private pending = { samples: 0, events: 0, dabs: 0, predictedDabs: 0, oldest: Infinity, newest: -Infinity };
@@ -255,6 +272,7 @@ export class Metrics {
   reset(): void {
     this.frames.length = 0;
     this.reloadTimes.length = 0;
+    this.memory.length = 0;
     this.counters = { strokes: 0, cancelledStrokes: 0, palmRejections: 0, implausibleTimestamps: 0 };
     this.recentSampleTimes = [];
     this.recentEventTimes = [];
