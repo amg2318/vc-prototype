@@ -174,7 +174,6 @@ async function main(): Promise<void> {
   };
 
   ui.append(controls, hud.element, banner);
-  hud.setVisible(true);
 
   window.addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement && e.target.type === 'text') return;
@@ -184,6 +183,7 @@ async function main(): Promise<void> {
   new ResizeObserver(resize).observe(canvas);
   watchDevicePixelRatio();
   resize();
+  hud.setVisible(true); // after the first resize, so the HUD never shows the pre-fit view
 }
 
 main().catch((error: unknown) => {
