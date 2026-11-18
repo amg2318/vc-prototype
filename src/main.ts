@@ -1,13 +1,12 @@
 import './style.css';
 import { buildCompositeState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
-import { CANVAS_HEIGHT, CANVAS_WIDTH } from './config';
 import { Controls } from './debug/controls';
 import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from './debug/exportMeasurements';
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
 import { createStressPanel } from './debug/stress';
-import { Editor } from './document/editor';
+import { singleCanvasEditor } from './workspace/workspace';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -29,7 +28,7 @@ async function main(): Promise<void> {
   const { renderer, fallbackReason, canvas } = await createRenderer(initialCanvas, requestedRenderer(location.search));
   blockBrowserGestures(canvas);
 
-  const editor = new Editor();
+  const editor = singleCanvasEditor();
   const tools = new ToolState();
   const metrics = new Metrics();
 
@@ -101,7 +100,7 @@ async function main(): Promise<void> {
     );
     input.updateOrigin();
     if (!hasFitted) {
-      view = fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight);
+      view = fitToView(editor.doc.width, editor.doc.height, cssWidth, cssHeight);
       hasFitted = true;
     }
     requestFrame();
@@ -212,7 +211,7 @@ async function main(): Promise<void> {
     () => (tools.paintingTool === 'eraser' ? 'Eraser' : 'Brush'),
     {
       fitView() {
-        setView(fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight));
+        setView(fitToView(editor.doc.width, editor.doc.height, cssWidth, cssHeight));
       },
       toggleHud() {
         hud.setVisible(!hud.visible);

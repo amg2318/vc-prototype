@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Editor } from '../document/editor';
+import { singleCanvasEditor } from '../workspace/workspace';
 import { TileStore } from '../document/tileStore';
 import { buildCompositeState } from './compositeState';
 
@@ -7,7 +7,7 @@ const style = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 
 
 describe('buildCompositeState', () => {
   it('lists visible layers bottom to top and maps the live stroke to its source index', () => {
-    const e = new Editor(new TileStore(4));
+    const e = singleCanvasEditor(new TileStore(4));
     e.addLayer();
     e.addLayer();
     const [bottom, middle, top] = e.doc.layers;
@@ -21,7 +21,7 @@ describe('buildCompositeState', () => {
   });
 
   it('shows no live stroke on a hidden layer', () => {
-    const e = new Editor(new TileStore(4));
+    const e = singleCanvasEditor(new TileStore(4));
     e.setLayerProps(e.activeLayerId, { visible: false });
     expect(buildCompositeState(e.doc, { layerId: e.activeLayerId, style }).liveStroke).toBeNull();
   });
