@@ -31,7 +31,7 @@ export class TouchGestures {
 
   constructor(private readonly t: GestureThresholds = GESTURES) {}
 
-  /** The finger currently doing a touch-and-hold, if any. */
+  /** The finger currently doing a touch-and-hold (or an eyedropper-tool pick), if any. */
   get holdingTouch(): number | null {
     return this.holdId;
   }
@@ -68,8 +68,16 @@ export class TouchGestures {
     if (!touch || this.spoiled || this.touches.size !== 1 || this.maxFingers !== 1) return false;
     if (touch.maxMove > this.t.holdMaxMovementPx) return false;
     this.holdId = id;
-    this.spoiled = true; // a hold is never also a tap
     return true;
+  }
+
+  /**
+   * The hold is over, but the finger stays tracked: if a second finger landed
+   * (a pinch or a quick two-finger tap), the session continues as normal.
+   * A hold that simply lifts is never a tap, because only one finger was down.
+   */
+  releaseHold(): void {
+    this.holdId = null;
   }
 
   /** A finger lifted. Returns the tap when the session ends as one. */

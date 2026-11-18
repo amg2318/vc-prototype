@@ -34,9 +34,19 @@ export class ToolState {
     if (this.current === 'eyedropper') this.setTool(this.lastPaintingTool);
   }
 
-  /** The brush settings the size/opacity controls edit: the eraser's while erasing, otherwise the brush's. */
+  /**
+   * The painting tool in effect: the current tool, or, while the eyedropper
+   * is selected, the tool it will return to. The brush panel shows this
+   * tool's settings, so picking a colour never changes what the panel shows.
+   */
+  get paintingTool(): 'brush' | 'eraser' {
+    const tool = this.current === 'eyedropper' ? this.lastPaintingTool : this.current;
+    return tool === 'eraser' ? 'eraser' : 'brush';
+  }
+
+  /** The settings the size/opacity controls edit (see `paintingTool`). */
   get editableSettings(): BrushSettings {
-    return this.current === 'eraser' ? this.eraser : this.brush;
+    return this.paintingTool === 'eraser' ? this.eraser : this.brush;
   }
 
   setColor(color: RGB): void {

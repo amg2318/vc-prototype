@@ -9,7 +9,7 @@ import { Metrics } from './debug/metrics';
 import { createStressPanel } from './debug/stress';
 import { Editor } from './document/editor';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
-import { PointerInput, inputCapabilities } from './input/pointerInput';
+import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
 import { createRenderer, requestedRenderer } from './render/createRenderer';
 import { ToolState, type Tool } from './tools/tools';
@@ -157,11 +157,18 @@ async function main(): Promise<void> {
 
   const loupe = new Loupe();
   let sampleSerial = 0;
-  function sampleColor(phase: 'start' | 'move' | 'end', screen: { x: number; y: number }, doc: { x: number; y: number }): void {
-    if (phase === 'end') {
+  let colorBeforePick = tools.brush.color;
+  function sampleColor(phase: EyedropperPhase, screen: { x: number; y: number }, doc: { x: number; y: number }): void {
+    if (phase === 'end' || phase === 'cancel') {
       loupe.hide();
+      if (phase === 'cancel') {
+        sampleSerial++; // ignore readbacks still on their way
+        tools.setColor(colorBeforePick);
+        picker.setColor(colorBeforePick);
+      }
       return;
     }
+    if (phase === 'start') colorBeforePick = [...tools.brush.color];
     loupe.show(screen, null);
     const serial = ++sampleSerial;
     void renderer.readPixel(doc.x, doc.y).then((rgba) => {
@@ -202,7 +209,7 @@ async function main(): Promise<void> {
 
   const controls = new Controls(
     () => tools.editableSettings,
-    () => (tools.current === 'eraser' ? 'Eraser' : 'Brush'),
+    () => (tools.paintingTool === 'eraser' ? 'Eraser' : 'Brush'),
     {
       fitView() {
         setView(fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight));
