@@ -1,20 +1,18 @@
 import './style.css';
-import { DEFAULT_BRUSH, type BrushSettings } from './brush/brushSettings';
-import { StrokeEngine } from './brush/strokeEngine';
+import { buildCompositeState } from './app/compositeState';
+import { StrokeController, type ActiveStroke } from './app/strokeController';
+import { CANVAS_HEIGHT, CANVAS_WIDTH } from './config';
 import { createControls } from './debug/controls';
 import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from './debug/exportMeasurements';
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
+import { Editor } from './document/editor';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
-import type { PenSample } from './input/penSample';
 import { PointerInput, inputCapabilities } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
 import { createRenderer, requestedRenderer } from './render/createRenderer';
-import type { StrokeStyle } from './render/renderer';
+import { ToolState } from './tools/tools';
 import { IDENTITY_VIEW, docToClipMatrix, fitToView, type ViewTransform } from './viewport/viewport';
-
-/** Phase 0 has no layers, so the eraser paints the white document background. */
-const ERASER_COLOR: [number, number, number] = [1, 1, 1];
 
 async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
@@ -23,8 +21,8 @@ async function main(): Promise<void> {
   const { renderer, fallbackReason, canvas } = await createRenderer(initialCanvas, requestedRenderer(location.search));
   blockBrowserGestures(canvas);
 
-  const brush: BrushSettings = { ...DEFAULT_BRUSH, color: [...DEFAULT_BRUSH.color] };
-  const engine = new StrokeEngine(brush);
+  const editor = new Editor();
+  const tools = new ToolState();
   const metrics = new Metrics();
 
   let view: ViewTransform = IDENTITY_VIEW;
@@ -43,7 +41,8 @@ async function main(): Promise<void> {
   function frame(rafTime: number): void {
     framePending = false;
     const start = performance.now();
-    const info = renderer.render(docToClipMatrix(view, cssWidth, cssHeight));
+    const texelsPerPixel = 1 / (view.scale * window.devicePixelRatio);
+    const info = renderer.render(docToClipMatrix(view, cssWidth, cssHeight), texelsPerPixel);
     metrics.frameRendered(rafTime, performance.now() - start, info);
   }
 
@@ -52,28 +51,54 @@ async function main(): Promise<void> {
     requestFrame();
   }
 
+  // --- document → compositor ----------------------------------------------
+
+  let liveStroke: ActiveStroke | null = null;
+  function updateCompositeState(): void {
+    renderer.setCompositeState(buildCompositeState(editor.doc, liveStroke));
+    requestFrame();
+  }
+  editor.onChange((change) => {
+    updateCompositeState();
+    renderer.invalidateTiles(change.tiles);
+  });
+  updateCompositeState();
+
+  const strokes = new StrokeController(editor, renderer, tools, {
+    liveStrokeChanged(stroke) {
+      liveStroke = stroke;
+      updateCompositeState();
+    },
+    dabsQueued(real, predicted) {
+      metrics.noteDabs(real, predicted);
+    },
+    poolFull() {
+      showBanner('Tile memory is full: that stroke could not be kept. Delete or clear layers to free memory.');
+    },
+    requestFrame,
+  });
+
   // --- canvas size and devicePixelRatio -----------------------------------
 
   function resize(): void {
     cssWidth = Math.max(1, canvas.clientWidth);
     cssHeight = Math.max(1, canvas.clientHeight);
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.min(renderer.maxCanvasSize, Math.round(cssWidth * dpr));
-    const height = Math.min(renderer.maxCanvasSize, Math.round(cssHeight * dpr));
-    renderer.resize(width, height);
+    renderer.resize(
+      Math.min(renderer.maxCanvasSize, Math.round(cssWidth * dpr)),
+      Math.min(renderer.maxCanvasSize, Math.round(cssHeight * dpr)),
+    );
     input.updateOrigin();
     if (!hasFitted) {
-      view = fitToView(renderer.documentWidth, renderer.documentHeight, cssWidth, cssHeight);
+      view = fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight);
       hasFitted = true;
     }
     requestFrame();
   }
 
-  // devicePixelRatio changes (browser zoom, moving to another monitor) don't
-  // fire `resize` everywhere; a resolution media query does.
+  // devicePixelRatio changes don't fire `resize` everywhere; a resolution media query does.
   function watchDevicePixelRatio(): void {
-    const query = matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-    query.addEventListener(
+    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
       'change',
       () => {
         resize();
@@ -83,40 +108,25 @@ async function main(): Promise<void> {
     );
   }
 
-  // --- input → brush → renderer -------------------------------------------
-
-  function strokeStyleFor(sample: PenSample): StrokeStyle {
-    return { color: sample.isEraser ? ERASER_COLOR : brush.color, opacity: brush.opacity };
-  }
+  // --- input ----------------------------------------------------------------
 
   const input = new PointerInput(canvas, {
     getView: () => view,
     setView,
     strokeBegin(sample) {
       metrics.counters.strokes++;
-      renderer.beginStroke(strokeStyleFor(sample));
-      const dabs = engine.begin(sample, brush);
-      renderer.addStrokeDabs(dabs);
       metrics.noteInput([sample], sample.timeStamp);
-      metrics.noteDabs(dabs.length, 0);
-      requestFrame();
+      strokes.begin(sample);
     },
     strokeMove(samples, predicted) {
-      const dabs = engine.add(samples);
-      const predictedDabs = engine.predict(predicted);
-      renderer.addStrokeDabs(dabs);
-      renderer.setPredictedDabs(predictedDabs);
       metrics.noteInput(samples, samples[samples.length - 1]?.timeStamp ?? performance.now());
-      metrics.noteDabs(dabs.length, predictedDabs.length);
-      requestFrame();
+      strokes.move(samples, predicted);
     },
     strokeEnd(cancelled) {
       // A cancelled stroke (e.g. the OS claimed the touch) is still kept: losing
       // what was drawn is worse than keeping it. The HUD counts cancellations.
       if (cancelled) metrics.counters.cancelledStrokes++;
-      renderer.addStrokeDabs(engine.end());
-      renderer.endStroke();
-      requestFrame();
+      strokes.end();
     },
     palmRejected() {
       metrics.counters.palmRejections++;
@@ -137,25 +147,31 @@ async function main(): Promise<void> {
     inputCapabilities,
   });
 
-  const hud = new Hud(metrics, rendererLabel, () => [
-    `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
-    `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
-  ]);
+  const mb = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MB`;
+  const hud = new Hud(metrics, rendererLabel, () => {
+    const s = editor.stats();
+    return [
+      `tiles ${s.tileEntries} in ${s.layers} layers · slots ${s.usedSlots}/${s.capacitySlots} · pages ${renderer.pageCount}`,
+      `gpu memory ≈ ${mb(renderer.gpuMemoryBytes())}`,
+      `history ${s.historySteps} undo / ${s.redoSteps} redo · ${mb(s.historyBytes)}`,
+      `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
+      `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
+    ];
+  });
 
-  const controls = createControls(brush, {
+  const controls = createControls(tools.brush, {
     clearCanvas() {
-      renderer.clearDocument();
-      requestFrame();
+      editor.clearLayer(editor.activeLayerId);
     },
     fitView() {
-      setView(fitToView(renderer.documentWidth, renderer.documentHeight, cssWidth, cssHeight));
+      setView(fitToView(CANVAS_WIDTH, CANVAS_HEIGHT, cssWidth, cssHeight));
     },
     toggleHud() {
       hud.setVisible(!hud.visible);
     },
     exportMeasurements() {
       const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
-      void saveMeasurements(buildExport(metrics, session(), brush, label), label);
+      void saveMeasurements(buildExport(metrics, session(), tools.brush, label), label);
     },
     resetMeasurements() {
       metrics.reset();
@@ -168,16 +184,27 @@ async function main(): Promise<void> {
   const banner = document.createElement('div');
   banner.className = 'banner';
   banner.hidden = true;
-  renderer.onLost = (message) => {
+  let bannerTimer = 0;
+  function showBanner(message: string, sticky = false): void {
     banner.textContent = message;
     banner.hidden = false;
-  };
+    clearTimeout(bannerTimer);
+    if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
+  }
+  renderer.onLost = (message) => showBanner(message, true);
 
   ui.append(controls, hud.element, banner);
 
   window.addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement && e.target.type === 'text') return;
-    if (e.key === 'h') hud.setVisible(!hud.visible);
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) editor.redo();
+      else editor.undo();
+    } else if (e.key === 'h') {
+      hud.setVisible(!hud.visible);
+    }
   });
 
   new ResizeObserver(resize).observe(canvas);
