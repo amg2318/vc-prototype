@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { defineConfig, type Plugin } from 'vitest/config';
 import basicSsl from '@vitejs/plugin-basic-ssl';
@@ -31,18 +31,30 @@ function serviceWorker(): Plugin {
   };
 }
 
+/**
+ * HTTPS for the dev server, so an iPad on the LAN gets a secure context
+ * (needed for WebGPU):
+ *  - If .certs/cert.pem and .certs/key.pem exist (e.g. made with mkcert, see
+ *    README), use them: no certificate warning once the iPad trusts the CA.
+ *  - Otherwise generate a self-signed certificate (tap through the warning).
+ *  - NO_HTTPS=1 serves plain HTTP (fine on localhost, which is already secure).
+ */
+const trustedCert = existsSync('.certs/cert.pem') && existsSync('.certs/key.pem');
+const https = trustedCert
+  ? { cert: readFileSync('.certs/cert.pem'), key: readFileSync('.certs/key.pem') }
+  : undefined;
+const useSelfSigned = !process.env.NO_HTTPS && !trustedCert;
+
 // `base` is configurable so the same build can be served from a GitHub Pages
 // sub-path (https://<user>.github.io/<repo>/). Locally it stays at "/".
 export default defineConfig({
   base: process.env.BASE_PATH ?? '/',
   plugins: [
-    // Self-signed HTTPS so an iPad on the LAN gets a secure context (needed
-    // for WebGPU). Set NO_HTTPS=1 to serve plain HTTP (fine on localhost).
-    ...(process.env.NO_HTTPS ? [] : [basicSsl()]),
+    ...(useSelfSigned ? [basicSsl()] : []),
     serviceWorker(),
   ],
-  server: { host: true },
-  preview: { host: true },
+  server: { host: true, https: process.env.NO_HTTPS ? undefined : https },
+  preview: { host: true, https: process.env.NO_HTTPS ? undefined : https },
   build: { target: 'es2022' },
   test: {
     include: ['src/**/*.test.ts'],
