@@ -12,7 +12,7 @@ import { Workspace } from './workspace/workspace';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
-import { createRenderer, requestedRenderer } from './render/createRenderer';
+import { createRenderer, layerBudgetSlots, requestedRenderer } from './render/createRenderer';
 import { ToolState, type Tool } from './tools/tools';
 import { rgbFromPremultiplied8 } from './ui/color';
 import { ColorPicker } from './ui/colorPicker';
@@ -28,11 +28,18 @@ async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
   const initialCanvas = document.getElementById('stage') as HTMLCanvasElement;
 
-  const { renderer, fallbackReason, canvas } = await createRenderer(initialCanvas, requestedRenderer(location.search));
+  const { renderer, fallbackReason, canvas } = await createRenderer(
+    initialCanvas,
+    requestedRenderer(location.search),
+    layerBudgetSlots(location.search),
+  );
   blockBrowserGestures(canvas);
 
   const workspace = new Workspace();
   seedCanvases(workspace, Number(new URLSearchParams(location.search).get('canvases') ?? 1));
+  renderer.useTileStore(workspace.store);
+  // Dev builds only: lets the desktop test scripts inspect renderer state.
+  if (import.meta.env.DEV) (window as unknown as { __debug: unknown }).__debug = { renderer, workspace };
   /** The selected canvas's editor; null when no canvas is selected. */
   const active = (): Editor | null => workspace.activeEditor;
   const tools = new ToolState();
@@ -61,6 +68,7 @@ async function main(): Promise<void> {
     });
     metrics.frameRendered(rafTime, performance.now() - start, info);
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
+    if (info.moreWork) requestFrame();
   }
 
   /** Zoom to fit every canvas. */
@@ -224,10 +232,12 @@ async function main(): Promise<void> {
   const hud = new Hud(metrics, rendererLabel, () => {
     const s = workspace.stats();
     const a = active()?.stats();
+    const m = renderer.memory();
     return [
       `canvases ${s.canvases} · active: ${a ? `${a.tileEntries} tiles in ${a.layers} layers` : 'none'}`,
-      `slots ${s.usedSlots}/${s.capacitySlots} · pages ${renderer.memory().layerPages}`,
-      `gpu memory ≈ ${mb(renderer.memory().bytes)} (composite pages ${renderer.memory().compositePages})`,
+      `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
+      `evictions ${m.evictions} · reloads ${m.reloads}${m.loadingTiles ? ` (${m.loadingTiles} loading)` : ''}`,
+      `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
       `history ${s.historySteps} undo / ${s.redoSteps} redo · ${mb(s.historyBytes)}`,
       `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
       `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
@@ -297,6 +307,7 @@ async function main(): Promise<void> {
     if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
   }
   renderer.onLost = (message) => showBanner(message, true);
+  renderer.onNeedsFrame = requestFrame;
 
   if (new URLSearchParams(location.search).has('stress')) {
     controls.debugBody.append(

@@ -42,7 +42,7 @@ type Entry =
   | { where: 'gpu'; slot: TileSlot; lastUsed: number }
   /** Off the GPU. `stored` resolves once the backing store has it. */
   | { where: 'stored'; stored: Promise<void> }
-  | { where: 'loading'; requestedAt: number }
+  | { where: 'loading'; requestedAt: number; from: Entry }
   | { where: 'loaded'; requestedAt: number; rgba: Uint8Array };
 
 export interface ResidencyStats {
@@ -68,6 +68,8 @@ export class TileResidency {
   private evictions = 0;
   private reloads = 0;
   private reloadTimes: number[] = [];
+  /** Called when a reloaded tile is ready to upload (the app should draw a frame). */
+  onReloaded: (() => void) | null = null;
 
   constructor(
     readonly capacity: number,
@@ -160,6 +162,11 @@ export class TileResidency {
     return uploads;
   }
 
+  /** True if reloaded tiles are waiting to be uploaded. */
+  get hasUploads(): boolean {
+    return this.loadedQueue.length > 0;
+  }
+
   /** Nothing refers to the tile any more: drop it wherever it is. */
   free(id: TileId): void {
     const e = this.entries.get(id);
@@ -180,6 +187,10 @@ export class TileResidency {
       if (e.where === 'loading' || e.where === 'loaded') loading++;
     }
     return { capacity: this.capacity, resident: this.lru.size, offGpu, loading, evictions: this.evictions, reloads: this.reloads };
+  }
+
+  backingStats(): { tiles: number; bytes: number } {
+    return this.backing.stats();
   }
 
   /** Reload latencies (ms, request → upload) since the last call. */
@@ -208,7 +219,9 @@ export class TileResidency {
       where: 'stored',
       stored: new Promise<void>((resolve) => {
         pixels = (rgba) => {
-          if (this.entries.get(id) !== entry) return resolve(); // freed before its pixels arrived
+          const current = this.entries.get(id);
+          const stillOurs = current === entry || (current?.where === 'loading' && current.from === entry);
+          if (!stillOurs) return resolve(); // freed before its pixels arrived
           void this.backing.put(id, rgba).then(resolve);
         };
       }),
@@ -220,7 +233,7 @@ export class TileResidency {
   private startLoad(id: TileId, e: Extract<Entry, { where: 'stored' }>): void {
     if (this.loadsInFlight >= this.maxLoadsInFlight) return;
     this.loadsInFlight++;
-    const loading: Entry = { where: 'loading', requestedAt: this.now() };
+    const loading: Entry = { where: 'loading', requestedAt: this.now(), from: e };
     this.entries.set(id, loading);
     void e.stored
       .then(() => this.backing.get(id))
@@ -229,6 +242,7 @@ export class TileResidency {
           if (this.entries.get(id) !== loading) return; // freed meanwhile
           this.entries.set(id, { where: 'loaded', requestedAt: loading.requestedAt, rgba });
           this.loadedQueue.push(id);
+          this.onReloaded?.();
         },
         (error: unknown) => {
           console.error(`Could not reload tile ${id}:`, error);

@@ -72,6 +72,20 @@ describe('TileResidency', () => {
     expect(r.takeUploads(8)[0]?.rgba).toEqual(pixels(3));
   });
 
+  it('can reload a tile asked for before its pixels were read back', async () => {
+    const { r } = setup(1);
+    r.beginFrame();
+    r.place(1);
+    r.beginFrame();
+    const eviction = r.place(2)!.evicted!;
+    r.beginFrame();
+    r.ensure([1]); // the GPU readback hasn't finished yet
+    eviction.pixels(pixels(5));
+    await settle();
+    r.beginFrame();
+    expect(r.takeUploads(8)[0]?.rgba).toEqual(pixels(5));
+  });
+
   it('forgets freed tiles wherever they are', async () => {
     const { r, backing } = setup(1);
     r.beginFrame();

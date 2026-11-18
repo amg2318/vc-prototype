@@ -1,11 +1,14 @@
-import { SLOTS_PER_PAGE, TILE_SIZE } from '../config';
-import { DirtyTiles, slotLocation, tileCoords, type TileKey, type TileSlot } from '../document/tiles';
+import { LAYER_GPU_SLOTS, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
+import type { TileStore } from '../document/tileStore';
+import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type TileSlot } from '../document/tiles';
 import type { CanvasId } from '../document/paintDocument';
 import { intersect, type Rect } from '../workspace/coords';
 import { packCompositeUniforms, packLookup } from './compositePacking';
 import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
 import { levelForZoom, PyramidPlanner, type DisplayQuad, type PlannerCanvas } from './pyramid';
-import type { CanvasRenderState, Dab, MergeJob, OverlayRect, RetileJob, StrokeStyle, ViewState } from './renderer';
+import { TileResidency, type Eviction } from './residency';
+import { CompressedTileStore } from './tileBackingStore';
+import type { CanvasRenderState, Dab, MergeJob, OverlayRect, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
 
 export interface Size {
   width: number;
@@ -21,6 +24,11 @@ export interface Size {
  * Positions on screen are computed here in double precision (workspace →
  * clip), so canvases far from the workspace origin stay exact even though
  * the GPU works in single precision.
+ *
+ * Documents name tiles by id; `residency` decides which ids are on the GPU.
+ * Queued work runs in order, and waits (from frame to frame) until the tiles
+ * it reads are back on the GPU. Composites of tiles that are still reloading
+ * wait too; the planner shows a coarser preview meanwhile.
  */
 
 /** Per-instance floats of each pass (see the shaders for the meaning). */
@@ -31,8 +39,8 @@ export const SOLID_QUAD_FLOATS = 12; // clip origin, x axis, y axis · rgba · 0
 
 export interface CompositeBatch {
   canvasId: CanvasId;
-  /** Present when the canvas's sources or properties changed since its last upload. */
-  upload: { uniforms: Float32Array; lookup: Uint32Array } | null;
+  /** The canvas's compositor inputs (tile lookup in GPU slots, which can move between frames). */
+  upload: { uniforms: Float32Array; lookup: Uint32Array };
   /** Instances grouped by level-0 page. */
   instances: Float32Array;
   runs: { page: number; first: number; count: number }[];
@@ -42,7 +50,11 @@ export type DisplayRun =
   | { kind: 'tile'; pool: 'level0' | 'preview'; page: number; first: number; count: number }
   | { kind: 'solid'; first: number; count: number };
 
+/** Queued work that needs tiles on the GPU: ops, and readbacks of layer tiles. */
+type QueuedWork = FrameOp | Exclude<Readback, { kind: 'screenPixel' }>;
+
 export interface Frame {
+  /** Slot-level ops, in order. */
   ops: FrameOp[];
   prediction: Dab[] | null;
   readbacks: Readback[];
@@ -52,7 +64,15 @@ export interface Frame {
   downsample: { instances: Float32Array; runs: { page: number; first: number; count: number }[] };
   display: { tiles: Float32Array; solids: Float32Array; runs: DisplayRun[] };
   stats: { composited: number; downsampled: number; visibleCanvases: number };
+  moreWork: boolean;
 }
+
+/**
+ * Merge jobs per queued op, at most. Each job reads one tile and writes one,
+ * so a chunk is kept to a quarter of the GPU budget: it must fit on the GPU
+ * together with the tiles being reloaded for it.
+ */
+const MAX_MERGE_CHUNK = 64;
 
 /** Clip-space shadow offset of a canvas, in device pixels (right, down). */
 const SHADOW_PX = 4;
@@ -61,18 +81,50 @@ const SHADOW_RGBA: [number, number, number, number] = [0, 0, 0, 0.35];
 export class RenderCore {
   readonly queue = new FrameQueue();
   readonly planner: PyramidPlanner;
+  readonly residency: TileResidency;
   private canvases: CanvasRenderState[] = [];
   private readonly byId = new Map<CanvasId, CanvasRenderState>();
-  /** Canvases whose compositor uniforms/lookup must be uploaded before their next composite. */
-  private readonly needsUpload = new Set<CanvasId>();
+  /** Work waiting for tiles to reload, oldest first. */
+  private waiting: QueuedWork[] = [];
+  /** New tiles whose pixels are queued but not written yet (they can't be composited yet). */
+  private readonly unwritten = new Set<TileId>();
+  /** Whether a tile id still has references (from the document's TileStore). */
+  private isLive: (id: TileId) => boolean = () => true;
   private removed: CanvasId[] = [];
   private overlay: readonly OverlayRect[] = [];
   private strokeCanvas: CanvasId | null = null;
   /** Tiles the current stroke has touched: not plain paper even before the stroke is merged. */
   private readonly strokeTiles = new Set<TileKey>();
 
-  constructor(planner = new PyramidPlanner()) {
+  /** `layerSlots`: the GPU budget for layer tiles, in tiles. */
+  static withLayerBudget(layerSlots: number): RenderCore {
+    return new RenderCore(new PyramidPlanner(), new TileResidency(layerSlots, new CompressedTileStore()));
+  }
+
+  constructor(planner = new PyramidPlanner(), residency = new TileResidency(LAYER_GPU_SLOTS, new CompressedTileStore())) {
     this.planner = planner;
+    this.residency = residency;
+  }
+
+  /** Residency numbers for RendererMemory. */
+  tileMemory(): Omit<RendererMemory, 'layerPages' | 'compositePages' | 'bytes'> {
+    const r = this.residency.stats();
+    const c = this.residency.backingStats();
+    return {
+      residentTiles: r.resident,
+      tileCapacity: r.capacity,
+      compressedTiles: c.tiles,
+      compressedBytes: c.bytes,
+      loadingTiles: r.loading,
+      evictions: r.evictions,
+      reloads: r.reloads,
+    };
+  }
+
+  /** Follow the document's tiles: freed tiles leave the GPU and the backing store. */
+  useTileStore(store: TileStore): void {
+    store.onFree((id) => this.residency.free(id));
+    this.isLive = (id) => store.refCount(id) > 0;
   }
 
   // --- inputs -----------------------------------------------------------------
@@ -82,10 +134,7 @@ export class RenderCore {
     for (const id of this.byId.keys()) if (!next.has(id)) this.removed.push(id);
     this.canvases = [...canvases];
     this.byId.clear();
-    for (const c of canvases) {
-      this.byId.set(c.id, c);
-      this.needsUpload.add(c.id);
-    }
+    for (const c of canvases) this.byId.set(c.id, c);
   }
 
   canvas(id: CanvasId): CanvasRenderState | undefined {
@@ -120,12 +169,19 @@ export class RenderCore {
   merge(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void {
     const c = this.byId.get(canvasId);
     if (jobs.length === 0 || !c) return;
-    this.queue.push({ kind: 'merge', jobs: [...jobs], style: { ...style }, canvas: { width: c.placement.width, height: c.placement.height } });
+    // In chunks, so even a small GPU budget can hold everything one chunk reads and writes.
+    const chunkSize = Math.max(1, Math.min(MAX_MERGE_CHUNK, Math.floor(this.residency.capacity / 4)));
+    for (let i = 0; i < jobs.length; i += chunkSize) {
+      const chunk = jobs.slice(i, i + chunkSize);
+      this.queue.push({ kind: 'merge', jobs: chunk, style: { ...style }, canvas: { width: c.placement.width, height: c.placement.height } });
+    }
+    for (const j of jobs) this.unwritten.add(j.dst);
     this.invalidate(canvasId, jobs.map((j) => j.key));
   }
 
   retile(jobs: readonly RetileJob[]): void {
-    if (jobs.length > 0) this.queue.push(retileCopies(jobs));
+    for (const op of retileCopies(jobs)) this.queue.push(op);
+    for (const j of jobs) this.unwritten.add(j.dst);
   }
 
   private invalidateDabs(dabs: readonly Dab[]): void {
@@ -151,13 +207,44 @@ export class RenderCore {
 
   buildFrame(view: ViewState, clipPerDevicePx: [number, number]): Frame {
     const drained = this.queue.drain();
+    const r = this.residency;
+    r.beginFrame();
+    const work: QueuedWork[] = [...this.waiting, ...drained.ops];
+    const readbacks: Readback[] = [];
+    for (const rb of drained.readbacks) {
+      if (rb.kind === 'screenPixel') readbacks.push(rb);
+      else work.push(rb);
+    }
+
+    // Keep the tiles the oldest waiting work reads, then upload reloaded tiles.
+    if (work[0]) r.ensure(this.reads(work[0]));
+    const ops: FrameOp[] = [];
+    for (const upload of r.takeUploads(UPLOADS_PER_FRAME)) {
+      if (upload.evicted) ops.push(evictOp(upload.evicted));
+      ops.push({ kind: 'upload', slot: upload.slot, rgba: upload.rgba });
+    }
+    // Queued work, in order, as far as its tiles are on the GPU.
+    let done = 0;
+    let heldForRoom = false;
+    for (const item of work) {
+      const result = this.toSlots(item, ops, readbacks);
+      heldForRoom = result === 'needsRoom';
+      if (result !== 'done') break;
+      done++;
+    }
+    this.waiting = work.slice(done);
+
     const plannerCanvases: PlannerCanvas[] = this.canvases.map((c) => ({
       id: c.id,
       placement: c.placement,
       paper: c.paper,
       isPaperOnly: (key) =>
         c.sources.every((s) => !s.tiles.has(key)) && !(c.liveStroke !== null && c.id === this.strokeCanvas && this.strokeTiles.has(key)),
-      isReady: () => true, // tile residency (eviction) comes later
+      // Every layer tile under the key must be on the GPU (ensure() starts reloads).
+      isReady: (key) => {
+        const ids = tileIdsAt(c, key);
+        return r.ensure(ids) && !ids.some((id) => this.unwritten.has(id));
+      },
     }));
     const plan = this.planner.plan(plannerCanvases, view.visible, levelForZoom(view.canvasPxPerDevicePx));
 
@@ -171,8 +258,7 @@ export class RenderCore {
     const composites: CompositeBatch[] = [];
     for (const [canvasId, jobs] of byCanvas) {
       const c = this.byId.get(canvasId)!;
-      const upload = this.needsUpload.has(canvasId) ? { uniforms: packCompositeUniforms(c), lookup: packLookup(c) } : null;
-      this.needsUpload.delete(canvasId);
+      const upload = { uniforms: packCompositeUniforms(c), lookup: packLookup(c, (id) => r.slotOf(id)) };
       const sorted = [...jobs].sort((a, b) => a.dst - b.dst); // groups by page
       const instances = new Float32Array(sorted.length * COMPOSITE_INSTANCE_FLOATS);
       sorted.forEach((job, i) => {
@@ -196,18 +282,102 @@ export class RenderCore {
     });
 
     const visibleCanvases = new Set(plan.display.map((q) => q.canvasId)).size;
+    // Screen-pixel readbacks go last: they read the finished frame.
+    readbacks.sort((a, b) => Number(a.kind === 'screenPixel') - Number(b.kind === 'screenPixel'));
     const frame: Frame = {
-      ops: drained.ops,
+      ops,
       prediction: drained.prediction,
-      readbacks: drained.readbacks,
+      readbacks,
       removedCanvases: this.removed,
       composites,
       downsample: { instances: downInstances, runs: pageRuns(downs.map((d) => d.dst)) },
       display: this.packDisplay(plan.display, view.workspaceToClip, clipPerDevicePx),
       stats: { composited: plan.composites.length, downsampled: plan.downsamples.length, visibleCanvases },
+      // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
+      // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
+      moreWork: plan.overBudget || r.hasUploads || heldForRoom,
     };
     this.removed = [];
     return frame;
+  }
+
+  /** Tile ids a piece of queued work reads. */
+  private reads(item: QueuedWork): TileId[] {
+    switch (item.kind) {
+      case 'merge':
+        return item.jobs.flatMap((j) => (j.src === null ? [] : [j.src]));
+      case 'copies':
+        return item.copies.map((c) => c.src);
+      case 'empty':
+        return item.slots;
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * Translate one piece of queued work from tile ids to GPU slots, adding the
+   * evictions that make room. If the tiles it reads aren't on the GPU yet
+   * ('needsTiles': their reload will ask for a frame) or there is no room this
+   * frame ('needsRoom'), it is retried next frame.
+   */
+  private toSlots(item: QueuedWork, ops: FrameOp[], readbacks: Readback[]): 'done' | 'needsTiles' | 'needsRoom' {
+    const r = this.residency;
+    if (item.kind === 'clearMask' || item.kind === 'dabs' || item.kind === 'evict' || item.kind === 'upload') {
+      ops.push(item);
+      return 'done';
+    }
+    if (item.kind === 'thumbnail') {
+      // Thumbnails use what is on the GPU now, and ask for the rest to come back.
+      r.ensure(item.tiles.map(([, id]) => id));
+      const tiles = item.tiles.flatMap(([key, id]): [TileKey, TileSlot][] => {
+        const slot = r.slotOf(id);
+        return slot === undefined ? [] : [[key, slot]];
+      });
+      readbacks.push({ ...item, tiles });
+      return 'done';
+    }
+    if (!r.ensure(this.reads(item))) return 'needsTiles';
+    if (item.kind === 'empty') {
+      // A tile the GPU has never seen counts as "not empty" (nothing is deleted by mistake).
+      const known = item.slots.filter((id) => r.slotOf(id) !== undefined);
+      readbacks.push({
+        kind: 'empty',
+        slots: known.map((id) => r.slotOf(id)!),
+        resolve: (empty) => item.resolve(item.slots.map((id) => (known.includes(id) ? empty[known.indexOf(id)]! : false))),
+      });
+      return 'done';
+    }
+
+    // Writes: a slot for every new tile (skipping tiles freed while this waited).
+    const evictions: FrameOp[] = [];
+    const slotFor = new Map<TileId, TileSlot>();
+    const writes = item.kind === 'merge' ? item.jobs.map((j) => j.dst) : item.zero;
+    for (const id of writes) {
+      if (!this.isLive(id)) continue;
+      const placed = r.place(id);
+      if (!placed) {
+        ops.push(...evictions); // tiles already evicted for this work must still be read back
+        return 'needsRoom'; // every slot is in use this frame
+      }
+      if (placed.evicted) evictions.push(evictOp(placed.evicted));
+      slotFor.set(id, placed.slot);
+    }
+    for (const id of writes) this.unwritten.delete(id);
+    ops.push(...evictions);
+    const src = (id: TileId): TileSlot => r.slotOf(id)!;
+    if (item.kind === 'merge') {
+      const jobs = item.jobs.flatMap((j) => {
+        const dst = slotFor.get(j.dst);
+        return dst === undefined ? [] : [{ key: j.key, src: j.src === null ? null : src(j.src), dst }];
+      });
+      if (jobs.length > 0) ops.push({ ...item, jobs });
+    } else {
+      const zero = item.zero.flatMap((id) => (slotFor.has(id) ? [slotFor.get(id)!] : []));
+      const copies = item.copies.flatMap((c) => (slotFor.has(c.dst) ? [{ ...c, src: src(c.src), dst: slotFor.get(c.dst)! }] : []));
+      if (zero.length > 0) ops.push({ kind: 'copies', zero, copies });
+    }
+    return 'done';
   }
 
   /** Display quads in draw order: per canvas a shadow, then its tiles; then the overlay. */
@@ -274,19 +444,34 @@ function pageRuns(slots: readonly TileSlot[]): { page: number; first: number; co
   return runs;
 }
 
+/** Layer tile ids of every visible source of a canvas at `key`. */
+function tileIdsAt(c: CanvasRenderState, key: TileKey): TileId[] {
+  const ids: TileId[] = [];
+  for (const s of c.sources) {
+    const id = s.tiles.get(key);
+    if (id !== undefined) ids.push(id);
+  }
+  return ids;
+}
+
+function evictOp(e: Eviction): FrameOp {
+  return { kind: 'evict', slot: e.slot, done: e.pixels };
+}
+
 /**
- * Turn resize jobs into plain tile copies: zero each new tile, then copy the
- * part of every source tile that lands inside the tile's `keep` region.
+ * Turn resize jobs into plain tile copies, one op per new tile (so each can
+ * wait for its own source tiles): zero the tile, then copy the part of every
+ * source tile that lands inside the tile's `keep` region.
  */
-export function retileCopies(jobs: readonly RetileJob[]): Extract<FrameOp, { kind: 'copies' }> {
-  const copies: TileCopy[] = [];
-  for (const job of jobs) {
+export function retileCopies(jobs: readonly RetileJob[]): Extract<FrameOp, { kind: 'copies' }>[] {
+  return jobs.map((job) => {
+    const copies: TileCopy[] = [];
     for (const s of job.sources) {
       const placed: Rect = { x: s.dx, y: s.dy, width: TILE_SIZE, height: TILE_SIZE };
       const part = intersect(placed, job.keep);
       if (!part) continue;
       copies.push({ src: s.src, sx: part.x - s.dx, sy: part.y - s.dy, dst: job.dst, dx: part.x, dy: part.y, width: part.width, height: part.height });
     }
-  }
-  return { kind: 'copies', zero: jobs.map((j) => j.dst), copies };
+    return { kind: 'copies' as const, zero: [job.dst], copies };
+  });
 }

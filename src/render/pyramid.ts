@@ -122,6 +122,8 @@ export interface FramePlan {
   downsamples: DownsampleJob[];
   /** Back to front. */
   display: DisplayQuad[];
+  /** True if work was left for the next frame because of the per-frame budget. */
+  overBudget: boolean;
 }
 
 interface CachedTile {
@@ -181,7 +183,7 @@ export class PyramidPlanner {
    */
   plan(canvases: readonly PlannerCanvas[], visible: Rect, level: number): FramePlan {
     this.frame++;
-    const out: FramePlan = { composites: [], downsamples: [], display: [] };
+    const out: FramePlan = { composites: [], downsamples: [], display: [], overBudget: false };
     let budget = this.budgetPerFrame;
     let scratchUsed = 0;
     this.syncCaches(canvases);
@@ -225,7 +227,10 @@ export class PyramidPlanner {
       }
       if (cached) return cached.slot;
       if (c.isPaperOnly(key)) return null;
-      if (budget <= 0 || scratchUsed >= this.scratch.length) return undefined;
+      if (budget <= 0 || scratchUsed >= this.scratch.length) {
+        out.overBudget = true;
+        return undefined;
+      }
       budget--;
       const dst = this.scratch[scratchUsed++]!;
       out.composites.push({ canvasId: c.id, key, dst });
@@ -270,7 +275,11 @@ export class PyramidPlanner {
       const cache = this.caches.get(c.id)!;
       if (l === 0) {
         const key0 = tile.todo[0]!;
-        if (!c.isReady(key0) || budget <= 0) continue;
+        if (!c.isReady(key0)) continue;
+        if (budget <= 0) {
+          out.overBudget = true;
+          continue;
+        }
         budget--;
         level0Source(c, cache, key0, true);
         continue;

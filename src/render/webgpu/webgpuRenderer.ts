@@ -3,12 +3,14 @@ import {
   COMPOSITE_LEVEL0_PAGES,
   MAX_ATLAS_PAGES,
   PAGE_BYTES,
+  TILE_BYTES,
   THUMBNAIL_SIZE,
   TILE_COUNT,
   TILE_SIZE,
 } from '../../config';
 import type { CanvasId } from '../../document/paintDocument';
-import { slotLocation, type TileKey, type TileSlot } from '../../document/tiles';
+import type { TileStore } from '../../document/tileStore';
+import { slotLocation, type TileId, type TileKey, type TileSlot } from '../../document/tiles';
 import {
   EMPTY_CHECK_BATCH,
   EMPTY_CHECK_BLOCK,
@@ -121,8 +123,9 @@ export class WebGPURenderer implements Renderer {
   readonly kind = 'webgpu' as const;
   readonly maxCanvasSize: number;
   onLost: ((message: string) => void) | null = null;
+  onNeedsFrame: (() => void) | null = null;
 
-  private readonly core = new RenderCore();
+  private readonly core: RenderCore;
   private lost = false;
 
   private readonly layerPages: Pages;
@@ -170,7 +173,7 @@ export class WebGPURenderer implements Renderer {
   private readonly timestamps: { query: GPUQuerySet; resolve: GPUBuffer; read: GPUBuffer; busy: boolean } | null;
 
   /** Throws if WebGPU is unavailable or setup fails; the caller falls back to WebGL2. */
-  static async create(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
+  static async create(canvas: HTMLCanvasElement, layerSlots: number): Promise<WebGPURenderer> {
     if (!('gpu' in navigator) || !navigator.gpu) throw new Error('navigator.gpu is not available');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No WebGPU adapter');
@@ -189,7 +192,7 @@ export class WebGPURenderer implements Renderer {
 
     device.pushErrorScope('validation');
     device.pushErrorScope('out-of-memory');
-    const renderer = new WebGPURenderer(device, context, format, wantTimestamps);
+    const renderer = new WebGPURenderer(device, context, format, wantTimestamps, layerSlots);
     const oom = await device.popErrorScope();
     const invalid = await device.popErrorScope();
     const error = oom ?? invalid;
@@ -205,7 +208,10 @@ export class WebGPURenderer implements Renderer {
     private readonly context: GPUCanvasContext,
     canvasFormat: GPUTextureFormat,
     timestampsSupported: boolean,
+    layerSlots: number,
   ) {
+    this.core = RenderCore.withLayerBudget(layerSlots);
+    this.core.residency.onReloaded = () => this.onNeedsFrame?.();
     this.canvasFormat = canvasFormat;
     this.maxCanvasSize = device.limits.maxTextureDimension2D;
     void device.lost.then((info) => {
@@ -336,7 +342,16 @@ export class WebGPURenderer implements Renderer {
       layerPages: this.layerPages.textures.length,
       compositePages,
       bytes: (this.layerPages.textures.length + compositePages) * PAGE_BYTES + masks + this.canvasGpu.size * LOOKUP_BYTES,
+      ...this.core.tileMemory(),
     };
+  }
+
+  takeReloadTimes(): number[] {
+    return this.core.residency.takeReloadTimes();
+  }
+
+  useTileStore(store: TileStore): void {
+    this.core.useTileStore(store);
   }
 
   resize(pixelWidth: number, pixelHeight: number): void {
@@ -370,12 +385,10 @@ export class WebGPURenderer implements Renderer {
   }
 
   mergeStroke(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void {
-    this.ensureLayerPages(jobs.map((j) => j.dst));
     this.core.merge(canvasId, jobs, style);
   }
 
   retile(canvasId: CanvasId, jobs: readonly RetileJob[]): void {
-    this.ensureLayerPages(jobs.map((j) => j.dst));
     this.core.retile(jobs);
     this.core.invalidate(canvasId, 'all');
   }
@@ -384,26 +397,26 @@ export class WebGPURenderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'screenPixel', x, y, resolve }));
   }
 
-  findEmptyTiles(slots: readonly TileSlot[]): Promise<boolean[]> {
+  findEmptyTiles(slots: readonly TileId[]): Promise<boolean[]> {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'empty', slots: [...slots], resolve }));
   }
 
-  readThumbnail(tiles: ReadonlyMap<TileKey, TileSlot>): Promise<Uint8Array> {
+  readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array> {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
   render(view: ViewState): FrameInfo {
-    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0 };
+    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false };
     if (this.lost) return idle;
     const device = this.device;
     const canvas = this.context.canvas as HTMLCanvasElement;
     const compositeStart = performance.now();
     const frame = this.core.buildFrame(view, [2 / canvas.width, 2 / canvas.height]);
-    this.syncCompositePages();
+    this.syncPages();
     for (const id of frame.removedCanvases) this.releaseCanvas(id);
 
     const encoder = device.createCommandEncoder();
-    this.encodeLayerOps(encoder, frame.ops, frame.prediction);
+    const afterLayerOps = this.encodeLayerOps(encoder, frame.ops, frame.prediction);
 
     const timing = this.timestamps && !this.timestamps.busy && (frame.composites.length > 0 || frame.downsample.runs.length > 0)
       ? this.timestamps : null;
@@ -437,7 +450,7 @@ export class WebGPURenderer implements Renderer {
 
     device.queue.submit([encoder.finish()]);
     const submittedAt = performance.now();
-    for (const finish of pendingReadbacks) void finish();
+    for (const finish of [...afterLayerOps, ...pendingReadbacks]) void finish();
     const compositeGpuMs = timing && totalPasses > 0 ? this.readTimestamps(timing) : undefined;
     const gpuDone = device.queue.onSubmittedWorkDone().then(() => performance.now());
     return {
@@ -446,6 +459,7 @@ export class WebGPURenderer implements Renderer {
       compositedTiles: frame.stats.composited,
       downsampledTiles: frame.stats.downsampled,
       visibleCanvases: frame.stats.visibleCanvases,
+      moreWork: frame.moreWork,
       compositeCpuMs,
       ...(compositeGpuMs ? { compositeGpuMs } : {}),
     };
@@ -457,7 +471,9 @@ export class WebGPURenderer implements Renderer {
 
   // --- layer tile work ----------------------------------------------------------
 
-  private encodeLayerOps(encoder: GPUCommandEncoder, ops: readonly FrameOp[], prediction: Dab[] | null): void {
+  /** Encodes the layer ops; returns work to run after submit (mapping eviction readbacks). */
+  private encodeLayerOps(encoder: GPUCommandEncoder, ops: readonly FrameOp[], prediction: Dab[] | null): (() => Promise<void>)[] {
+    const afterSubmit: (() => Promise<void>)[] = [];
     // Upload every dab used this frame (stroke ops, then the prediction) in one go.
     const dabBatches = ops.flatMap((op) => (op.kind === 'dabs' ? [op.dabs] : []));
     if (prediction) dabBatches.push(prediction);
@@ -505,15 +521,44 @@ export class WebGPURenderer implements Renderer {
           pass.end();
           mergeOffset += jobs.length;
         }
-      } else {
+      } else if (op.kind === 'copies') {
         for (const slot of op.zero) this.copyTile(encoder, null, 0, 0, slot, 0, 0, TILE_SIZE, TILE_SIZE);
         for (const c of op.copies) this.copyTile(encoder, c.src, c.sx, c.sy, c.dst, c.dx, c.dy, c.width, c.height);
+      } else if (op.kind === 'evict') {
+        // Read the tile back before anything later in this encoder reuses the slot.
+        const buffer = this.device.createBuffer({ size: TILE_BYTES, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const at = slotLocation(op.slot);
+        encoder.copyTextureToBuffer(
+          { texture: this.layerPages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+          { buffer, bytesPerRow: TILE_SIZE * 4 },
+          [TILE_SIZE, TILE_SIZE],
+        );
+        afterSubmit.push(async () => {
+          await buffer.mapAsync(GPUMapMode.READ);
+          const rgba = new Uint8Array(buffer.getMappedRange().slice(0));
+          buffer.destroy();
+          op.done(rgba);
+        });
+      } else {
+        // Upload through a staging buffer, so it stays in order with the other commands
+        // (queue.writeTexture would run before this whole encoder).
+        const staging = this.device.createBuffer({ size: TILE_BYTES, usage: GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
+        new Uint8Array(staging.getMappedRange()).set(op.rgba);
+        staging.unmap();
+        const at = slotLocation(op.slot);
+        encoder.copyBufferToTexture(
+          { buffer: staging, bytesPerRow: TILE_SIZE * 4 },
+          { texture: this.layerPages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+          [TILE_SIZE, TILE_SIZE],
+        );
+        afterSubmit.push(async () => staging.destroy());
       }
     }
     if (prediction) {
       this.clearPass(encoder, this.predictionMask);
       this.dabPass(encoder, this.predictionMask, dabBuffer, dabOffset, prediction.length);
     }
+    return afterSubmit;
   }
 
   /**
@@ -750,12 +795,9 @@ export class WebGPURenderer implements Renderer {
     return buffer;
   }
 
-  private ensureLayerPages(slots: readonly TileSlot[]): void {
-    if (slots.length === 0) return;
-    if (this.layerPages.ensure(Math.max(...slots.map((s) => slotLocation(s).page)) + 1)) this.rebuildLayerBindGroups();
-  }
-
-  private syncCompositePages(): void {
+  /** Create the atlas pages the slot pools now need. */
+  private syncPages(): void {
+    if (this.layerPages.ensure(this.core.residency.slots.pagesNeeded)) this.rebuildLayerBindGroups();
     const level0 = this.level0Pages.ensure(this.core.planner.level0Pool.pagesNeeded);
     const preview = this.previewPages.ensure(this.core.planner.previewPool.pagesNeeded);
     if (level0 || preview) this.rebuildCompositeBindGroups();

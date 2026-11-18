@@ -5,6 +5,9 @@ import type { TileKey, TileSlot } from '../document/tiles';
 /**
  * The ordered GPU operations on layer tiles queued since the last frame,
  * the current prediction and pending readbacks. Drained once per frame.
+ *
+ * Queued ops name tiles by id; RenderCore turns them into the same ops on
+ * GPU slots (adding evictions and reload uploads) before a backend runs them.
  */
 
 /** Copy a region between tile slots (tile-local pixels). */
@@ -24,7 +27,11 @@ export type FrameOp =
   | { kind: 'dabs'; dabs: Dab[] }
   | { kind: 'merge'; jobs: MergeJob[]; style: StrokeStyle; canvas: Size }
   /** Zero `zero` slots, then run `copies` in order (resizing a canvas). */
-  | { kind: 'copies'; zero: TileSlot[]; copies: TileCopy[] };
+  | { kind: 'copies'; zero: TileSlot[]; copies: TileCopy[] }
+  /** Read a slot's pixels back before it is reused (slot level only). */
+  | { kind: 'evict'; slot: TileSlot; done: (rgba: Uint8Array) => void }
+  /** Write reloaded pixels into a slot (slot level only). */
+  | { kind: 'upload'; slot: TileSlot; rgba: Uint8Array };
 
 export type Readback =
   | { kind: 'screenPixel'; x: number; y: number; resolve: (rgba: Rgba8) => void }

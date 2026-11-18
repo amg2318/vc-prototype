@@ -19,11 +19,19 @@ export const MAX_SOURCES = MAX_LAYERS;
 /**
  * Tile lookup table: a TILE_COUNT × MAX_SOURCES integer texture. Texel
  * (tileKey, sourceIndex) holds slot + 1, or 0 for "no tile here".
+ * `slotOf` maps the document's tile ids to GPU slots.
  */
-export function packLookup(state: CompositeInput, target = new Uint32Array(TILE_COUNT * MAX_SOURCES)): Uint32Array {
+export function packLookup(
+  state: CompositeInput,
+  slotOf: (id: number) => number | undefined = (id) => id,
+  target = new Uint32Array(TILE_COUNT * MAX_SOURCES),
+): Uint32Array {
   target.fill(0);
   state.sources.slice(0, MAX_SOURCES).forEach((source, row) => {
-    for (const [key, slot] of source.tiles) target[row * TILE_COUNT + key] = slot + 1;
+    for (const [key, id] of source.tiles) {
+      const slot = slotOf(id);
+      if (slot !== undefined) target[row * TILE_COUNT + key] = slot + 1;
+    }
   });
   return target;
 }

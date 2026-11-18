@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { TILE_BYTES } from '../config';
+import { TileStore } from '../document/tileStore';
 import { tileKey } from '../document/tiles';
+import { TileResidency } from './residency';
+import { CompressedTileStore } from './tileBackingStore';
 import { PyramidPlanner } from './pyramid';
 import { clipQuad, RenderCore, retileCopies, SOLID_QUAD_FLOATS } from './renderCore';
 import type { CanvasRenderState, ViewState } from './renderer';
@@ -33,17 +37,17 @@ describe('clipQuad', () => {
 
 describe('retileCopies', () => {
   it('zeroes each new tile and copies the parts of its sources inside the kept region', () => {
-    const op = retileCopies([
+    const [op] = retileCopies([
       { key: 0, dst: 9, keep: { x: 0, y: 0, width: 200, height: 256 }, sources: [{ src: 3, dx: 100, dy: 0 }] },
-    ]);
+    ]) as [ReturnType<typeof retileCopies>[number]];
     expect(op.zero).toEqual([9]);
     expect(op.copies).toEqual([{ src: 3, sx: 0, sy: 0, dst: 9, dx: 100, dy: 0, width: 100, height: 256 }]);
   });
 
   it('copies from the right part of a source shifted up-left', () => {
-    const op = retileCopies([
+    const [op] = retileCopies([
       { key: 0, dst: 1, keep: { x: 0, y: 0, width: 256, height: 256 }, sources: [{ src: 2, dx: -156, dy: -56 }] },
-    ]);
+    ]) as [ReturnType<typeof retileCopies>[number]];
     expect(op.copies[0]).toEqual({ src: 2, sx: 156, sy: 56, dst: 1, dx: 0, dy: 0, width: 100, height: 200 });
   });
 });
@@ -62,17 +66,6 @@ describe('RenderCore', () => {
     expect(shadowB.kind === 'solid' && frame.display.solids[shadowB.first * SOLID_QUAD_FLOATS + 9]).toBeCloseTo(0.35);
   });
 
-  it('uploads a canvas’s compositor inputs only when they changed', () => {
-    const core = new RenderCore(new PyramidPlanner(64, 64, 64));
-    core.setCanvases([canvas('a', 0, [0])]);
-    const first = core.buildFrame(view, px);
-    expect(first.composites[0]!.upload).not.toBeNull();
-    core.invalidate('a', [0]);
-    expect(core.buildFrame(view, px).composites[0]!.upload).toBeNull();
-    core.setCanvases([canvas('a', 0, [0])]);
-    core.invalidate('a', [0]);
-    expect(core.buildFrame(view, px).composites[0]!.upload).not.toBeNull();
-  });
 
   it('recomposites the tiles under a stroke, ignoring dabs past the canvas edge', () => {
     const core = new RenderCore(new PyramidPlanner(64, 64, 64));
@@ -104,5 +97,87 @@ describe('RenderCore', () => {
     const frame = core.buildFrame(view, px);
     const last = frame.display.runs[frame.display.runs.length - 1]!;
     expect(last.kind).toBe('solid');
+  });
+});
+
+describe('RenderCore with tile residency', () => {
+  const style = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  /** A core whose GPU holds only `capacity` layer tiles. */
+  const small = (capacity: number) => new RenderCore(new PyramidPlanner(64, 64, 64), new TileResidency(capacity, new CompressedTileStore()));
+  const kinds = (frame: { ops: { kind: string }[] }) => frame.ops.map((o) => o.kind);
+
+  it('reads a tile back before reusing its slot for a new tile', () => {
+    const core = small(1);
+    core.setCanvases([canvas('a', 0)]);
+    core.merge('a', [{ key: 0, src: null, dst: 100 }], style);
+    expect(kinds(core.buildFrame(view, px))).toEqual(['merge']);
+    core.merge('a', [{ key: 1, src: null, dst: 101 }], style);
+    const frame = core.buildFrame(view, px);
+    expect(kinds(frame)).toEqual(['evict', 'merge']);
+    const [evict, merge] = frame.ops as unknown as [{ kind: 'evict'; slot: number }, { kind: 'merge'; jobs: { dst: number }[] }];
+    expect(merge.jobs[0]!.dst).toBe(evict.slot);
+  });
+
+  /** Tiles 100 and 101 written, then 103, which evicts 100 (read back as 9s). */
+  async function withEvictedTile() {
+    const core = small(2);
+    core.setCanvases([canvas('a', 0)]);
+    core.merge('a', [{ key: 0, src: null, dst: 100 }, { key: 1, src: null, dst: 101 }], style);
+    core.buildFrame(view, px);
+    core.merge('a', [{ key: 16, src: null, dst: 103 }], style);
+    const evict = core.buildFrame(view, px).ops[0] as { kind: 'evict'; done: (rgba: Uint8Array) => void };
+    evict.done(new Uint8Array(TILE_BYTES).fill(9));
+    await settle();
+    return core;
+  }
+
+  it('holds a merge until its evicted source tile is back, then uploads it first', async () => {
+    const core = await withEvictedTile();
+    core.merge('a', [{ key: 0, src: 100, dst: 102 }], style); // a stroke over tile 100
+    expect(kinds(core.buildFrame(view, px))).toEqual([]); // waits: tile 100 is reloading
+    await settle();
+    const frame = core.buildFrame(view, px);
+    expect(kinds(frame)).toEqual(['evict', 'upload', 'evict', 'merge']);
+    const upload = frame.ops[1] as { kind: 'upload'; slot: number; rgba: Uint8Array };
+    expect(upload.rgba[0]).toBe(9);
+  });
+
+  it('keeps showing the old composite while a new tile waits to be written', async () => {
+    const core = await withEvictedTile();
+    core.merge('a', [{ key: 0, src: 100, dst: 102 }], style);
+    // The document already shows the new tile 102 at key 0.
+    core.setCanvases([{ ...canvas('a', 0), sources: [{ kind: 'raster', opacity: 1, blendMode: 'normal', tiles: new Map([[0, 102]]) }] }]);
+    core.invalidate('a', [0]);
+    const waiting = core.buildFrame(view, px);
+    const origins = waiting.composites.flatMap((b) => [...b.instances].filter((_, i) => i % 4 >= 2));
+    expect(origins).not.toContain(0); // tile (0,0) is not recomposited yet
+    await settle();
+    const ran = core.buildFrame(view, px); // the merge runs first, then tile (0,0) is recomposited
+    expect(kinds(ran)).toContain('merge');
+    expect(ran.composites.flatMap((b) => [...b.instances].filter((_, i) => i % 4 >= 2))).toContain(0);
+  });
+
+  it('puts GPU slots, not tile ids, in the compositor lookup', () => {
+    const core = small(4);
+    core.setCanvases([canvas('a', 0)]);
+    core.merge('a', [{ key: 0, src: null, dst: 500 }], style);
+    core.buildFrame(view, px);
+    core.setCanvases([{ ...canvas('a', 0), sources: [{ kind: 'raster', opacity: 1, blendMode: 'normal', tiles: new Map([[0, 500]]) }] }]);
+    core.invalidate('a', [0]);
+    const batch = core.buildFrame(view, px).composites[0]!;
+    expect(batch.upload.lookup[0]).toBe(1); // tile 500 is in GPU slot 0 (stored as slot + 1)
+  });
+
+  it('skips writing tiles that were freed while their work waited', () => {
+    const core = small(1);
+    const store = new TileStore(1000);
+    core.useTileStore(store);
+    core.setCanvases([canvas('a', 0)]);
+    const id = store.allocate()!;
+    store.release(id);
+    core.merge('a', [{ key: 0, src: null, dst: id }], style);
+    expect(kinds(core.buildFrame(view, px))).toEqual([]);
+    expect(core.residency.stats().resident).toBe(0);
   });
 });

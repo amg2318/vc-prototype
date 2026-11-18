@@ -4,11 +4,13 @@ import {
   MAX_ATLAS_PAGES,
   PAGE_BYTES,
   THUMBNAIL_SIZE,
+  TILE_BYTES,
   TILE_COUNT,
   TILE_SIZE,
 } from '../../config';
 import type { CanvasId } from '../../document/paintDocument';
-import { slotLocation, type TileKey, type TileSlot } from '../../document/tiles';
+import type { TileStore } from '../../document/tileStore';
+import { slotLocation, type TileId, type TileKey, type TileSlot } from '../../document/tiles';
 import {
   COMPOSITE_UNIFORM_VEC4S,
   EMPTY_CHECK_BATCH,
@@ -61,9 +63,10 @@ export class WebGL2Renderer implements Renderer {
   readonly kind = 'webgl2' as const;
   readonly maxCanvasSize: number;
   onLost: ((message: string) => void) | null = null;
+  onNeedsFrame: (() => void) | null = null;
 
   private readonly gl: WebGL2RenderingContext;
-  private readonly core = new RenderCore();
+  private readonly core: RenderCore;
   private lost = false;
 
   private readonly layerPages: Target[] = [];
@@ -90,7 +93,7 @@ export class WebGL2Renderer implements Renderer {
   private readonly vao: WebGLVertexArrayObject;
   private staging = new Float32Array(4096);
 
-  static create(canvas: HTMLCanvasElement): WebGL2Renderer {
+  static create(canvas: HTMLCanvasElement, layerSlots: number): WebGL2Renderer {
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
@@ -102,11 +105,13 @@ export class WebGL2Renderer implements Renderer {
       desynchronized: true, // low-latency hint; ignored where unsupported (e.g. Safari)
     });
     if (!gl) throw new Error('WebGL2 is not available');
-    return new WebGL2Renderer(canvas, gl);
+    return new WebGL2Renderer(canvas, gl, layerSlots);
   }
 
-  private constructor(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext) {
+  private constructor(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext, layerSlots: number) {
     this.gl = gl;
+    this.core = RenderCore.withLayerBudget(layerSlots);
+    this.core.residency.onReloaded = () => this.onNeedsFrame?.();
     this.maxCanvasSize = Math.min(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), gl.getParameter(gl.MAX_TEXTURE_SIZE));
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
@@ -142,7 +147,16 @@ export class WebGL2Renderer implements Renderer {
       layerPages: this.layerPages.length,
       compositePages,
       bytes: (this.layerPages.length + compositePages) * PAGE_BYTES + masks + this.canvasGl.size * LOOKUP_BYTES,
+      ...this.core.tileMemory(),
     };
+  }
+
+  takeReloadTimes(): number[] {
+    return this.core.residency.takeReloadTimes();
+  }
+
+  useTileStore(store: TileStore): void {
+    this.core.useTileStore(store);
   }
 
   resize(pixelWidth: number, pixelHeight: number): void {
@@ -176,12 +190,10 @@ export class WebGL2Renderer implements Renderer {
   }
 
   mergeStroke(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void {
-    this.ensureLayerPages(jobs.map((j) => j.dst));
     this.core.merge(canvasId, jobs, style);
   }
 
   retile(canvasId: CanvasId, jobs: readonly RetileJob[]): void {
-    this.ensureLayerPages(jobs.map((j) => j.dst));
     this.core.retile(jobs);
     this.core.invalidate(canvasId, 'all');
   }
@@ -190,21 +202,21 @@ export class WebGL2Renderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'screenPixel', x, y, resolve }));
   }
 
-  findEmptyTiles(slots: readonly TileSlot[]): Promise<boolean[]> {
+  findEmptyTiles(slots: readonly TileId[]): Promise<boolean[]> {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'empty', slots: [...slots], resolve }));
   }
 
-  readThumbnail(tiles: ReadonlyMap<TileKey, TileSlot>): Promise<Uint8Array> {
+  readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array> {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
   render(view: ViewState): FrameInfo {
     const gl = this.gl;
-    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0 };
+    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false };
     if (this.lost) return idle;
     const compositeStart = performance.now();
     const frame = this.core.buildFrame(view, [2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight]);
-    this.syncCompositePages();
+    this.syncPages();
     for (const id of frame.removedCanvases) this.releaseCanvas(id);
 
     this.runLayerOps(frame.ops, frame.prediction);
@@ -221,6 +233,7 @@ export class WebGL2Renderer implements Renderer {
       compositedTiles: frame.stats.composited,
       downsampledTiles: frame.stats.downsampled,
       visibleCanvases: frame.stats.visibleCanvases,
+      moreWork: frame.moreWork,
       compositeCpuMs,
     };
   }
@@ -236,10 +249,11 @@ export class WebGL2Renderer implements Renderer {
       if (op.kind === 'clearMask') this.clear(this.strokeMask, 0, 0, 0, 0);
       else if (op.kind === 'dabs') this.drawDabs(this.strokeMask, op.dabs);
       else if (op.kind === 'merge') this.merge(op);
-      else {
+      else if (op.kind === 'copies') {
         for (const slot of op.zero) this.clearSlot(slot);
         for (const c of op.copies) this.copyRegion(c.src, c.sx, c.sy, c.dst, c.dx, c.dy, c.width, c.height);
-      }
+      } else if (op.kind === 'evict') op.done(this.readSlot(op.slot));
+      else this.writeSlot(op.slot, op.rgba);
     }
     if (prediction) {
       this.clear(this.predictionMask, 0, 0, 0, 0);
@@ -287,6 +301,23 @@ export class WebGL2Renderer implements Renderer {
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, pageJobs.length);
     }
     gl.disable(gl.BLEND);
+  }
+
+  /** Synchronous readback of one tile (WebGL2 has no simple async readback). */
+  private readSlot(slot: TileSlot): Uint8Array {
+    const gl = this.gl;
+    const at = slotLocation(slot);
+    const rgba = new Uint8Array(TILE_BYTES);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.layerPages[at.page]!.framebuffer);
+    gl.readPixels(at.x, at.y, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    return rgba;
+  }
+
+  private writeSlot(slot: TileSlot, rgba: Uint8Array): void {
+    const gl = this.gl;
+    const at = slotLocation(slot);
+    gl.bindTexture(gl.TEXTURE_2D, this.layerPages[at.page]!.texture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, at.x, at.y, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
   }
 
   private clearSlot(slot: TileSlot): void {
@@ -432,15 +463,11 @@ export class WebGL2Renderer implements Renderer {
 
   // --- resources and state helpers ---------------------------------------------
 
-  private ensureLayerPages(slots: readonly TileSlot[]): void {
-    if (slots.length === 0) return;
-    const count = Math.max(...slots.map((s) => slotLocation(s).page)) + 1;
-    if (count > MAX_ATLAS_PAGES) throw new Error(`Tile pool limit: ${count} > ${MAX_ATLAS_PAGES} pages`);
-    while (this.layerPages.length < count) this.layerPages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8));
-  }
-
-  /** Composite pages are sampled with bilinear filtering by the display pass. */
-  private syncCompositePages(): void {
+  /** Create the atlas pages the slot pools now need. Composite pages are sampled with bilinear filtering. */
+  private syncPages(): void {
+    const layers = this.core.residency.slots.pagesNeeded;
+    if (layers > MAX_ATLAS_PAGES) throw new Error(`Tile pool limit: ${layers} > ${MAX_ATLAS_PAGES} pages`);
+    while (this.layerPages.length < layers) this.layerPages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8));
     const { level0Pool, previewPool } = this.core.planner;
     const level0 = Math.min(level0Pool.pagesNeeded, COMPOSITE_LEVEL0_PAGES);
     while (this.level0Pages.length < level0) this.level0Pages.push(this.createTarget(ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE, this.gl.RGBA8, true));

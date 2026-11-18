@@ -3,7 +3,8 @@ import type { BlendMode, RGB } from '../document/blend';
 import type { MergeJob, StrokeMode } from '../document/editor';
 import type { CanvasId } from '../document/paintDocument';
 import type { RetileJob } from '../document/retile';
-import type { TileKey, TileSlot } from '../document/tiles';
+import type { TileStore } from '../document/tileStore';
+import type { TileId, TileKey } from '../document/tiles';
 import type { Placement, Rect } from '../workspace/coords';
 
 export type { Dab, MergeJob, RetileJob };
@@ -27,7 +28,7 @@ export interface RasterSource {
   kind: 'raster';
   opacity: number;
   blendMode: BlendMode;
-  tiles: ReadonlyMap<TileKey, TileSlot>;
+  tiles: ReadonlyMap<TileKey, TileId>;
 }
 export type CompositeSource = RasterSource;
 
@@ -74,6 +75,8 @@ export interface FrameInfo {
   compositeCpuMs: number;
   /** GPU time of the composite passes in ms, when the device supports timestamp queries. */
   compositeGpuMs?: Promise<number>;
+  /** True if more work is ready for the next frame (draw another one). */
+  moreWork: boolean;
 }
 
 /** 0..255 per channel. */
@@ -82,15 +85,29 @@ export type Rgba8 = [number, number, number, number];
 export interface RendererMemory {
   layerPages: number;
   compositePages: number;
+  /** All GPU textures and buffers the renderer allocated. */
   bytes: number;
+  /** Layer tiles on the GPU, and how many fit in the budget. */
+  residentTiles: number;
+  tileCapacity: number;
+  /** Evicted layer tiles (compressed in JS memory) and their size. */
+  compressedTiles: number;
+  compressedBytes: number;
+  /** Tiles being reloaded. */
+  loadingTiles: number;
+  /** Totals since start. */
+  evictions: number;
+  reloads: number;
 }
 
 /**
  * The narrow interface the app draws through.
  *
  * GPU model:
- *  - Layer tile pool: atlas page textures of 256² tile slots. Slots are
- *    immutable once written; strokes and resizes write new slots.
+ *  - Layer tiles: atlas page textures of 256² tile slots, holding the most
+ *    recently used tiles within the budget (see TileResidency); the rest are
+ *    compressed in memory. Tiles are immutable once written; strokes and
+ *    resizes write new tiles.
  *  - Stroke mask: coverage of the stroke in progress, in the coordinates of
  *    the canvas being drawn on (dabs use MAX blending), plus a prediction
  *    mask redrawn every frame.
@@ -105,7 +122,14 @@ export interface Renderer {
   readonly kind: RendererKind;
   readonly maxCanvasSize: number;
   onLost: ((message: string) => void) | null;
+  /** Called when work becomes ready without any app change (e.g. a tile finished reloading). */
+  onNeedsFrame: (() => void) | null;
   memory(): RendererMemory;
+  /** Reload latencies (ms) since the last call. */
+  takeReloadTimes(): number[];
+
+  /** Follow the document's tiles (ids): freed tiles are dropped from the GPU and the backing store. */
+  useTileStore(store: TileStore): void;
 
   /** Resize the canvas backing store (device pixels). */
   resize(pixelWidth: number, pixelHeight: number): void;
@@ -131,10 +155,10 @@ export interface Renderer {
 
   /** The colour on screen at a device pixel (what the user sees). */
   readScreenPixel(x: number, y: number): Promise<Rgba8>;
-  /** For each layer slot, whether it is completely transparent. */
-  findEmptyTiles(slots: readonly TileSlot[]): Promise<boolean[]>;
-  /** A THUMBNAIL_SIZE² premultiplied RGBA image of a layer. */
-  readThumbnail(tiles: ReadonlyMap<TileKey, TileSlot>): Promise<Uint8Array>;
+  /** For each tile, whether it is completely transparent. */
+  findEmptyTiles(tiles: readonly TileId[]): Promise<boolean[]>;
+  /** A THUMBNAIL_SIZE² premultiplied RGBA image of a layer (tiles still reloading are left out). */
+  readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array>;
 
   destroy(): void;
 }
