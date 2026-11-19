@@ -148,3 +148,29 @@ describe('PyramidPlanner', () => {
     expect(p.previewPool.usedSlots).toBe(0);
   });
 });
+
+describe('Phase 3 hooks: request and tiledView', () => {
+  it('builds a requested region of an off-screen canvas, and describes it as tiles', () => {
+    const p = new PyramidPlanner(64, 64, 8); // 8 of the 64 level-0 slots are per-frame scratch
+    const c = canvas('a', 0, 512, 512, [tileKey(0, 0)]);
+    const region = { x: 0, y: 0, width: 512, height: 256 };
+    p.plan([c], nowhere, 0);
+    expect(p.tiledView('a', 0, region).every((q) => q.kind === 'tile' && q.pool === 'preview')).toBe(true); // falls back to a preview
+
+    for (let i = 0; i < 5; i++) {
+      p.request('a', 0, region);
+      p.plan([c], nowhere, 0);
+    }
+    const view = p.tiledView('a', 0, region);
+    expect(view).toHaveLength(2);
+    expect(view.every((q) => q.kind === 'tile' && q.pool === 'level0')).toBe(true);
+    expect(view.map((q) => q.canvasRect)).toEqual([
+      { x: 0, y: 0, width: 256, height: 256 },
+      { x: 256, y: 0, width: 256, height: 256 },
+    ]);
+  });
+
+  it('describes an unknown canvas as nothing', () => {
+    expect(new PyramidPlanner(8, 8, 8).tiledView('nope', 0, { x: 0, y: 0, width: 1, height: 1 })).toEqual([]);
+  });
+});

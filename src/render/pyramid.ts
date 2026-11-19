@@ -137,6 +137,8 @@ class CanvasCache {
   readonly levels: Map<TileKey, CachedTile>[] = Array.from({ length: PYRAMID_LEVELS }, () => new Map());
   /** Level-0 keys whose content changed and hasn't reached the cached tiles yet. */
   readonly pending = new Set<TileKey>();
+  /** The canvas's paper colour, for regions drawn as plain paper. */
+  paper: RGB = [1, 1, 1];
   constructor(readonly width: number, readonly height: number) {}
 }
 
@@ -145,6 +147,8 @@ export class PyramidPlanner {
   readonly previewPool: TileStore;
   private readonly scratch: TileSlot[] = [];
   private readonly caches = new Map<CanvasId, CanvasCache>();
+  /** Regions asked for through `request()` since the last plan. */
+  private requests: { canvasId: CanvasId; level: number; rect: Rect }[] = [];
   private frame = 0;
 
   constructor(
@@ -173,6 +177,30 @@ export class PyramidPlanner {
   /** True if the tile is cached and complete. */
   isComplete(canvasId: CanvasId, level: number, key: TileKey): boolean {
     return this.caches.get(canvasId)?.levels[level]!.get(key)?.todo === null;
+  }
+
+  /**
+   * Phase 3 hook: build this canvas's composite at `level` over `rect`
+   * (canvas px) as if it were on screen, after the on-screen tiles. Call it
+   * every frame the region is needed; unused tiles are evicted as usual.
+   */
+  request(canvasId: CanvasId, level: number, rect: Rect): void {
+    this.requests.push({ canvasId, level: Math.max(0, Math.min(PYRAMID_LEVELS - 1, level)), rect });
+  }
+
+  /**
+   * Phase 3 hook: how to draw a canvas's composite over `rect` at `level`
+   * right now, as the same quads the display pass uses (a tile of that level
+   * where it is ready, else a coarser cached tile, else plain paper).
+   */
+  tiledView(canvasId: CanvasId, level: number, rect: Rect): DisplayQuad[] {
+    const cache = this.caches.get(canvasId);
+    if (!cache) return [];
+    const bounds = { x: 0, y: 0, width: cache.width, height: cache.height };
+    return levelTilesInRect(cache, rect, level).map((key) => {
+      const canvasRect = intersect(intersect(levelTileRect(level, key), bounds)!, rect)!;
+      return this.displayQuad(canvasId, cache, level, key, canvasRect);
+    });
   }
 
   /**
@@ -205,6 +233,9 @@ export class PyramidPlanner {
       const full = { x: 0, y: 0, width: cache.width, height: cache.height };
       for (let l = PINNED_PREVIEW_LEVEL; l < PYRAMID_LEVELS; l++) {
         for (const key of levelTilesInRect(cache, full, l)) wanted.push([l, key]);
+      }
+      for (const r of this.requests) {
+        if (r.canvasId === c.id) for (const key of levelTilesInRect(cache, r.rect, r.level)) wanted.push([r.level, key]);
       }
       for (const [l, key] of wanted) {
         const tile = this.ensureTile(cache, l, key);
@@ -301,13 +332,14 @@ export class PyramidPlanner {
       for (const key of levelTilesInRect(cache, localVisible(c)!, level)) {
         const tileRect = levelTileRect(level, key);
         const canvasRect = intersect(tileRect, { x: 0, y: 0, width: cache.width, height: cache.height })!;
-        out.display.push(this.displayQuad(c, cache, level, key, canvasRect));
+        out.display.push(this.displayQuad(c.id, cache, level, key, canvasRect));
       }
     }
+    this.requests = [];
     return out;
   }
 
-  private displayQuad(c: PlannerCanvas, cache: CanvasCache, level: number, key: TileKey, canvasRect: Rect): DisplayQuad {
+  private displayQuad(canvasId: CanvasId, cache: CanvasCache, level: number, key: TileKey, canvasRect: Rect): DisplayQuad {
     const { tx, ty } = tileCoords(key);
     for (let l = level; l < PYRAMID_LEVELS; l++) {
       const shift = l - level;
@@ -317,14 +349,14 @@ export class PyramidPlanner {
       const origin = levelTileRect(l, tileKey(tx >> shift, ty >> shift));
       const scale = 1 / 2 ** l;
       return {
-        canvasId: c.id, canvasRect, kind: 'tile', pool: l === 0 ? 'level0' : 'preview', slot: tile.slot,
+        canvasId, canvasRect, kind: 'tile', pool: l === 0 ? 'level0' : 'preview', slot: tile.slot,
         texels: {
           x: (canvasRect.x - origin.x) * scale, y: (canvasRect.y - origin.y) * scale,
           width: canvasRect.width * scale, height: canvasRect.height * scale,
         },
       };
     }
-    return { canvasId: c.id, canvasRect, kind: 'paper', color: c.paper };
+    return { canvasId, canvasRect, kind: 'paper', color: cache.paper };
   }
 
   /** Create caches for new canvases; drop caches of removed or resized canvases. */
@@ -336,6 +368,7 @@ export class PyramidPlanner {
     }
     for (const c of canvases) {
       if (!this.caches.has(c.id)) this.caches.set(c.id, new CanvasCache(c.placement.width, c.placement.height));
+      this.caches.get(c.id)!.paper = c.paper;
     }
   }
 

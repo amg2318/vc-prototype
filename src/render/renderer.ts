@@ -45,6 +45,17 @@ export interface CanvasRenderState {
 }
 
 /** A flat-coloured rectangle in workspace coordinates (premultiplied RGBA), drawn above all canvases. */
+/**
+ * Phase 3: one piece of a canvas's composite, ready to be drawn. A tile
+ * lives in a composite page texture of the backend: pool 'level0' (full
+ * resolution) or 'preview' (coarser levels); `x`, `y` are its top-left texel
+ * in that page and `texels` the region to sample inside the tile. Regions
+ * with nothing cached yet come back as plain paper.
+ */
+export type CompositeTile =
+  | { kind: 'tile'; canvasRect: Rect; pool: 'level0' | 'preview'; page: number; x: number; y: number; texels: Rect }
+  | { kind: 'paper'; canvasRect: Rect; color: [number, number, number] };
+
 export interface OverlayRect {
   rect: Rect;
   color: [number, number, number, number];
@@ -146,6 +157,18 @@ export interface Renderer {
   invalidateTiles(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void;
   /** Rectangles drawn above the canvases (selection, highlights; Phase 3 arrows). */
   setOverlay(rects: readonly OverlayRect[]): void;
+  /**
+   * Phase 3: build a canvas's composite over `rect` (canvas px) at pyramid
+   * `level` (0 = full resolution, each level halves it) in the next frame,
+   * even if the canvas is off screen. Call before every render() that needs it.
+   */
+  requestComposite(canvasId: CanvasId, level: number, rect: Rect): void;
+  /**
+   * Phase 3: the canvas's composite over `rect` at `level` as it is now: the
+   * tiles to sample, falling back to coarser tiles or paper where the
+   * requested level isn't built yet. Valid until the next render().
+   */
+  compositeTiles(canvasId: CanvasId, level: number, rect: Rect): CompositeTile[];
 
   /** Clear the stroke mask for a new stroke on `canvasId` (dab coordinates are that canvas's pixels). */
   beginStroke(canvasId: CanvasId): void;

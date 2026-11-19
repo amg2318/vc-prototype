@@ -8,7 +8,7 @@ import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQ
 import { levelForZoom, PyramidPlanner, type DisplayQuad, type PlannerCanvas } from './pyramid';
 import { TileResidency, type Eviction } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
-import type { CanvasRenderState, Dab, MergeJob, OverlayRect, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
+import type { CanvasRenderState, CompositeTile, Dab, MergeJob, OverlayRect, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
 
 export interface Size {
   width: number;
@@ -153,6 +153,18 @@ export class RenderCore {
 
   setOverlay(rects: readonly OverlayRect[]): void {
     this.overlay = rects;
+  }
+
+  requestComposite(canvasId: CanvasId, level: number, rect: Rect): void {
+    this.planner.request(canvasId, level, rect);
+  }
+
+  compositeTiles(canvasId: CanvasId, level: number, rect: Rect): CompositeTile[] {
+    return this.planner.tiledView(canvasId, level, rect).map((q): CompositeTile => {
+      if (q.kind === 'paper') return { kind: 'paper', canvasRect: q.canvasRect, color: q.color };
+      const { page, x, y } = slotLocation(q.slot);
+      return { kind: 'tile', canvasRect: q.canvasRect, pool: q.pool, page, x, y, texels: q.texels };
+    });
   }
 
   beginStroke(canvasId: CanvasId): void {

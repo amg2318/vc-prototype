@@ -30,6 +30,7 @@ import type {
   FrameInfo,
   MergeJob,
   OverlayRect,
+  CompositeTile,
   Renderer,
   RendererMemory,
   RetileJob,
@@ -178,6 +179,14 @@ export class WebGL2Renderer implements Renderer {
 
   setOverlay(rects: readonly OverlayRect[]): void {
     this.core.setOverlay(rects);
+  }
+
+  requestComposite(canvasId: CanvasId, level: number, rect: Rect): void {
+    this.core.requestComposite(canvasId, level, rect);
+  }
+
+  compositeTiles(canvasId: CanvasId, level: number, rect: Rect): CompositeTile[] {
+    return this.core.compositeTiles(canvasId, level, rect);
   }
 
   beginStroke(canvasId: CanvasId): void {
