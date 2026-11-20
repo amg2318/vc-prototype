@@ -1,5 +1,5 @@
 import './style.css';
-import { TILE_BYTES } from './config';
+import { GESTURES, TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
 import { Controls } from './debug/controls';
@@ -392,6 +392,7 @@ async function main(): Promise<void> {
       `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
       `undo memory ${mb(s.historyBytes)} (${s.historySteps} undo / ${s.redoSteps} redo, at raw tile size)`,
       `zoom ${Math.round(view.scale * 100)}%  dpr ${window.devicePixelRatio}  canvas ${canvas.width}×${canvas.height}`,
+      `last touch ${input.lastTouchSizePx === null ? '—' : `${Math.round(input.lastTouchSizePx)} px`} (palm above ${GESTURES.palmContactPx})  finger draws: ${input.fingers.enabled ? 'yes' : 'no'}`,
       `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
     ];
   });

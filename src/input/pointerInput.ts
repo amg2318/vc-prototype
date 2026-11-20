@@ -72,6 +72,8 @@ export class PointerInput {
   private drawingIsEraser = false;
   private eyedropperPointer: number | null = null;
   private panPointer: { id: number; x: number; y: number; touch: boolean } | null = null;
+  /** The last finger's reported contact size (CSS px), for the HUD: tunes `palmContactPx`. */
+  lastTouchSizePx: number | null = null;
   private spaceHeld = false;
   private origin = { x: 0, y: 0 };
 
@@ -206,6 +208,7 @@ export class PointerInput {
     // A second finger turns a one-finger pan into a pinch.
     if (this.panPointer?.touch) this.panPointer = null;
 
+    this.lastTouchSizePx = Math.max(e.width, e.height);
     const p = this.screenPoint(e);
     if (this.touchPoints.size === 0) this.viewAtTouchStart = this.callbacks.getView();
     this.touchPoints.set(e.pointerId, p);
@@ -222,8 +225,9 @@ export class PointerInput {
       if (this.gestures.checkHold(id)) this.callbacks.eyedropper('start', p, screenToDoc(this.callbacks.getView(), p));
       return;
     }
-    const palm = Math.max(e.width, e.height) > GESTURES.palmContactPx;
-    if (!palm) {
+    if (Math.max(e.width, e.height) > GESTURES.palmContactPx) {
+      this.callbacks.palmRejected();
+    } else {
       const overCanvas = this.callbacks.canDrawAt(screenToDoc(this.callbacks.getView(), p));
       if (this.fingers.enabled && overCanvas) this.startStroke(e, false);
       else this.startPan(e);

@@ -82,10 +82,13 @@ export const GESTURES = {
   strokeCancelMovementPx: 30,
   /**
    * Touches with a contact larger than this (PointerEvent width/height) are
-   * treated as a palm: they never tap or trigger the eyedropper. Devices that
-   * don't report contact size report ~1 px, so this check is then inactive.
+   * treated as a palm: they never draw, pan, tap or trigger the eyedropper.
+   * A fingertip is about 40–50 px wide (40 rejected every finger), a palm far
+   * more. Not yet measured on an iPad: the HUD's "last touch" line shows the
+   * reported size. Devices that don't report contact size report ~1 px, so
+   * this check is then inactive.
    */
-  palmContactPx: 40,
+  palmContactPx: 100,
 };
 
 // --- derived values (not meant to be edited) --------------------------------
