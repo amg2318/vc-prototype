@@ -291,8 +291,8 @@ export class WebGL2Renderer implements Renderer {
 
   /**
    * Write `src + stroke mask` into each job's dst slot: copy (or clear) the
-   * source tile into place, then blend the mask on top with premultiplied
-   * source-over, which is exactly paint (colour·m) or erase (0, alpha m).
+   * source tile into place, then blend the mask on top: premultiplied
+   * source-over for paint, destination-out for erase (see MERGE_WGSL).
    */
   private merge(op: Extract<FrameOp, { kind: 'merge' }>): void {
     const gl = this.gl;
@@ -304,7 +304,7 @@ export class WebGL2Renderer implements Renderer {
     gl.useProgram(this.mergeProgram.program);
     this.bindTexture(0, this.strokeMask.texture, this.mergeProgram, 'u_strokeMask');
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.blendFunc(op.style.mode === 'erase' ? gl.ZERO : gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     for (const [page, pageJobs] of groupByDstPage(op.jobs)) {
       this.staging = ensureCapacity(this.staging, pageJobs.length * MERGE_INSTANCE_FLOATS);
       pageJobs.forEach((job, i) => packMergeInstance(job, op.style, op.canvas, this.staging, i));

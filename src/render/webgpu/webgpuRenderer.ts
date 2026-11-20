@@ -8,6 +8,7 @@ import {
   TILE_COUNT,
   TILE_SIZE,
 } from '../../config';
+import type { StrokeMode } from '../../document/editor';
 import type { CanvasId } from '../../document/paintDocument';
 import type { Rect } from '../../workspace/coords';
 import type { TileStore } from '../../document/tileStore';
@@ -144,7 +145,8 @@ export class WebGPURenderer implements Renderer {
   private readonly canvasFormat: GPUTextureFormat;
 
   private readonly dabPipeline: GPURenderPipeline;
-  private readonly mergePipeline: GPURenderPipeline;
+  /** One merge pipeline per stroke mode: they differ only in blending. */
+  private readonly mergePipelines: Record<StrokeMode, GPURenderPipeline>;
   private readonly compositePipeline: GPURenderPipeline;
   private readonly downsamplePipeline: GPURenderPipeline;
   private readonly displayPipeline: GPURenderPipeline;
@@ -154,7 +156,7 @@ export class WebGPURenderer implements Renderer {
 
   private readonly linearSampler: GPUSampler;
   private readonly dabBindGroup: GPUBindGroup;
-  private readonly mergeBindGroup: GPUBindGroup;
+  private readonly mergeBindGroups: Record<StrokeMode, GPUBindGroup>;
   private readonly emptyUniformBindings: GPUBuffer;
   private readonly thumbUniformBindings: GPUBuffer;
   private emptyBindGroup!: GPUBindGroup;
@@ -255,6 +257,8 @@ export class WebGPURenderer implements Renderer {
       color: { operation: 'add', srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
       alpha: { operation: 'add', srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
     };
+    // Eraser ("destination-out"): out = dst · (1 − m), for colour and alpha alike.
+    const eraseOut: GPUBlendComponent = { operation: 'add', srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' };
     const max: GPUBlendComponent = { operation: 'max', srcFactor: 'one', dstFactor: 'one' };
     const pipeline = (
       label: string,
@@ -278,7 +282,10 @@ export class WebGPURenderer implements Renderer {
     };
 
     this.dabPipeline = pipeline('dab', DAB_WGSL, MASK_FORMAT, { color: max, alpha: max }, 1, DAB_FLOATS * 4);
-    this.mergePipeline = pipeline('merge', MERGE_WGSL, TILE_FORMAT, premultipliedOver, 3, MERGE_INSTANCE_FLOATS * 4);
+    this.mergePipelines = {
+      paint: pipeline('merge paint', MERGE_WGSL, TILE_FORMAT, premultipliedOver, 3, MERGE_INSTANCE_FLOATS * 4),
+      erase: pipeline('merge erase', MERGE_WGSL, TILE_FORMAT, { color: eraseOut, alpha: eraseOut }, 3, MERGE_INSTANCE_FLOATS * 4),
+    };
     this.compositePipeline = pipeline('composite', COMPOSITE_WGSL, TILE_FORMAT, replace, 1, COMPOSITE_INSTANCE_FLOATS * 4);
     this.downsamplePipeline = pipeline('downsample', DOWNSAMPLE_WGSL, TILE_FORMAT, replace, 3, DOWNSAMPLE_INSTANCE_FLOATS * 4);
     this.displayPipeline = pipeline('display', DISPLAY_WGSL, canvasFormat, premultipliedOver, 4, TILE_QUAD_FLOATS * 4);
@@ -309,10 +316,12 @@ export class WebGPURenderer implements Renderer {
       layout: this.dabPipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: { buffer: dabUniforms } }],
     });
-    this.mergeBindGroup = device.createBindGroup({
-      layout: this.mergePipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: this.strokeMask.createView() }],
-    });
+    const mergeBindGroup = (mode: StrokeMode): GPUBindGroup =>
+      device.createBindGroup({
+        layout: this.mergePipelines[mode].getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: this.strokeMask.createView() }],
+      });
+    this.mergeBindGroups = { paint: mergeBindGroup('paint'), erase: mergeBindGroup('erase') };
     this.level0Pages.ensure(1); // scratch tiles live on page 0
     this.rebuildLayerBindGroups();
     this.rebuildCompositeBindGroups();
@@ -526,8 +535,8 @@ export class WebGPURenderer implements Renderer {
           const pass = encoder.beginRenderPass({
             colorAttachments: [{ view: this.layerPages.textures[page]!.createView(), loadOp: 'load', storeOp: 'store' }],
           });
-          pass.setPipeline(this.mergePipeline);
-          pass.setBindGroup(0, this.mergeBindGroup);
+          pass.setPipeline(this.mergePipelines[op.style.mode]);
+          pass.setBindGroup(0, this.mergeBindGroups[op.style.mode]);
           pass.setVertexBuffer(0, mergeBuffer);
           pass.draw(4, jobs.length, 0, mergeOffset);
           pass.end();

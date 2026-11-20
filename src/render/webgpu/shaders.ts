@@ -94,9 +94,13 @@ fn fs(in: VOut) -> @location(0) vec4f {
 
 /**
  * Merge: blends the stroke mask over tile slots that already hold a copy of
- * the tile from before the stroke. Uses fixed-function blending
- * (ONE, ONE_MINUS_SRC_ALPHA), which is exactly premultiplied paint/erase:
- *   paint: out = color·m + dst·(1 − m)      erase: out = 0 + dst·(1 − m)
+ * the tile from before the stroke. The fragment outputs (color·m, m) for
+ * paint and (0, 0, 0, m) for erase; the pipeline's fixed-function blending
+ * does the rest:
+ *   paint (ONE, ONE_MINUS_SRC_ALPHA):  out = color·m + dst·(1 − m)
+ *   erase (ZERO, ONE_MINUS_SRC_ALPHA): out = dst·(1 − m)
+ * (Erase can't use the paint blending: its alpha would be m + dst.a·(1 − m),
+ * turning erased pixels opaque black.)
  * Pixels outside the canvas output 0, which leaves the tile unchanged.
  */
 export const MERGE_WGSL = /* wgsl */ `
