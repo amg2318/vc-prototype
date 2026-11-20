@@ -39,7 +39,7 @@ export const DEFAULT_BRUSH: BrushSettings = {
   pressureAffectsOpacity: true,
   minSizeFraction: 0.05,
   minOpacityFraction: 0.15,
-  fullOpacityPressure: 1,
+  fullOpacityPressure: 0.2, // a light Pencil press is already fully opaque
   smoothing: 0.15,
   pressureFromSpeed: false,
   color: [0.08, 0.08, 0.1],
