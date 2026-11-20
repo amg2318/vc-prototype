@@ -1,7 +1,7 @@
 import { THUMBNAIL_DELAY_MS, THUMBNAIL_SIZE } from '../config';
-import type { Editor } from '../document/editor';
 import type { LayerId } from '../document/paintDocument';
 import type { Renderer } from '../render/renderer';
+import type { Workspace } from '../workspace/workspace';
 
 /**
  * Keeps one small canvas per layer up to date. Refreshes are debounced
@@ -13,7 +13,7 @@ export class Thumbnails {
   private readonly timers = new Map<LayerId, number>();
 
   constructor(
-    private readonly editor: Editor,
+    private readonly workspace: Workspace,
     private readonly renderer: Renderer,
     private readonly requestFrame: () => void,
   ) {}
@@ -40,8 +40,9 @@ export class Thumbnails {
   private refresh(id: LayerId): void {
     this.timers.delete(id);
     const canvas = this.canvases.get(id);
-    if (!canvas || !this.editor.doc.hasLayer(id)) return;
-    const tiles = new Map(this.editor.doc.layer(id).tiles);
+    const doc = this.workspace.canvases.find((c) => c.hasLayer(id));
+    if (!canvas || !doc) return;
+    const tiles = new Map(doc.layer(id).tiles);
     void this.renderer.readThumbnail(tiles).then((premultiplied) => {
       // ImageData is straight (not premultiplied) alpha.
       const image = new ImageData(THUMBNAIL_SIZE, THUMBNAIL_SIZE);

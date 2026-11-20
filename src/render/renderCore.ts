@@ -1,0 +1,542 @@
+import { LAYER_GPU_SLOTS, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
+import type { TileStore } from '../document/tileStore';
+import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type TileSlot } from '../document/tiles';
+import type { CanvasId } from '../document/paintDocument';
+import { intersect, type Rect } from '../workspace/coords';
+import { packCompositeUniforms, packLookup } from './compositePacking';
+import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
+import { levelForZoom, PyramidPlanner, type DisplayQuad, type PlannerCanvas } from './pyramid';
+import { TileResidency, type Eviction } from './residency';
+import { CompressedTileStore } from './tileBackingStore';
+import type { CanvasRenderState, CompositeTile, Dab, MergeJob, OverlayRect, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
+
+export interface Size {
+  width: number;
+  height: number;
+}
+
+/**
+ * Backend-independent half of both renderers. It queues work, keeps the
+ * canvases' render state, runs the pyramid planner, and packs everything the
+ * GPU needs into flat instance arrays, so each backend only binds textures and
+ * issues draws and copies.
+ *
+ * Positions on screen are computed here in double precision (workspace →
+ * clip), so canvases far from the workspace origin stay exact even though
+ * the GPU works in single precision.
+ *
+ * Documents name tiles by id; `residency` decides which ids are on the GPU.
+ * Queued work runs in order, and waits (from frame to frame) until the tiles
+ * it reads are back on the GPU. Composites of tiles that are still reloading
+ * wait too; the planner shows a coarser preview meanwhile.
+ */
+
+/** Per-instance floats of each pass (see the shaders for the meaning). */
+export const COMPOSITE_INSTANCE_FLOATS = 4; // dst x, y in the level-0 page · tile origin x, y in the canvas
+export const DOWNSAMPLE_INSTANCE_FLOATS = 12; // dst x, y, size, level · src x, y, has src, src page · paper rgb, 0
+export const TILE_QUAD_FLOATS = 16; // clip origin, x axis, y axis · texel rect · clamp rect · 0, 0
+export const SOLID_QUAD_FLOATS = 12; // clip origin, x axis, y axis · rgba · 0, 0
+
+export interface CompositeBatch {
+  canvasId: CanvasId;
+  /** The canvas's compositor inputs (tile lookup in GPU slots, which can move between frames). */
+  upload: { uniforms: Float32Array; lookup: Uint32Array };
+  /** Instances grouped by level-0 page. */
+  instances: Float32Array;
+  runs: { page: number; first: number; count: number }[];
+}
+
+export type DisplayRun =
+  | { kind: 'tile'; pool: 'level0' | 'preview'; page: number; first: number; count: number }
+  | { kind: 'solid'; first: number; count: number };
+
+/** Queued work that needs tiles on the GPU: ops, and readbacks of layer tiles. */
+type QueuedWork = FrameOp | Exclude<Readback, { kind: 'screenPixel' }>;
+
+export interface Frame {
+  /** Slot-level ops, in order. */
+  ops: FrameOp[];
+  prediction: Dab[] | null;
+  readbacks: Readback[];
+  /** Per-canvas GPU resources to release. */
+  removedCanvases: CanvasId[];
+  composites: CompositeBatch[];
+  downsample: { instances: Float32Array; runs: { page: number; first: number; count: number }[] };
+  display: { tiles: Float32Array; solids: Float32Array; runs: DisplayRun[] };
+  stats: { composited: number; downsampled: number; visibleCanvases: number };
+  moreWork: boolean;
+}
+
+/**
+ * Merge jobs per queued op, at most. Each job reads one tile and writes one,
+ * so a chunk is kept to a quarter of the GPU budget: it must fit on the GPU
+ * together with the tiles being reloaded for it.
+ */
+const MAX_MERGE_CHUNK = 64;
+
+/** Clip-space shadow offset of a canvas, in device pixels (right, down). */
+const SHADOW_PX = 4;
+const SHADOW_RGBA: [number, number, number, number] = [0, 0, 0, 0.35];
+
+export class RenderCore {
+  readonly queue = new FrameQueue();
+  readonly planner: PyramidPlanner;
+  readonly residency: TileResidency;
+  /** See `Renderer.onCompositeChanged`. */
+  onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null = null;
+  private canvases: CanvasRenderState[] = [];
+  private readonly byId = new Map<CanvasId, CanvasRenderState>();
+  /** Work waiting for tiles to reload, oldest first. */
+  private waiting: QueuedWork[] = [];
+  /** New tiles whose pixels are queued but not written yet (they can't be composited yet). */
+  private readonly unwritten = new Set<TileId>();
+  /** Whether a tile id still has references (from the document's TileStore). */
+  private isLive: (id: TileId) => boolean = () => true;
+  private removed: CanvasId[] = [];
+  private overlay: readonly OverlayRect[] = [];
+  private strokeCanvas: CanvasId | null = null;
+  /** Tiles the current stroke has touched: not plain paper even before the stroke is merged. */
+  private readonly strokeTiles = new Set<TileKey>();
+
+  /** `layerSlots`: the GPU budget for layer tiles, in tiles. */
+  static withLayerBudget(layerSlots: number): RenderCore {
+    return new RenderCore(new PyramidPlanner(), new TileResidency(layerSlots, new CompressedTileStore()));
+  }
+
+  constructor(planner = new PyramidPlanner(), residency = new TileResidency(LAYER_GPU_SLOTS, new CompressedTileStore())) {
+    this.planner = planner;
+    this.residency = residency;
+  }
+
+  /** Residency numbers for RendererMemory. */
+  tileMemory(): Omit<RendererMemory, 'layerPages' | 'compositePages' | 'bytes'> {
+    const r = this.residency.stats();
+    const c = this.residency.backingStats();
+    return {
+      residentTiles: r.resident,
+      tileCapacity: r.capacity,
+      compressedTiles: c.tiles,
+      compressedBytes: c.bytes,
+      loadingTiles: r.loading,
+      evictions: r.evictions,
+      reloads: r.reloads,
+    };
+  }
+
+  /** Follow the document's tiles: freed tiles leave the GPU and the backing store. */
+  useTileStore(store: TileStore): void {
+    store.onFree((id) => this.residency.free(id));
+    this.isLive = (id) => store.refCount(id) > 0;
+  }
+
+  // --- inputs -----------------------------------------------------------------
+
+  setCanvases(canvases: readonly CanvasRenderState[]): void {
+    const next = new Map(canvases.map((c) => [c.id, c]));
+    for (const id of this.byId.keys()) if (!next.has(id)) this.removed.push(id);
+    this.canvases = [...canvases];
+    this.byId.clear();
+    for (const c of canvases) this.byId.set(c.id, c);
+  }
+
+  canvas(id: CanvasId): CanvasRenderState | undefined {
+    return this.byId.get(id);
+  }
+
+  invalidate(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void {
+    const inside = keys === 'all' ? 'all' : this.insideCanvas(canvasId, keys);
+    this.planner.invalidate(canvasId, inside);
+    const c = this.byId.get(canvasId);
+    const dirty = c ? dirtyRect(inside, c.placement) : null;
+    if (dirty) this.onCompositeChanged?.(canvasId, dirty);
+  }
+
+  setOverlay(rects: readonly OverlayRect[]): void {
+    this.overlay = rects;
+  }
+
+  requestComposite(canvasId: CanvasId, level: number, rect: Rect): void {
+    this.planner.request(canvasId, level, rect);
+  }
+
+  compositeTiles(canvasId: CanvasId, level: number, rect: Rect): CompositeTile[] {
+    return this.planner.tiledView(canvasId, level, rect).map((q): CompositeTile => {
+      if (q.kind === 'paper') return { kind: 'paper', canvasRect: q.canvasRect, color: q.color };
+      const { page, x, y } = slotLocation(q.slot);
+      return { kind: 'tile', canvasRect: q.canvasRect, pool: q.pool, page, x, y, texels: q.texels };
+    });
+  }
+
+  beginStroke(canvasId: CanvasId): void {
+    this.strokeCanvas = canvasId;
+    this.strokeTiles.clear();
+    this.queue.clearMask();
+  }
+
+  addDabs(dabs: readonly Dab[]): void {
+    if (dabs.length === 0 || this.strokeCanvas === null) return;
+    this.queue.addDabs(dabs);
+    this.invalidateDabs(dabs);
+  }
+
+  setPrediction(dabs: readonly Dab[]): void {
+    if (this.strokeCanvas !== null) this.invalidateDabs([...this.queue.currentPrediction, ...dabs]);
+    this.queue.setPrediction(dabs);
+  }
+
+  merge(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void {
+    const c = this.byId.get(canvasId);
+    if (jobs.length === 0 || !c) return;
+    // In chunks, so even a small GPU budget can hold everything one chunk reads and writes.
+    const chunkSize = Math.max(1, Math.min(MAX_MERGE_CHUNK, Math.floor(this.residency.capacity / 4)));
+    for (let i = 0; i < jobs.length; i += chunkSize) {
+      const chunk = jobs.slice(i, i + chunkSize);
+      this.queue.push({ kind: 'merge', jobs: chunk, style: { ...style }, canvas: { width: c.placement.width, height: c.placement.height } });
+    }
+    for (const j of jobs) this.unwritten.add(j.dst);
+    this.invalidate(canvasId, jobs.map((j) => j.key));
+  }
+
+  retile(jobs: readonly RetileJob[]): void {
+    for (const op of retileCopies(jobs)) this.queue.push(op);
+    for (const j of jobs) this.unwritten.add(j.dst);
+  }
+
+  private invalidateDabs(dabs: readonly Dab[]): void {
+    const dirty = new DirtyTiles();
+    dirty.addDabs(dabs);
+    for (const k of dirty.keys) this.strokeTiles.add(k);
+    this.invalidate(this.strokeCanvas!, [...dirty.keys]);
+  }
+
+  /** Drop keys outside the canvas's tile grid (dabs near the edge reach past it). */
+  private insideCanvas(canvasId: CanvasId, keys: readonly TileKey[]): TileKey[] {
+    const c = this.byId.get(canvasId);
+    if (!c) return [];
+    const cols = Math.ceil(c.placement.width / TILE_SIZE);
+    const rows = Math.ceil(c.placement.height / TILE_SIZE);
+    return keys.filter((k) => {
+      const { tx, ty } = tileCoords(k);
+      return tx < cols && ty < rows;
+    });
+  }
+
+  // --- one frame ----------------------------------------------------------------
+
+  buildFrame(view: ViewState, clipPerDevicePx: [number, number]): Frame {
+    const drained = this.queue.drain();
+    const r = this.residency;
+    r.beginFrame();
+    const work: QueuedWork[] = [...this.waiting, ...drained.ops];
+    const readbacks: Readback[] = [];
+    for (const rb of drained.readbacks) {
+      if (rb.kind === 'screenPixel') readbacks.push(rb);
+      else work.push(rb);
+    }
+
+    // Keep the tiles the oldest waiting work reads, then upload reloaded tiles.
+    if (work[0]) r.ensure(this.reads(work[0]));
+    const ops: FrameOp[] = [];
+    for (const upload of r.takeUploads(UPLOADS_PER_FRAME)) {
+      if (upload.evicted) ops.push(evictOp(upload.evicted));
+      ops.push({ kind: 'upload', slot: upload.slot, rgba: upload.rgba });
+    }
+    // Queued work, in order, as far as its tiles are on the GPU.
+    let done = 0;
+    let heldForRoom = false;
+    for (const item of work) {
+      const result = this.toSlots(item, ops, readbacks);
+      heldForRoom = result === 'needsRoom';
+      if (result !== 'done') break;
+      done++;
+    }
+    this.waiting = work.slice(done);
+
+    const plannerCanvases: PlannerCanvas[] = this.canvases.map((c) => ({
+      id: c.id,
+      placement: c.placement,
+      paper: c.paper,
+      isPaperOnly: (key) =>
+        c.sources.every((s) => !s.tiles.has(key)) && !(c.liveStroke !== null && c.id === this.strokeCanvas && this.strokeTiles.has(key)),
+      // Every layer tile under the key must be on the GPU (ensure() starts reloads).
+      isReady: (key) => {
+        const ids = tileIdsAt(c, key);
+        return r.ensure(ids) && !ids.some((id) => this.unwritten.has(id));
+      },
+    }));
+    const plan = this.planner.plan(plannerCanvases, view.visible, levelForZoom(view.canvasPxPerDevicePx));
+
+    // Level-0 composites, one batch per canvas.
+    const byCanvas = new Map<CanvasId, { key: TileKey; dst: TileSlot }[]>();
+    for (const job of plan.composites) {
+      const list = byCanvas.get(job.canvasId) ?? [];
+      list.push(job);
+      byCanvas.set(job.canvasId, list);
+    }
+    const composites: CompositeBatch[] = [];
+    for (const [canvasId, jobs] of byCanvas) {
+      const c = this.byId.get(canvasId)!;
+      const upload = { uniforms: packCompositeUniforms(c), lookup: packLookup(c, (id) => r.slotOf(id)) };
+      const sorted = [...jobs].sort((a, b) => a.dst - b.dst); // groups by page
+      const instances = new Float32Array(sorted.length * COMPOSITE_INSTANCE_FLOATS);
+      sorted.forEach((job, i) => {
+        const dst = slotLocation(job.dst);
+        const { tx, ty } = tileCoords(job.key);
+        instances.set([dst.x, dst.y, tx * TILE_SIZE, ty * TILE_SIZE], i * COMPOSITE_INSTANCE_FLOATS);
+      });
+      composites.push({ canvasId, upload, instances, runs: pageRuns(sorted.map((j) => j.dst)) });
+    }
+
+    // Downsamples, grouped by destination preview page.
+    const downs = [...plan.downsamples].sort((a, b) => a.dst - b.dst);
+    const downInstances = new Float32Array(downs.length * DOWNSAMPLE_INSTANCE_FLOATS);
+    downs.forEach((d, i) => {
+      const dst = slotLocation(d.dst);
+      const src = d.src === null ? null : slotLocation(d.src);
+      downInstances.set(
+        [dst.x + d.x, dst.y + d.y, d.size, d.level, src?.x ?? 0, src?.y ?? 0, src ? 1 : 0, src?.page ?? 0, ...d.paper, 0],
+        i * DOWNSAMPLE_INSTANCE_FLOATS,
+      );
+    });
+
+    const visibleCanvases = new Set(plan.display.map((q) => q.canvasId)).size;
+    // Screen-pixel readbacks go last: they read the finished frame.
+    readbacks.sort((a, b) => Number(a.kind === 'screenPixel') - Number(b.kind === 'screenPixel'));
+    const frame: Frame = {
+      ops,
+      prediction: drained.prediction,
+      readbacks,
+      removedCanvases: this.removed,
+      composites,
+      downsample: { instances: downInstances, runs: pageRuns(downs.map((d) => d.dst)) },
+      display: this.packDisplay(plan.display, view, clipPerDevicePx),
+      stats: { composited: plan.composites.length, downsampled: plan.downsamples.length, visibleCanvases },
+      // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
+      // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
+      moreWork: plan.overBudget || r.hasUploads || heldForRoom,
+    };
+    this.removed = [];
+    return frame;
+  }
+
+  /** Tile ids a piece of queued work reads. */
+  private reads(item: QueuedWork): TileId[] {
+    switch (item.kind) {
+      case 'merge':
+        return item.jobs.flatMap((j) => (j.src === null ? [] : [j.src]));
+      case 'copies':
+        return item.copies.map((c) => c.src);
+      case 'empty':
+        return item.slots;
+      default:
+        return [];
+    }
+  }
+
+  /**
+   * Translate one piece of queued work from tile ids to GPU slots, adding the
+   * evictions that make room. If the tiles it reads aren't on the GPU yet
+   * ('needsTiles': their reload will ask for a frame) or there is no room this
+   * frame ('needsRoom'), it is retried next frame.
+   */
+  private toSlots(item: QueuedWork, ops: FrameOp[], readbacks: Readback[]): 'done' | 'needsTiles' | 'needsRoom' {
+    const r = this.residency;
+    if (item.kind === 'clearMask' || item.kind === 'dabs' || item.kind === 'evict' || item.kind === 'upload') {
+      ops.push(item);
+      return 'done';
+    }
+    if (item.kind === 'thumbnail') {
+      // Thumbnails use what is on the GPU now, and ask for the rest to come back.
+      r.ensure(item.tiles.map(([, id]) => id));
+      const tiles = item.tiles.flatMap(([key, id]): [TileKey, TileSlot][] => {
+        const slot = r.slotOf(id);
+        return slot === undefined ? [] : [[key, slot]];
+      });
+      readbacks.push({ ...item, tiles });
+      return 'done';
+    }
+    if (!r.ensure(this.reads(item))) return 'needsTiles';
+    if (item.kind === 'empty') {
+      // A tile the GPU has never seen counts as "not empty" (nothing is deleted by mistake).
+      const known = item.slots.filter((id) => r.slotOf(id) !== undefined);
+      readbacks.push({
+        kind: 'empty',
+        slots: known.map((id) => r.slotOf(id)!),
+        resolve: (empty) => item.resolve(item.slots.map((id) => (known.includes(id) ? empty[known.indexOf(id)]! : false))),
+      });
+      return 'done';
+    }
+
+    // Writes: a slot for every new tile (skipping tiles freed while this waited).
+    const evictions: FrameOp[] = [];
+    const slotFor = new Map<TileId, TileSlot>();
+    const writes = item.kind === 'merge' ? item.jobs.map((j) => j.dst) : item.zero;
+    for (const id of writes) {
+      if (!this.isLive(id)) continue;
+      const placed = r.place(id);
+      if (!placed) {
+        ops.push(...evictions); // tiles already evicted for this work must still be read back
+        return 'needsRoom'; // every slot is in use this frame
+      }
+      if (placed.evicted) evictions.push(evictOp(placed.evicted));
+      slotFor.set(id, placed.slot);
+    }
+    for (const id of writes) this.unwritten.delete(id);
+    ops.push(...evictions);
+    const src = (id: TileId): TileSlot => r.slotOf(id)!;
+    if (item.kind === 'merge') {
+      const jobs = item.jobs.flatMap((j) => {
+        const dst = slotFor.get(j.dst);
+        return dst === undefined ? [] : [{ key: j.key, src: j.src === null ? null : src(j.src), dst }];
+      });
+      if (jobs.length > 0) ops.push({ ...item, jobs });
+    } else {
+      const zero = item.zero.flatMap((id) => (slotFor.has(id) ? [slotFor.get(id)!] : []));
+      const copies = item.copies.flatMap((c) => (slotFor.has(c.dst) ? [{ ...c, src: src(c.src), dst: slotFor.get(c.dst)! }] : []));
+      if (zero.length > 0) ops.push({ kind: 'copies', zero, copies });
+    }
+    return 'done';
+  }
+
+  /** Display quads in draw order: the background grid; per canvas a shadow, then its tiles; then the overlay. */
+  private packDisplay(quads: readonly DisplayQuad[], view: ViewState, clipPerPx: [number, number]): Frame['display'] {
+    const m = view.workspaceToClip;
+    const tiles: number[] = [];
+    const solids: number[] = [];
+    const runs: DisplayRun[] = [];
+    const addSolid = (corners: ClipQuad, rgba: readonly number[]): void => {
+      const last = runs[runs.length - 1];
+      if (last?.kind === 'solid') last.count++;
+      else runs.push({ kind: 'solid', first: solids.length / SOLID_QUAD_FLOATS, count: 1 });
+      solids.push(...corners, ...rgba, 0, 0);
+    };
+    for (const line of backgroundGrid(view.visible, view.canvasPxPerDevicePx)) addSolid(clipQuad(m, line.rect), line.color);
+    let previousCanvas: CanvasId | null = null;
+    for (const q of quads) {
+      const c = this.byId.get(q.canvasId)!;
+      if (q.canvasId !== previousCanvas) {
+        previousCanvas = q.canvasId;
+        const shadow = clipQuad(m, c.placement);
+        shadow[0] += SHADOW_PX * clipPerPx[0];
+        shadow[1] -= SHADOW_PX * clipPerPx[1];
+        addSolid(shadow, SHADOW_RGBA);
+      }
+      const rect = { ...q.canvasRect, x: q.canvasRect.x + c.placement.x, y: q.canvasRect.y + c.placement.y };
+      if (q.kind === 'paper') {
+        addSolid(clipQuad(m, rect), [...q.color, 1]);
+        continue;
+      }
+      const loc = slotLocation(q.slot);
+      const last = runs[runs.length - 1];
+      if (last?.kind === 'tile' && last.pool === q.pool && last.page === loc.page) last.count++;
+      else runs.push({ kind: 'tile', pool: q.pool, page: loc.page, first: tiles.length / TILE_QUAD_FLOATS, count: 1 });
+      tiles.push(
+        ...clipQuad(m, rect),
+        loc.x + q.texels.x, loc.y + q.texels.y, loc.x + q.texels.x + q.texels.width, loc.y + q.texels.y + q.texels.height,
+        loc.x + 0.5, loc.y + 0.5, loc.x + TILE_SIZE - 0.5, loc.y + TILE_SIZE - 0.5,
+        0, 0,
+      );
+    }
+    for (const o of this.overlay) addSolid(clipQuad(m, o.rect), o.color);
+    return { tiles: new Float32Array(tiles), solids: new Float32Array(solids), runs };
+  }
+}
+
+/** A parallelogram in clip space: origin, x axis, y axis. */
+type ClipQuad = [number, number, number, number, number, number];
+
+/** Map a workspace rect to clip space with a column-major 3×3 matrix (double precision). */
+export function clipQuad(m: Float64Array, r: Rect): ClipQuad {
+  const ox = m[0]! * r.x + m[3]! * r.y + m[6]!;
+  const oy = m[1]! * r.x + m[4]! * r.y + m[7]!;
+  return [ox, oy, m[0]! * r.width, m[1]! * r.width, m[3]! * r.height, m[4]! * r.height];
+}
+
+/** Consecutive runs of slots on the same page (slots must be sorted). */
+function pageRuns(slots: readonly TileSlot[]): { page: number; first: number; count: number }[] {
+  const runs: { page: number; first: number; count: number }[] = [];
+  slots.forEach((slot, i) => {
+    const page = Math.floor(slot / SLOTS_PER_PAGE);
+    const last = runs[runs.length - 1];
+    if (last && last.page === page) last.count++;
+    else runs.push({ page, first: i, count: 1 });
+  });
+  return runs;
+}
+
+/**
+ * The canvas-pixel rectangle covering changed tiles, clipped to the canvas
+ * ('all' = the whole canvas). Null if nothing changed.
+ */
+export function dirtyRect(keys: readonly TileKey[] | 'all', size: { width: number; height: number }): Rect | null {
+  const canvas = { x: 0, y: 0, width: size.width, height: size.height };
+  if (keys === 'all') return canvas;
+  if (keys.length === 0) return null;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const k of keys) {
+    const { tx, ty } = tileCoords(k);
+    x0 = Math.min(x0, tx * TILE_SIZE);
+    y0 = Math.min(y0, ty * TILE_SIZE);
+    x1 = Math.max(x1, (tx + 1) * TILE_SIZE);
+    y1 = Math.max(y1, (ty + 1) * TILE_SIZE);
+  }
+  return intersect(canvas, { x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+}
+
+/** Grid spacing (workspace px) is TILE_SIZE × a power of two, at least this many device px apart. */
+const GRID_MIN_DEVICE_PX = 48;
+const GRID_RGBA: [number, number, number, number] = [0.035, 0.035, 0.035, 0.035]; // faint white, premultiplied
+
+/**
+ * Faint grid lines over the visible workspace, 1 device px wide, so empty
+ * space reads as a surface and panning has visible motion. The spacing
+ * doubles as you zoom out, so there are never more than a few dozen lines.
+ */
+export function backgroundGrid(visible: Rect, canvasPxPerDevicePx: number): OverlayRect[] {
+  let spacing = TILE_SIZE;
+  while (spacing / canvasPxPerDevicePx < GRID_MIN_DEVICE_PX) spacing *= 2;
+  const width = canvasPxPerDevicePx;
+  const lines: OverlayRect[] = [];
+  for (let x = Math.ceil(visible.x / spacing) * spacing || 0; x <= visible.x + visible.width; x += spacing) {
+    lines.push({ rect: { x, y: visible.y, width, height: visible.height }, color: GRID_RGBA });
+  }
+  for (let y = Math.ceil(visible.y / spacing) * spacing || 0; y <= visible.y + visible.height; y += spacing) {
+    lines.push({ rect: { x: visible.x, y, width: visible.width, height: width }, color: GRID_RGBA });
+  }
+  return lines;
+}
+
+/** Layer tile ids of every visible source of a canvas at `key`. */
+function tileIdsAt(c: CanvasRenderState, key: TileKey): TileId[] {
+  const ids: TileId[] = [];
+  for (const s of c.sources) {
+    const id = s.tiles.get(key);
+    if (id !== undefined) ids.push(id);
+  }
+  return ids;
+}
+
+function evictOp(e: Eviction): FrameOp {
+  return { kind: 'evict', slot: e.slot, done: e.pixels };
+}
+
+/**
+ * Turn resize jobs into plain tile copies, one op per new tile (so each can
+ * wait for its own source tiles): zero the tile, then copy the part of every
+ * source tile that lands inside the tile's `keep` region.
+ */
+export function retileCopies(jobs: readonly RetileJob[]): Extract<FrameOp, { kind: 'copies' }>[] {
+  return jobs.map((job) => {
+    const copies: TileCopy[] = [];
+    for (const s of job.sources) {
+      const placed: Rect = { x: s.dx, y: s.dy, width: TILE_SIZE, height: TILE_SIZE };
+      const part = intersect(placed, job.keep);
+      if (!part) continue;
+      copies.push({ src: s.src, sx: part.x - s.dx, sy: part.y - s.dy, dst: job.dst, dx: part.x, dy: part.y, width: part.width, height: part.height });
+    }
+    return { kind: 'copies' as const, zero: [job.dst], copies };
+  });
+}

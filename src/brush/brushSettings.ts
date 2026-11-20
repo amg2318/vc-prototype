@@ -14,8 +14,18 @@ export interface BrushSettings {
   minSizeFraction: number;
   /** Dab opacity at zero pressure, as a fraction of full. */
   minOpacityFraction: number;
+  /**
+   * Effective pressure (after the curve) at which opacity reaches full, 0..1.
+   * 1: only the hardest press is fully opaque. Lower: a lighter press is enough.
+   */
+  fullOpacityPressure: number;
   /** Stabilizer amount 0..1. */
   smoothing: number;
+  /**
+   * For input without real pressure (mouse, finger): fake it from speed,
+   * faster = thinner. Off: such input draws at full pressure.
+   */
+  pressureFromSpeed: boolean;
   /** sRGB, 0..1 per channel. */
   color: [number, number, number];
 }
@@ -29,6 +39,8 @@ export const DEFAULT_BRUSH: BrushSettings = {
   pressureAffectsOpacity: true,
   minSizeFraction: 0.05,
   minOpacityFraction: 0.15,
+  fullOpacityPressure: 0.2, // a light Pencil press is already fully opaque
   smoothing: 0.15,
+  pressureFromSpeed: false,
   color: [0.08, 0.08, 0.1],
 };

@@ -1,5 +1,8 @@
 import { screenToDoc, type ViewTransform } from '../viewport/viewport';
 
+/** What produced a sample. Anything that isn't a pen or a finger counts as a mouse. */
+export type InputKind = 'pen' | 'touch' | 'mouse';
+
 /**
  * One input sample, normalised from a PointerEvent and already converted to
  * document coordinates. Everything downstream of input (brush, stabilizer,
@@ -9,8 +12,13 @@ export interface PenSample {
   /** Document-space position (document pixels). */
   x: number;
   y: number;
-  /** 0..1. Mice report 0.5 while a button is held; the brush decides how to treat that. */
+  /** 0..1, as reported. Only meaningful when `hasRealPressure`. */
   pressure: number;
+  /**
+   * True only for pens. Mice report a fixed 0.5 and finger pressure varies by
+   * device, so for those the brush ignores `pressure` (see strokeEngine.ts).
+   */
+  hasRealPressure: boolean;
   /** Degrees, -90..90. */
   tiltX: number;
   tiltY: number;
@@ -24,7 +32,7 @@ export interface PenSample {
   tangentialPressure: number;
   /** Event timestamp (ms, same clock as performance.now()). */
   timeStamp: number;
-  pointerType: string;
+  kind: InputKind;
   /** True for the eraser end of a pen (Wacom etc.). Apple Pencil has no eraser end. */
   isEraser: boolean;
   /** True for samples from getPredictedEvents(): only ever drawn temporarily. */
@@ -58,10 +66,12 @@ export function penSampleFromEvent(
 ): PenSample {
   const doc = screenToDoc(view, { x: e.clientX - canvasOrigin.x, y: e.clientY - canvasOrigin.y });
   const angles = e as PointerEvent & PointerEventAngles;
+  const kind = inputKind(e.pointerType);
   return {
     x: doc.x,
     y: doc.y,
     pressure: e.pressure,
+    hasRealPressure: kind === 'pen',
     tiltX: e.tiltX ?? 0,
     tiltY: e.tiltY ?? 0,
     altitudeAngle: typeof angles.altitudeAngle === 'number' ? angles.altitudeAngle : null,
@@ -69,8 +79,12 @@ export function penSampleFromEvent(
     twist: e.twist ?? 0,
     tangentialPressure: e.tangentialPressure ?? 0,
     timeStamp: e.timeStamp,
-    pointerType: e.pointerType,
+    kind,
     isEraser,
     isPredicted,
   };
+}
+
+export function inputKind(pointerType: string): InputKind {
+  return pointerType === 'pen' || pointerType === 'touch' ? pointerType : 'mouse';
 }

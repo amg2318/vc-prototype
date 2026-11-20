@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_LAYERS, TILE_BYTES } from '../config';
-import { Editor } from './editor';
+import type { Editor } from './editor';
+import { singleCanvasEditor } from '../workspace/workspace';
 import { TileStore } from './tileStore';
 
 /** Snapshot of everything undo/redo should restore. */
@@ -53,7 +54,7 @@ function paint(e: Editor, keys: number[], layerId = e.activeLayerId) {
 
 describe('strokes', () => {
   it('allocates one new tile per touched key and records src/dst jobs', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     const jobs = paint(e, [0, 1])!;
     expect(jobs.map((j) => j.src)).toEqual([null, null]);
     expect(e.activeLayer.tiles.size).toBe(2);
@@ -63,14 +64,14 @@ describe('strokes', () => {
   });
 
   it('paint stroke undo/redo swaps tiles', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0]);
     expectUndoable(e, () => paint(e, [0, 5]));
     expectNoLeaks(e);
   });
 
   it('eraser stroke undo/redo, skipping tiles that do not exist', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0, 1]);
     let jobs: ReturnType<Editor['commitStroke']> = null;
     expectUndoable(e, () => {
@@ -81,13 +82,13 @@ describe('strokes', () => {
   });
 
   it('erasing where there is nothing records no step', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     expect(e.commitStroke(e.activeLayerId, [4], 'erase')).toEqual([]);
     expect(e.history.undoCount).toBe(0);
   });
 
   it('a new stroke after undo discards the redo step and frees its tiles', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0]);
     paint(e, [1, 2]);
     e.undo();
@@ -99,7 +100,7 @@ describe('strokes', () => {
   });
 
   it('forgets tiles found empty, in the document and in history', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0]);
     const [job] = e.commitStroke(e.activeLayerId, [0], 'erase')!;
     const generation = e.store.generation(job!.dst);
@@ -114,7 +115,7 @@ describe('strokes', () => {
   });
 
   it('ignores an empty-tile result for a slot that was reused since', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     const [job] = paint(e, [0])!;
     e.forgetEmptyTiles([{ slot: job!.dst, generation: e.store.generation(job!.dst) - 1 }]);
     expect(e.activeLayer.tiles.has(0)).toBe(true);
@@ -123,7 +124,7 @@ describe('strokes', () => {
 
 describe('layer commands', () => {
   it('add layer: above the active layer, selected, undoable', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     const first = e.activeLayerId;
     expectUndoable(e, () => e.addLayer());
     expect(e.doc.layers.length).toBe(2);
@@ -133,14 +134,14 @@ describe('layer commands', () => {
   });
 
   it('enforces the layer limit', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     for (let i = 1; i < MAX_LAYERS; i++) expect(e.addLayer()).toBe(true);
     expect(e.addLayer()).toBe(false);
     expect(e.duplicateLayer(e.activeLayerId)).toBe(false);
   });
 
   it('delete layer: undoable, keeps tiles alive in history, cannot delete the last layer', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0, 1]);
     e.addLayer();
     const bottom = e.doc.layers[0]!.id;
@@ -152,7 +153,7 @@ describe('layer commands', () => {
   });
 
   it('duplicate layer shares tiles without copying, and painting on the copy diverges', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0]);
     e.setLayerProps(e.activeLayerId, { opacity: 0.5 });
     const original = e.activeLayer;
@@ -168,7 +169,7 @@ describe('layer commands', () => {
   });
 
   it('move layer: undoable', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     e.addLayer();
     e.addLayer();
     const bottom = e.doc.layers[0]!.id;
@@ -177,7 +178,7 @@ describe('layer commands', () => {
   });
 
   it('rename layer: undoable, ignores blank names', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     expectUndoable(e, () => e.renameLayer(e.activeLayerId, 'Sketch'));
     e.renameLayer(e.activeLayerId, '   ');
     expect(e.activeLayer.name).toBe('Sketch');
@@ -188,12 +189,12 @@ describe('layer commands', () => {
     ['visibility', { visible: false }],
     ['blend mode', { blendMode: 'multiply' as const }],
   ])('set %s: undoable', (_name, props) => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     expectUndoable(e, () => e.setLayerProps(e.activeLayerId, props));
   });
 
   it('merges a slider drag into one undo step', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     for (const opacity of [0.9, 0.7, 0.5, 0.2]) e.setLayerProps(e.activeLayerId, { opacity }, 'drag-1');
     expect(e.history.undoCount).toBe(1);
     e.undo();
@@ -205,7 +206,7 @@ describe('layer commands', () => {
   });
 
   it('clear layer: undoable, tiles kept by history until dropped', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0, 1, 2]);
     expectUndoable(e, () => e.clearLayer(e.activeLayerId));
     expect(e.store.usedSlots).toBe(3);
@@ -214,7 +215,7 @@ describe('layer commands', () => {
   });
 
   it('paper colour: undoable, recomposites everything', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     const changes: unknown[] = [];
     e.onChange((c) => changes.push(c.tiles));
     expectUndoable(e, () => e.setPaper([0.9, 0.85, 0.7]));
@@ -224,7 +225,7 @@ describe('layer commands', () => {
 
 describe('history budget', () => {
   it('drops the oldest steps when history memory exceeds the budget', () => {
-    const e = new Editor(new TileStore(64), 2 * TILE_BYTES);
+    const e = singleCanvasEditor(new TileStore(64), 2 * TILE_BYTES);
     paint(e, [0]);
     paint(e, [0]); // history now holds 1 superseded tile
     paint(e, [0]); // 2
@@ -240,7 +241,7 @@ describe('history budget', () => {
   });
 
   it('drops history to make room when the tile pool is full, and refuses when that is not enough', () => {
-    const e = new Editor(new TileStore(3));
+    const e = singleCanvasEditor(new TileStore(3));
     paint(e, [0, 1]);
     paint(e, [0]); // 3 slots used, one held only by history
     expect(paint(e, [1])).not.toBeNull(); // needs 1 slot: drops history to get it
@@ -249,7 +250,7 @@ describe('history budget', () => {
   });
 
   it('reports history bytes as tiles not used by the document', () => {
-    const e = new Editor(new TileStore(16));
+    const e = singleCanvasEditor(new TileStore(16));
     paint(e, [0, 1]);
     expect(e.historyBytes()).toBe(0);
     paint(e, [0]);

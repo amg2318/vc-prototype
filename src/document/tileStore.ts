@@ -1,63 +1,72 @@
-import { MAX_TILE_SLOTS, SLOTS_PER_PAGE } from '../config';
-import type { TileSlot } from './tiles';
+import { MAX_TILE_IDS, SLOTS_PER_PAGE } from '../config';
 
 /**
- * CPU-side bookkeeping for the GPU tile pool: which slots are in use, and how
- * many references each has.
+ * A pool of reference-counted numbers. Used for tile ids (what documents and
+ * undo history hold) and for GPU slot pools.
  *
  * Tiles are immutable once written. A stroke never paints into an existing
- * tile; it writes `old tile + stroke` into a freshly allocated slot. That lets
- * layers, duplicated layers and undo history share slots safely: each holder
- * takes a reference, and a slot returns to the free list when the last
- * reference is released.
+ * tile; it writes `old tile + stroke` into a freshly allocated tile. That lets
+ * layers, duplicated layers and undo history share tiles safely: each holder
+ * takes a reference, and a tile is freed when the last reference is released
+ * (`onFree` listeners then drop its pixels, on the GPU or compressed).
  *
- * Each allocation also bumps the slot's generation, so asynchronous GPU
+ * Each allocation also bumps the number's generation, so asynchronous GPU
  * results (e.g. "this tile turned out empty") can be checked against the
  * allocation they were about.
+ *
+ * Freed numbers are reused first; otherwise numbers are handed out in order,
+ * so GPU slot pools fill their pages one at a time.
  */
 export class TileStore {
   private readonly refCounts: Uint16Array;
   private readonly generations: Uint32Array;
+  private readonly free: number[] = [];
+  private nextFresh = 0;
   private used = 0;
-  private highestPage = -1;
+  private readonly freeListeners: ((n: number) => void)[] = [];
 
-  constructor(readonly capacity: number = MAX_TILE_SLOTS) {
+  constructor(readonly capacity: number = MAX_TILE_IDS) {
     this.refCounts = new Uint16Array(capacity);
     this.generations = new Uint32Array(capacity);
   }
 
-  /** Allocate a slot with one reference, or null if the pool is full. Prefers low slots so pages fill in order. */
-  allocate(): TileSlot | null {
-    for (let slot = 0; slot < this.capacity; slot++) {
-      if (this.refCounts[slot] === 0) {
-        this.refCounts[slot] = 1;
-        this.generations[slot]!++;
-        this.used++;
-        this.highestPage = Math.max(this.highestPage, Math.floor(slot / SLOTS_PER_PAGE));
-        return slot;
-      }
+  /** Allocate a number with one reference, or null if the pool is full. */
+  allocate(): number | null {
+    const n = this.free.pop() ?? (this.nextFresh < this.capacity ? this.nextFresh++ : null);
+    if (n === null) return null;
+    this.refCounts[n] = 1;
+    this.generations[n]!++;
+    this.used++;
+    return n;
+  }
+
+  retain(n: number): void {
+    if (this.refCounts[n] === 0) throw new Error(`retain of free tile ${n}`);
+    this.refCounts[n]!++;
+  }
+
+  release(n: number): void {
+    const count = this.refCounts[n]!;
+    if (count === 0) throw new Error(`release of free tile ${n}`);
+    this.refCounts[n] = count - 1;
+    if (count === 1) {
+      this.used--;
+      this.free.push(n);
+      for (const listener of this.freeListeners) listener(n);
     }
-    return null;
   }
 
-  retain(slot: TileSlot): void {
-    if (this.refCounts[slot] === 0) throw new Error(`retain of free tile slot ${slot}`);
-    this.refCounts[slot]!++;
+  /** Called with each number whose last reference was released. */
+  onFree(listener: (n: number) => void): void {
+    this.freeListeners.push(listener);
   }
 
-  release(slot: TileSlot): void {
-    const count = this.refCounts[slot]!;
-    if (count === 0) throw new Error(`release of free tile slot ${slot}`);
-    this.refCounts[slot] = count - 1;
-    if (count === 1) this.used--;
+  refCount(n: number): number {
+    return this.refCounts[n]!;
   }
 
-  refCount(slot: TileSlot): number {
-    return this.refCounts[slot]!;
-  }
-
-  generation(slot: TileSlot): number {
-    return this.generations[slot]!;
+  generation(n: number): number {
+    return this.generations[n]!;
   }
 
   get usedSlots(): number {
@@ -68,8 +77,8 @@ export class TileStore {
     return this.capacity - this.used;
   }
 
-  /** Number of atlas pages the GPU needs to back every slot allocated so far. */
+  /** Atlas pages needed to back every number handed out so far (for GPU slot pools). */
   get pagesNeeded(): number {
-    return this.highestPage + 1;
+    return Math.ceil(this.nextFresh / SLOTS_PER_PAGE);
   }
 }

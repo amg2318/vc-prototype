@@ -36,6 +36,19 @@ export interface FrameRecord {
   compositeCpuMs: number;
   /** GPU time of the composite pass (WebGPU with timestamp queries only). */
   compositeGpuMs: number | null;
+  /** Canvases at least partly on screen. */
+  visibleCanvases: number;
+  /** Running totals of layer tiles moved off and back onto the GPU. */
+  evictions: number;
+  reloads: number;
+}
+
+/** Tile residency over the last second: how busy eviction is, and how long reloads take. */
+export interface ResidencySummary {
+  evictionsPerSecond: number | null;
+  reloadsPerSecond: number | null;
+  /** Reload latency (request → pixels ready to upload) over the most recent reloads. */
+  reloadMs: Stats;
 }
 
 export interface Stats {
@@ -64,11 +77,25 @@ export interface MetricsSummary {
   compositedTiles: Stats;
 }
 
+/** Memory use at one moment (logged a few times a second while frames render). */
+export interface MemorySample {
+  t: number;
+  residentTiles: number;
+  /** Bytes the renderer holds on the GPU (layer and composite pages, screen-sized buffers). */
+  gpuBytes: number;
+  compressedTiles: number;
+  compressedBytes: number;
+  /** Undo history, counted at raw tile size. */
+  historyBytes: number;
+}
+
 /** Frames further apart than this are not "consecutive" (the app was idle). */
 const IDLE_GAP_MS = 100;
 /** Latencies outside 0..this are treated as clock mismatches and discarded. */
 const MAX_PLAUSIBLE_LATENCY_MS = 1000;
 const MAX_RECORDS = 100_000;
+/** Reload latencies kept for the HUD's recent statistics (the export keeps all of them). */
+const RECENT_RELOADS = 200;
 
 export function percentile(sorted: readonly number[], p: number): number | null {
   if (sorted.length === 0) return null;
@@ -95,8 +122,28 @@ export function plausibleLatency(fromEventMs: number, toMs: number): number | nu
   return latency >= 0 && latency <= MAX_PLAUSIBLE_LATENCY_MS ? latency : null;
 }
 
+/**
+ * Per-second rate of a running total, from (time, total) points: the change
+ * over the last `windowMs`, divided by the time it took. Null with too little data.
+ */
+export function rateOfTotal(points: readonly { t: number; total: number }[], now: number, windowMs = 1000): number | null {
+  const recent = points.filter((p) => p.t >= now - windowMs);
+  if (recent.length < 2) return null;
+  const first = recent[0]!;
+  const last = recent[recent.length - 1]!;
+  const span = last.t - first.t;
+  return span > 0 ? ((last.total - first.total) / span) * 1000 : null;
+}
+
 export class Metrics {
   readonly frames: FrameRecord[] = [];
+  /** Every reload latency (ms) since the last reset, in order. */
+  readonly reloadTimes: number[] = [];
+  readonly memory: MemorySample[] = [];
+
+  noteMemory(sample: MemorySample): void {
+    if (this.memory.length < MAX_RECORDS) this.memory.push(sample);
+  }
   counters = { strokes: 0, cancelledStrokes: 0, palmRejections: 0, implausibleTimestamps: 0 };
 
   private pending = { samples: 0, events: 0, dabs: 0, predictedDabs: 0, oldest: Infinity, newest: -Infinity };
@@ -122,7 +169,17 @@ export class Metrics {
   }
 
   /** Call once per rendered frame, after renderer.render(). */
-  frameRendered(rafTime: number, cpuMs: number, info: FrameInfo): void {
+  /**
+   * `residency`: the renderer's running eviction/reload totals and the reload
+   * latencies finished since the previous frame.
+   */
+  frameRendered(
+    rafTime: number,
+    cpuMs: number,
+    info: FrameInfo,
+    residency: { evictions: number; reloads: number; reloadTimes: readonly number[] } = { evictions: 0, reloads: 0, reloadTimes: [] },
+  ): void {
+    if (this.reloadTimes.length < MAX_RECORDS) this.reloadTimes.push(...residency.reloadTimes);
     const p = this.pending;
     const hasInput = p.samples > 0;
     let inputToSubmit: number | null = null;
@@ -150,6 +207,9 @@ export class Metrics {
       compositedTiles: info.compositedTiles,
       compositeCpuMs: info.compositeCpuMs,
       compositeGpuMs: null,
+      visibleCanvases: info.visibleCanvases,
+      evictions: residency.evictions,
+      reloads: residency.reloads,
     };
     if (this.frames.length < MAX_RECORDS) this.frames.push(record);
 
@@ -196,8 +256,23 @@ export class Metrics {
     };
   }
 
+  /**
+   * Eviction and reload rates over the last second. Frames only render when
+   * something changes, so when idle the rates are null (shown as —).
+   */
+  residency(now = performance.now()): ResidencySummary {
+    const recent = this.frames.slice(-600);
+    return {
+      evictionsPerSecond: rateOfTotal(recent.map((f) => ({ t: f.t, total: f.evictions })), now),
+      reloadsPerSecond: rateOfTotal(recent.map((f) => ({ t: f.t, total: f.reloads })), now),
+      reloadMs: computeStats(this.reloadTimes.slice(-RECENT_RELOADS)),
+    };
+  }
+
   reset(): void {
     this.frames.length = 0;
+    this.reloadTimes.length = 0;
+    this.memory.length = 0;
     this.counters = { strokes: 0, cancelledStrokes: 0, palmRejections: 0, implausibleTimestamps: 0 };
     this.recentSampleTimes = [];
     this.recentEventTimes = [];

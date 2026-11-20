@@ -1,5 +1,8 @@
-import { ATLAS_PAGE_SIZE, CANVAS_HEIGHT, CANVAS_WIDTH, MAX_ATLAS_PAGES } from '../../config';
+import { ATLAS_PAGE_SIZE, COMPOSITE_LEVEL0_PAGES, MAX_ATLAS_PAGES, MAX_CANVAS_SIZE } from '../../config';
 import { COMPOSITE_UNIFORM_VEC4S, SHADER_CONSTANTS as C } from '../compositePacking';
+
+/** Stroke masks cover the largest canvas. */
+export const MASK_SIZE = MAX_CANVAS_SIZE;
 
 // GLSL ES 3.00 shaders for the WebGL2 backend. Same passes and arithmetic as
 // the WGSL shaders in ../webgpu/shaders.ts.
@@ -7,6 +10,7 @@ import { COMPOSITE_UNIFORM_VEC4S, SHADER_CONSTANTS as C } from '../compositePack
 // Orientation: when rendering into textures we map pixel y straight to clip y
 // (no flip), so gl_FragCoord.y is the texel row, and texel row N holds canvas
 // (or atlas) row N. Sampling with v = y / height reads the same row back.
+// Display quads arrive already in clip space, so the screen needs no special case.
 
 const HEADER = `#version 300 es
 precision highp float;
@@ -14,24 +18,44 @@ precision highp int;
 precision highp usampler2D;
 `;
 
+const PAGE = `${ATLAS_PAGE_SIZE}.0`;
+
 /** Clip position for pixel `p` in a target of `size` (no y flip, see above). */
 const TO_CLIP = `
 vec4 toClip(vec2 p, vec2 size) { return vec4(p / size * 2.0 - 1.0, 0.0, 1.0); }
 vec2 quadCorner() { return vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)); }
 `;
 
-/** Sampler uniforms for every atlas page plus `fetchSlot`, which reads one texel of a tile slot. */
-export const PAGE_UNIFORMS = Array.from({ length: MAX_ATLAS_PAGES }, (_, i) => `u_page${i}`);
+/** Sampler uniform names `<prefix>0…` for a set of page textures. */
+function pageUniforms(prefix: string, count: number): string[] {
+  return Array.from({ length: count }, (_, i) => `${prefix}${i}`);
+}
 
+/** Declares the samplers plus `load_<name>(page, pixel)`. */
+function pageLoader(name: string, uniforms: string[]): string {
+  return `
+${uniforms.map((u) => `uniform sampler2D ${u};`).join('\n')}
+
+vec4 load_${name}(uint page, ivec2 p) {
+${uniforms.map((u, i) => `  if (page == ${i}u) return texelFetch(${u}, p, 0);`).join('\n')}
+  return vec4(0.0);
+}
+`;
+}
+
+/** Layer tile page samplers. */
+export const PAGE_UNIFORMS = pageUniforms('u_page', MAX_ATLAS_PAGES);
+/** Level-0 composite page samplers (read by the downsample pass). */
+export const LEVEL0_UNIFORMS = pageUniforms('u_level0_', COMPOSITE_LEVEL0_PAGES);
+
+/** Layer page samplers plus `fetchSlot`, which reads one texel of a layer tile slot. */
 const FETCH_SLOT = `
-${PAGE_UNIFORMS.map((name) => `uniform sampler2D ${name};`).join('\n')}
+${pageLoader('page', PAGE_UNIFORMS)}
 
 vec4 fetchSlot(uint slot, ivec2 local) {
-  uint page = slot / ${C.SLOTS_PER_PAGE}u;
   uint index = slot % ${C.SLOTS_PER_PAGE}u;
   ivec2 p = ivec2(int(index % ${C.PAGE_SIDE_TILES}u), int(index / ${C.PAGE_SIDE_TILES}u)) * ${C.TILE_SIZE} + local;
-${PAGE_UNIFORMS.map((name, i) => `  if (page == ${i}u) return texelFetch(${name}, p, 0);`).join('\n')}
-  return vec4(0.0);
+  return load_page(slot / ${C.SLOTS_PER_PAGE}u, p);
 }
 `;
 
@@ -47,7 +71,7 @@ void main() {
   v_local = (quadCorner() * 2.0 - 1.0) * extent;
   v_radius = a_dab.z;
   v_opacity = a_dab.w;
-  gl_Position = toClip(a_dab.xy + v_local, vec2(${CANVAS_WIDTH}.0, ${CANVAS_HEIGHT}.0));
+  gl_Position = toClip(a_dab.xy + v_local, vec2(${MASK_SIZE}.0));
 }`;
 
 export const DAB_FS = `${HEADER}
@@ -67,35 +91,40 @@ void main() {
 export const MERGE_VS = `${HEADER}${TO_CLIP}
 layout(location = 0) in vec4 a_origins;       // dst slot x, y in page · tile origin x, y in canvas
 layout(location = 1) in vec4 a_colorOpacity;
-layout(location = 2) in vec4 a_mode;
+layout(location = 2) in vec4 a_modeCanvas;    // mode, canvas width, height, 0
 flat out vec4 v_origins;
 flat out vec4 v_colorOpacity;
-flat out float v_mode;
+flat out vec4 v_modeCanvas;
 void main() {
   v_origins = a_origins;
   v_colorOpacity = a_colorOpacity;
-  v_mode = a_mode.x;
-  gl_Position = toClip(a_origins.xy + quadCorner() * ${C.TILE_SIZE}.0, vec2(${ATLAS_PAGE_SIZE}.0));
+  v_modeCanvas = a_modeCanvas;
+  gl_Position = toClip(a_origins.xy + quadCorner() * ${C.TILE_SIZE}.0, vec2(${PAGE}));
 }`;
 
 export const MERGE_FS = `${HEADER}
 uniform sampler2D u_strokeMask;
 flat in vec4 v_origins;
 flat in vec4 v_colorOpacity;
-flat in float v_mode;
+flat in vec4 v_modeCanvas;
 out vec4 o_color;
 void main() {
   ivec2 local = ivec2(gl_FragCoord.xy) - ivec2(v_origins.xy);
-  float m = texelFetch(u_strokeMask, ivec2(v_origins.zw) + local, 0).r * v_colorOpacity.a;
-  o_color = v_mode > 0.5 ? vec4(0.0, 0.0, 0.0, m) : vec4(v_colorOpacity.rgb * m, m);
+  ivec2 p = ivec2(v_origins.zw) + local;
+  // Outside the canvas: output 0, which leaves the tile unchanged (stays transparent).
+  if (float(p.x) >= v_modeCanvas.y || float(p.y) >= v_modeCanvas.z) { o_color = vec4(0.0); return; }
+  float m = texelFetch(u_strokeMask, p, 0).r * v_colorOpacity.a;
+  o_color = v_modeCanvas.x > 0.5 ? vec4(0.0, 0.0, 0.0, m) : vec4(v_colorOpacity.rgb * m, m);
 }`;
 
-// --- compositor ---------------------------------------------------------------
+// --- compositor (layer tiles → level-0 composite tiles) ---------------------------
 
 export const COMPOSITE_VS = `${HEADER}${TO_CLIP}
-layout(location = 0) in vec2 a_tileOrigin;
+layout(location = 0) in vec4 a_origins;   // dst x, y in the level-0 page · tile origin x, y in the canvas
+flat out vec4 v_origins;
 void main() {
-  gl_Position = toClip(a_tileOrigin + quadCorner() * ${C.TILE_SIZE}.0, vec2(${CANVAS_WIDTH}.0, ${CANVAS_HEIGHT}.0));
+  v_origins = a_origins;
+  gl_Position = toClip(a_origins.xy + quadCorner() * ${C.TILE_SIZE}.0, vec2(${PAGE}));
 }`;
 
 export const COMPOSITE_FS = `${HEADER}
@@ -104,6 +133,7 @@ uniform usampler2D u_lookup;
 uniform sampler2D u_strokeMask;
 uniform sampler2D u_predictionMask;
 ${FETCH_SLOT}
+flat in vec4 v_origins;
 out vec4 o_color;
 
 vec4 blendOnto(vec4 dst, vec4 src, int mode) {
@@ -115,10 +145,10 @@ vec4 blendOnto(vec4 dst, vec4 src, int mode) {
 }
 
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  ivec2 tile = p / ${C.TILE_SIZE};
+  ivec2 local = ivec2(gl_FragCoord.xy) - ivec2(v_origins.xy);
+  ivec2 p = ivec2(v_origins.zw) + local;          // canvas pixel
+  ivec2 tile = ivec2(v_origins.zw) / ${C.TILE_SIZE};
   int key = tile.y * ${C.TILES_X} + tile.x;
-  ivec2 local = p - tile * ${C.TILE_SIZE};
 
   vec4 info = u_v[2];
   int count = int(info.x);
@@ -139,37 +169,86 @@ void main() {
   o_color = acc;
 }`;
 
-// --- display ------------------------------------------------------------------
+// --- downsample (level-0 tile → region of a coarser preview tile) ---------------------
+
+export const DOWNSAMPLE_VS = `${HEADER}${TO_CLIP}
+layout(location = 0) in vec4 a_dst;     // x, y, size, level
+layout(location = 1) in vec4 a_src;     // x, y, has source, page
+layout(location = 2) in vec4 a_paper;
+flat out vec4 v_dst;
+flat out vec4 v_src;
+flat out vec4 v_paper;
+void main() {
+  v_dst = a_dst;
+  v_src = a_src;
+  v_paper = a_paper;
+  gl_Position = toClip(a_dst.xy + quadCorner() * a_dst.z, vec2(${PAGE}));
+}`;
+
+export const DOWNSAMPLE_FS = `${HEADER}
+${pageLoader('level0', LEVEL0_UNIFORMS)}
+flat in vec4 v_dst;
+flat in vec4 v_src;
+flat in vec4 v_paper;
+out vec4 o_color;
+void main() {
+  if (v_src.z < 0.5) { o_color = vec4(v_paper.rgb, 1.0); return; }
+  int n = 1 << int(v_dst.w);
+  ivec2 o = ivec2(gl_FragCoord.xy) - ivec2(v_dst.xy);
+  ivec2 base = ivec2(v_src.xy) + o * n;
+  vec4 sum = vec4(0.0);
+  for (int y = 0; y < 16; y++) {
+    if (y >= n) break;
+    for (int x = 0; x < 16; x++) {
+      if (x >= n) break;
+      sum += load_level0(uint(v_src.w), base + ivec2(x, y));
+    }
+  }
+  o_color = sum / float(n * n);
+}`;
+
+// --- display (composite tiles and flat quads, already in clip space) -------------------
 
 export const DISPLAY_VS = `${HEADER}${TO_CLIP}
-uniform mat3 u_docToClip;
-uniform vec4 u_params;                   // canvas w, h, texels per device pixel, 0
-out vec2 v_uv;
+layout(location = 0) in vec4 a_a;   // clip origin, x axis
+layout(location = 1) in vec4 a_b;   // y axis, texel rect start
+layout(location = 2) in vec4 a_c;   // texel rect end, clamp min
+layout(location = 3) in vec4 a_d;   // clamp max, 0, 0
+out vec2 v_texel;
+flat out vec4 v_clamp;
 void main() {
-  v_uv = quadCorner();
-  vec3 clip = u_docToClip * vec3(v_uv * u_params.xy, 1.0);
-  gl_Position = vec4(clip.xy, 0.0, 1.0);
+  vec2 q = quadCorner();
+  v_texel = mix(a_b.zw, a_c.xy, q);
+  v_clamp = vec4(a_c.zw, a_d.xy);
+  gl_Position = vec4(a_a.xy + q.x * a_a.zw + q.y * a_b.xy, 0.0, 1.0);
 }`;
 
 export const DISPLAY_FS = `${HEADER}
-uniform sampler2D u_composite;
-uniform vec4 u_params;
-in vec2 v_uv;
+uniform sampler2D u_tiles;
+in vec2 v_texel;
+flat in vec4 v_clamp;
 out vec4 o_color;
 void main() {
-  float footprint = u_params.z;
-  if (footprint <= 1.5) {
-    o_color = vec4(texture(u_composite, v_uv).rgb, 1.0);
-    return;
-  }
-  // Zoomed out: average a 3×3 grid of bilinear taps spread over the pixel's footprint.
-  vec2 stepUv = footprint / 3.0 / u_params.xy;
-  vec3 sum = vec3(0.0);
-  for (int y = -1; y <= 1; y++) {
-    for (int x = -1; x <= 1; x++) sum += texture(u_composite, v_uv + vec2(x, y) * stepUv).rgb;
-  }
-  o_color = vec4(sum / 9.0, 1.0);
+  // Stay inside the tile so bilinear filtering never reads a neighbouring atlas tile.
+  vec2 t = clamp(v_texel, v_clamp.xy, v_clamp.zw);
+  o_color = texture(u_tiles, t / ${PAGE});
 }`;
+
+export const SOLID_VS = `${HEADER}${TO_CLIP}
+layout(location = 0) in vec4 a_a;   // clip origin, x axis
+layout(location = 1) in vec4 a_b;   // y axis, rgba.rg
+layout(location = 2) in vec4 a_c;   // rgba.ba, 0, 0
+flat out vec4 v_color;
+void main() {
+  vec2 q = quadCorner();
+  v_color = vec4(a_b.zw, a_c.xy);
+  gl_Position = vec4(a_a.xy + q.x * a_a.zw + q.y * a_b.xy, 0.0, 1.0);
+}`;
+
+export const SOLID_FS = `${HEADER}
+flat in vec4 v_color;
+out vec4 o_color;
+void main() { o_color = v_color; }`;
 
 // --- readback helpers -----------------------------------------------------------
 

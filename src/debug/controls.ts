@@ -1,5 +1,6 @@
 import type { BrushSettings } from '../brush/brushSettings';
 import { PRESSURE_CURVE_PRESETS, type PressureCurvePreset } from '../brush/pressureCurve';
+import type { FingerDrawing, FingerDrawingSetting } from '../input/fingerDrawing';
 
 export interface ControlActions {
   fitView(): void;
@@ -24,10 +25,12 @@ export class Controls {
   readonly debugBody: HTMLElement;
   private readonly bindings: Binding[] = [];
   private readonly title: HTMLElement;
+  private readonly fingerSelect = document.createElement('select');
 
   constructor(
     private readonly settings: () => BrushSettings,
     private readonly toolName: () => string,
+    private readonly fingers: FingerDrawing,
     actions: ControlActions,
   ) {
     this.element = document.createElement('div');
@@ -41,6 +44,7 @@ export class Controls {
       this.title,
       this.slider('Size', 1, 400, 1, (s) => s.diameter, (s, v) => (s.diameter = v), (v) => `${v}px`),
       this.slider('Opacity', 0.05, 1, 0.01, (s) => s.opacity, (s, v) => (s.opacity = v), pct),
+      this.fingerSetting(),
     );
 
     const details = document.createElement('details');
@@ -55,6 +59,9 @@ export class Controls {
         (s, v) => (s.pressureCurve = v as PressureCurvePreset)),
       this.checkbox('Pressure → size', (s) => s.pressureAffectsSize, (s, v) => (s.pressureAffectsSize = v)),
       this.checkbox('Pressure → opacity', (s) => s.pressureAffectsOpacity, (s, v) => (s.pressureAffectsOpacity = v)),
+      this.slider('Full opacity at pressure', 0.1, 1, 0.05, (s) => s.fullOpacityPressure,
+        (s, v) => (s.fullOpacityPressure = v), pct),
+      this.checkbox('Mouse/finger: pressure from speed', (s) => s.pressureFromSpeed, (s, v) => (s.pressureFromSpeed = v)),
       plainCheckbox('Two-finger rotate', false, actions.setRotationEnabled),
       buttons([
         ['Fit view', actions.fitView],
@@ -75,6 +82,17 @@ export class Controls {
     this.title.textContent = this.toolName();
     const s = this.settings();
     for (const b of this.bindings) b.refresh(s);
+    this.fingerSelect.value = this.fingers.setting;
+    // Auto: one finger draws until a pen is used, then pans.
+    this.fingerSelect.title = `${this.fingers.setting === 'auto' ? 'Auto: ' : ''}one finger ${this.fingers.enabled ? 'draws' : 'pans'}`;
+  }
+
+  /** Finger drawing: Auto (on until a pen is used) / On / Off. */
+  private fingerSetting(): HTMLElement {
+    const el = this.fingerSelect;
+    el.append(new Option('Auto', 'auto'), new Option('On', 'on'), new Option('Off', 'off'));
+    el.addEventListener('change', () => (this.fingers.setting = el.value as FingerDrawingSetting));
+    return row('Finger draws', el);
   }
 
   private slider(

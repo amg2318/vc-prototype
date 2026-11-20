@@ -1,4 +1,4 @@
-import { ATLAS_PAGE_SIZE, CANVAS_HEIGHT, CANVAS_WIDTH, MAX_ATLAS_PAGES } from '../../config';
+import { ATLAS_PAGE_SIZE, COMPOSITE_LEVEL0_PAGES, MAX_ATLAS_PAGES, MAX_CANVAS_SIZE } from '../../config';
 import { COMPOSITE_UNIFORM_VEC4S, SHADER_CONSTANTS as C } from '../compositePacking';
 
 // WGSL shaders for the WebGPU backend.
@@ -7,6 +7,8 @@ import { COMPOSITE_UNIFORM_VEC4S, SHADER_CONSTANTS as C } from '../compositePack
 // renders into a texture flips y into clip space. Texel row N then holds
 // canvas (or atlas) row N, and @builtin(position) in the fragment shader is
 // the pixel coordinate directly.
+
+const PAGE = `${ATLAS_PAGE_SIZE}.0`;
 
 /** Clip position for pixel `p` of a render target of size `size`. */
 const TO_CLIP = /* wgsl */ `
@@ -23,27 +25,34 @@ fn quad(vi: u32) -> vec2f {
 }
 `;
 
-/** Page texture bindings plus `fetchSlot`, which reads one texel of a tile slot. */
-function pageBindings(firstBinding: number): string {
+/** `count` page textures named `<name>0…` plus `load_<name>(page, pixel)`. */
+function pageTextures(name: string, firstBinding: number, count: number): string {
   const decls = Array.from(
-    { length: MAX_ATLAS_PAGES },
-    (_, i) => `@group(0) @binding(${firstBinding + i}) var page${i}: texture_2d<f32>;`,
+    { length: count },
+    (_, i) => `@group(0) @binding(${firstBinding + i}) var ${name}${i}: texture_2d<f32>;`,
   ).join('\n');
-  const cases = Array.from(
-    { length: MAX_ATLAS_PAGES },
-    (_, i) => `    case ${i}u: { return textureLoad(page${i}, p, 0); }`,
-  ).join('\n');
+  const cases = Array.from({ length: count }, (_, i) => `    case ${i}u: { return textureLoad(${name}${i}, p, 0); }`).join('\n');
   return /* wgsl */ `
 ${decls}
 
-fn fetchSlot(slot: u32, local: vec2i) -> vec4f {
-  let page = slot / ${C.SLOTS_PER_PAGE}u;
-  let index = slot % ${C.SLOTS_PER_PAGE}u;
-  let p = vec2i(i32(index % ${C.PAGE_SIDE_TILES}u), i32(index / ${C.PAGE_SIDE_TILES}u)) * ${C.TILE_SIZE} + local;
+fn load_${name}(page: u32, p: vec2i) -> vec4f {
   switch page {
 ${cases}
     default: { return vec4f(0.0); }
   }
+}
+`;
+}
+
+/** Layer tile pages plus `fetchSlot`, which reads one texel of a layer tile slot. */
+function layerPages(firstBinding: number): string {
+  return /* wgsl */ `
+${pageTextures('page', firstBinding, MAX_ATLAS_PAGES)}
+
+fn fetchSlot(slot: u32, local: vec2i) -> vec4f {
+  let index = slot % ${C.SLOTS_PER_PAGE}u;
+  let p = vec2i(i32(index % ${C.PAGE_SIDE_TILES}u), i32(index / ${C.PAGE_SIDE_TILES}u)) * ${C.TILE_SIZE} + local;
+  return load_page(slot / ${C.SLOTS_PER_PAGE}u, p);
 }
 `;
 }
@@ -85,9 +94,14 @@ fn fs(in: VOut) -> @location(0) vec4f {
 
 /**
  * Merge: blends the stroke mask over tile slots that already hold a copy of
- * the tile from before the stroke. Uses fixed-function blending
- * (ONE, ONE_MINUS_SRC_ALPHA), which is exactly premultiplied paint/erase:
- *   paint: out = color·m + dst·(1 − m)      erase: out = 0 + dst·(1 − m)
+ * the tile from before the stroke. The fragment outputs (color·m, m) for
+ * paint and (0, 0, 0, m) for erase; the pipeline's fixed-function blending
+ * does the rest:
+ *   paint (ONE, ONE_MINUS_SRC_ALPHA):  out = color·m + dst·(1 − m)
+ *   erase (ZERO, ONE_MINUS_SRC_ALPHA): out = dst·(1 − m)
+ * (Erase can't use the paint blending: its alpha would be m + dst.a·(1 − m),
+ * turning erased pixels opaque black.)
+ * Pixels outside the canvas output 0, which leaves the tile unchanged.
  */
 export const MERGE_WGSL = /* wgsl */ `
 ${TO_CLIP}
@@ -99,35 +113,38 @@ struct VOut {
   @location(0) @interpolate(flat) dstOrigin: vec2f,
   @location(1) @interpolate(flat) tileOrigin: vec2f,
   @location(2) @interpolate(flat) colorOpacity: vec4f,
-  @location(3) @interpolate(flat) mode: f32,
+  @location(3) @interpolate(flat) modeCanvas: vec4f,
 };
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32,
-      @location(0) origins: vec4f, @location(1) colorOpacity: vec4f, @location(2) mode: vec4f) -> VOut {
+      @location(0) origins: vec4f, @location(1) colorOpacity: vec4f, @location(2) modeCanvas: vec4f) -> VOut {
   var out: VOut;
-  out.position = toClip(origins.xy + quad(vi) * ${C.TILE_SIZE}.0, vec2f(${ATLAS_PAGE_SIZE}.0));
+  out.position = toClip(origins.xy + quad(vi) * ${C.TILE_SIZE}.0, vec2f(${PAGE}));
   out.dstOrigin = origins.xy;
   out.tileOrigin = origins.zw;
   out.colorOpacity = colorOpacity;
-  out.mode = mode.x;
+  out.modeCanvas = modeCanvas;
   return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
   let local = vec2i(in.position.xy) - vec2i(in.dstOrigin);
-  let m = textureLoad(strokeMask, vec2i(in.tileOrigin) + local, 0).r * in.colorOpacity.a;
-  if (in.mode > 0.5) { return vec4f(0.0, 0.0, 0.0, m); }
+  let p = vec2i(in.tileOrigin) + local;
+  if (f32(p.x) >= in.modeCanvas.y || f32(p.y) >= in.modeCanvas.z) { return vec4f(0.0); }
+  let m = textureLoad(strokeMask, p, 0).r * in.colorOpacity.a;
+  if (in.modeCanvas.x > 0.5) { return vec4f(0.0, 0.0, 0.0, m); }
   return vec4f(in.colorOpacity.rgb * m, m);
 }
 `;
 
 /**
- * Compositor: for each pixel of the dirty tiles, start from the paper colour
- * and blend every source bottom to top. Raster sources find their tile slot in
- * the lookup texture. The live stroke is applied to its layer first, so the
- * preview matches the merged result exactly (including erasing).
+ * Compositor: writes level-0 composite tiles of one canvas into a level-0
+ * page. For each pixel, start from the paper colour and blend every source
+ * bottom to top; raster sources find their tile slot in the canvas's lookup
+ * texture. The live stroke is applied to its layer first, so the preview
+ * matches the merged result exactly (including erasing).
  */
 export const COMPOSITE_WGSL = /* wgsl */ `
 ${TO_CLIP}
@@ -137,11 +154,16 @@ struct CompositeUniforms { v: array<vec4f, ${COMPOSITE_UNIFORM_VEC4S}> };
 @group(0) @binding(1) var lookup: texture_2d<u32>;
 @group(0) @binding(2) var strokeMask: texture_2d<f32>;
 @group(0) @binding(3) var predictionMask: texture_2d<f32>;
-${pageBindings(4)}
+${layerPages(4)}
+
+struct VOut { @builtin(position) position: vec4f, @location(0) @interpolate(flat) origins: vec4f };
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, @location(0) tileOrigin: vec2f) -> @builtin(position) vec4f {
-  return toClip(tileOrigin + quad(vi) * ${C.TILE_SIZE}.0, vec2f(${CANVAS_WIDTH}.0, ${CANVAS_HEIGHT}.0));
+fn vs(@builtin(vertex_index) vi: u32, @location(0) origins: vec4f) -> VOut {
+  var out: VOut;
+  out.position = toClip(origins.xy + quad(vi) * ${C.TILE_SIZE}.0, vec2f(${PAGE}));
+  out.origins = origins;
+  return out;
 }
 
 fn blendOnto(dst: vec4f, src: vec4f, mode: i32) -> vec4f {
@@ -154,11 +176,11 @@ fn blendOnto(dst: vec4f, src: vec4f, mode: i32) -> vec4f {
 }
 
 @fragment
-fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
-  let p = vec2i(position.xy);
-  let tile = vec2i(p.x / ${C.TILE_SIZE}, p.y / ${C.TILE_SIZE});
+fn fs(in: VOut) -> @location(0) vec4f {
+  let local = vec2i(in.position.xy) - vec2i(in.origins.xy);
+  let p = vec2i(in.origins.zw) + local;          // canvas pixel
+  let tile = vec2i(in.origins.zw) / ${C.TILE_SIZE};
   let key = tile.y * ${C.TILES_X} + tile.x;
-  let local = p - tile * ${C.TILE_SIZE};
 
   let info = u.v[2];
   let count = i32(info.x);
@@ -182,44 +204,96 @@ fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
 }
 `;
 
-/** Draws the composite cache through the view, box-filtering when zoomed out. */
-export const DISPLAY_WGSL = /* wgsl */ `
-struct DisplayUniforms {
-  docToClip0: vec4f, docToClip1: vec4f, docToClip2: vec4f,
-  params: vec4f,                           // canvas w, h, texels per device pixel, 0
-};
-@group(0) @binding(0) var<uniform> u: DisplayUniforms;
-@group(0) @binding(1) var linearSampler: sampler;
-@group(0) @binding(2) var composite: texture_2d<f32>;
+/**
+ * Downsample: each output pixel of a preview region at level ℓ is the exact
+ * average of the 2^ℓ × 2^ℓ level-0 texels it covers (or plain paper).
+ */
+export const DOWNSAMPLE_WGSL = /* wgsl */ `
+${TO_CLIP}
+${QUAD}
+${pageTextures('level0', 0, COMPOSITE_LEVEL0_PAGES)}
 
-struct VOut { @builtin(position) position: vec4f, @location(0) uv: vec2f };
+struct VOut {
+  @builtin(position) position: vec4f,
+  @location(0) @interpolate(flat) dst: vec4f,     // x, y, size, level
+  @location(1) @interpolate(flat) src: vec4f,     // x, y, has source, page
+  @location(2) @interpolate(flat) paper: vec4f,
+};
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32) -> VOut {
-  var corners = array<vec2f, 4>(vec2f(0, 0), vec2f(1, 0), vec2f(0, 1), vec2f(1, 1));
-  let m = mat3x3f(u.docToClip0.xyz, u.docToClip1.xyz, u.docToClip2.xyz);
-  let clip = m * vec3f(corners[vi] * u.params.xy, 1.0);
+fn vs(@builtin(vertex_index) vi: u32, @location(0) dst: vec4f, @location(1) src: vec4f, @location(2) paper: vec4f) -> VOut {
   var out: VOut;
-  out.position = vec4f(clip.xy, 0.0, 1.0);
-  out.uv = corners[vi];
+  out.position = toClip(dst.xy + quad(vi) * dst.z, vec2f(${PAGE}));
+  out.dst = dst;
+  out.src = src;
+  out.paper = paper;
   return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-  let footprint = u.params.z;
-  if (footprint <= 1.5) {
-    return vec4f(textureSample(composite, linearSampler, in.uv).rgb, 1.0);
-  }
-  // Zoomed out: average a 3×3 grid of bilinear taps spread over the pixel's footprint.
-  let step = footprint / 3.0 / u.params.xy;
-  var sum = vec3f(0.0);
-  for (var y = -1; y <= 1; y++) {
-    for (var x = -1; x <= 1; x++) {
-      sum += textureSample(composite, linearSampler, in.uv + vec2f(f32(x), f32(y)) * step).rgb;
+  if (in.src.z < 0.5) { return vec4f(in.paper.rgb, 1.0); }
+  let n = 1 << u32(in.dst.w);
+  let o = vec2i(in.position.xy) - vec2i(in.dst.xy);
+  let base = vec2i(in.src.xy) + o * i32(n);
+  var sum = vec4f(0.0);
+  for (var y = 0; y < i32(n); y++) {
+    for (var x = 0; x < i32(n); x++) {
+      sum += load_level0(u32(in.src.w), base + vec2i(x, y));
     }
   }
-  return vec4f(sum / 9.0, 1.0);
+  return sum / f32(n * n);
+}
+`;
+
+/** Draws part of a composite tile as a parallelogram on screen (positions are already in clip space). */
+export const DISPLAY_WGSL = /* wgsl */ `
+${QUAD}
+@group(0) @binding(0) var linearSampler: sampler;
+@group(0) @binding(1) var tiles: texture_2d<f32>;
+
+struct VOut {
+  @builtin(position) position: vec4f,
+  @location(0) texel: vec2f,
+  @location(1) @interpolate(flat) clampRect: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32,
+      @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f, @location(3) d: vec4f) -> VOut {
+  let q = quad(vi);
+  var out: VOut;
+  out.position = vec4f(a.xy + q.x * a.zw + q.y * b.xy, 0.0, 1.0);
+  out.texel = mix(b.zw, c.xy, q);
+  out.clampRect = vec4f(c.zw, d.xy);
+  return out;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4f {
+  // Stay inside the tile so bilinear filtering never reads a neighbouring atlas tile.
+  let t = clamp(in.texel, in.clampRect.xy, in.clampRect.zw);
+  return textureSampleLevel(tiles, linearSampler, t / ${PAGE}, 0.0);
+}
+`;
+
+/** Flat-coloured parallelogram (premultiplied colour): shadows, paper placeholders, overlays. */
+export const SOLID_WGSL = /* wgsl */ `
+${QUAD}
+struct VOut { @builtin(position) position: vec4f, @location(0) @interpolate(flat) color: vec4f };
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VOut {
+  let q = quad(vi);
+  var out: VOut;
+  out.position = vec4f(a.xy + q.x * a.zw + q.y * b.xy, 0.0, 1.0);
+  out.color = vec4f(b.zw, c.xy);
+  return out;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4f {
+  return in.color;
 }
 `;
 
@@ -229,7 +303,7 @@ ${TO_CLIP}
 ${QUAD}
 struct CheckUniforms { targetSize: vec2f, _pad: vec2f };
 @group(0) @binding(0) var<uniform> u: CheckUniforms;
-${pageBindings(1)}
+${layerPages(1)}
 
 struct VOut { @builtin(position) position: vec4f, @location(0) @interpolate(flat) slotAndIndex: vec2u };
 
@@ -262,7 +336,7 @@ ${TO_CLIP}
 ${QUAD}
 struct ThumbUniforms { targetSize: vec2f, _pad: vec2f };
 @group(0) @binding(0) var<uniform> u: ThumbUniforms;
-${pageBindings(1)}
+${layerPages(1)}
 
 struct VOut { @builtin(position) position: vec4f, @location(0) @interpolate(flat) slotAndTile: vec4f };
 
@@ -290,3 +364,6 @@ fn fs(in: VOut) -> @location(0) vec4f {
   return sum / 16.0;
 }
 `;
+
+/** Stroke masks cover the largest canvas. */
+export const MASK_SIZE = MAX_CANVAS_SIZE;

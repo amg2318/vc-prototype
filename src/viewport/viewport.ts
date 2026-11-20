@@ -137,13 +137,23 @@ export function fitToView(
   viewHeight: number,
   margin = 24,
 ): ViewTransform {
+  return fitRectToView({ x: 0, y: 0, width: docWidth, height: docHeight }, viewWidth, viewHeight, margin);
+}
+
+/** Centre a workspace rectangle in the view, unrotated and scaled to fit with a margin (CSS px). */
+export function fitRectToView(
+  rect: { x: number; y: number; width: number; height: number },
+  viewWidth: number,
+  viewHeight: number,
+  margin = 24,
+): ViewTransform {
   const availW = Math.max(1, viewWidth - 2 * margin);
   const availH = Math.max(1, viewHeight - 2 * margin);
-  const scale = clampScale(Math.min(availW / docWidth, availH / docHeight));
+  const scale = clampScale(Math.min(availW / Math.max(1, rect.width), availH / Math.max(1, rect.height)));
   return pinDocPointToScreen(
     scale,
     0,
-    { x: docWidth / 2, y: docHeight / 2 },
+    { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
     { x: viewWidth / 2, y: viewHeight / 2 },
   );
 }
@@ -153,13 +163,14 @@ export function fitToView(
  * (x right, y up, both in [-1, 1]) for a view of the given CSS size.
  * Both WebGPU and WebGL2 use this convention for the final screen pass.
  */
-export function docToClipMatrix(v: ViewTransform, viewWidth: number, viewHeight: number): Float32Array {
+export function docToClipMatrix(v: ViewTransform, viewWidth: number, viewHeight: number): Float64Array {
   const c = Math.cos(v.rotation) * v.scale;
   const s = Math.sin(v.rotation) * v.scale;
   const sx = 2 / viewWidth;
   const sy = -2 / viewHeight; // screen y points down, clip y points up
   // screen = [c -s tx; s c ty];  clip = [sx 0 -1; 0 sy 1] · screen
-  return new Float32Array([
+  // Double precision: the renderer maps far-away canvases on the CPU (see RenderCore).
+  return new Float64Array([
     sx * c, sy * s, 0, // column 0
     -sx * s, sy * c, 0, // column 1
     sx * v.tx - 1, sy * v.ty + 1, 1, // column 2

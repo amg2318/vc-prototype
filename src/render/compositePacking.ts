@@ -1,7 +1,11 @@
 import { MAX_LAYERS, PAGE_SIDE_TILES, TILES_X, TILE_COUNT, TILE_SIZE, THUMBNAIL_SIZE } from '../config';
 import { BLEND_MODE_IDS } from '../document/blend';
 import { slotLocation, tileCoords, type TileKey, type TileSlot } from '../document/tiles';
-import type { CompositeState, MergeJob, StrokeStyle } from './renderer';
+import type { CanvasRenderState, MergeJob, StrokeStyle } from './renderer';
+import type { Size } from './renderCore';
+
+/** The parts of a canvas's render state the compositor reads. */
+export type CompositeInput = Pick<CanvasRenderState, 'paper' | 'sources' | 'liveStroke'>;
 
 /**
  * Turns compositor and merge inputs into the flat arrays both GPU backends
@@ -15,11 +19,19 @@ export const MAX_SOURCES = MAX_LAYERS;
 /**
  * Tile lookup table: a TILE_COUNT × MAX_SOURCES integer texture. Texel
  * (tileKey, sourceIndex) holds slot + 1, or 0 for "no tile here".
+ * `slotOf` maps the document's tile ids to GPU slots.
  */
-export function packLookup(state: CompositeState, target = new Uint32Array(TILE_COUNT * MAX_SOURCES)): Uint32Array {
+export function packLookup(
+  state: CompositeInput,
+  slotOf: (id: number) => number | undefined = (id) => id,
+  target = new Uint32Array(TILE_COUNT * MAX_SOURCES),
+): Uint32Array {
   target.fill(0);
   state.sources.slice(0, MAX_SOURCES).forEach((source, row) => {
-    for (const [key, slot] of source.tiles) target[row * TILE_COUNT + key] = slot + 1;
+    for (const [key, id] of source.tiles) {
+      const slot = slotOf(id);
+      if (slot !== undefined) target[row * TILE_COUNT + key] = slot + 1;
+    }
   });
   return target;
 }
@@ -33,7 +45,7 @@ export function packLookup(state: CompositeState, target = new Uint32Array(TILE_
  */
 export const COMPOSITE_UNIFORM_VEC4S = 3 + MAX_SOURCES;
 
-export function packCompositeUniforms(state: CompositeState): Float32Array {
+export function packCompositeUniforms(state: CompositeInput): Float32Array {
   const u = new Float32Array(COMPOSITE_UNIFORM_VEC4S * 4);
   u.set([...state.paper, 1], 0);
   const live = state.liveStroke;
@@ -53,28 +65,22 @@ export function packCompositeUniforms(state: CompositeState): Float32Array {
   return u;
 }
 
-/** Composite instances: one vec2 per dirty tile (its top-left in canvas pixels). */
-export function packTileOrigins(keys: readonly TileKey[]): Float32Array {
-  const out = new Float32Array(keys.length * 2);
-  keys.forEach((key, i) => {
-    const { tx, ty } = tileCoords(key);
-    out[i * 2] = tx * TILE_SIZE;
-    out[i * 2 + 1] = ty * TILE_SIZE;
-  });
-  return out;
-}
-
 /**
  * Merge instances, 12 floats each:
- *   dst slot x, y (in its page) · tile origin x, y (canvas) · colour rgb, opacity · mode, 0, 0, 0
+ *   dst slot x, y (in its page) · tile origin x, y (canvas) · colour rgb, opacity · mode, canvas width, height, 0
+ * The canvas size clips the stroke: pixels outside a canvas stay transparent.
  */
 export const MERGE_INSTANCE_FLOATS = 12;
 
-export function packMergeInstance(job: MergeJob, style: StrokeStyle, target: Float32Array, index: number): void {
+export function packMergeInstance(job: MergeJob, style: StrokeStyle, canvas: Size, target: Float32Array, index: number): void {
   const dst = slotLocation(job.dst);
   const { tx, ty } = tileCoords(job.key);
   target.set(
-    [dst.x, dst.y, tx * TILE_SIZE, ty * TILE_SIZE, ...style.color, style.opacity, style.mode === 'erase' ? 1 : 0, 0, 0, 0],
+    [
+      dst.x, dst.y, tx * TILE_SIZE, ty * TILE_SIZE,
+      ...style.color, style.opacity,
+      style.mode === 'erase' ? 1 : 0, canvas.width, canvas.height, 0,
+    ],
     index * MERGE_INSTANCE_FLOATS,
   );
 }

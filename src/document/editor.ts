@@ -1,5 +1,5 @@
-import { HISTORY_BUDGET_BYTES, MAX_LAYERS, TILE_BYTES } from '../config';
-import type { Change, Command, CommandContext } from '../history/command';
+import { MAX_LAYERS } from '../config';
+import type { Change, Command } from '../history/command';
 import {
   AddLayerCommand,
   ClearLayerCommand,
@@ -12,11 +12,12 @@ import {
   StrokeCommand,
   type TileChange,
 } from '../history/commands';
-import { History } from '../history/history';
+import type { History } from '../history/history';
+import type { Workspace } from '../workspace/workspace';
 import type { RGB } from './blend';
-import { PaintDocument, setLayerTile, type LayerId, type LayerProps } from './paintDocument';
+import type { LayerId, LayerProps, PaintDocument } from './paintDocument';
 import type { TileKey, TileSlot } from './tiles';
-import { TileStore } from './tileStore';
+import type { TileStore } from './tileStore';
 
 export type StrokeMode = 'paint' | 'erase';
 
@@ -41,87 +42,83 @@ export interface EditorStats {
 }
 
 /**
- * The single entry point for changing a document. Every change goes through
- * the history as a command, and listeners hear about what changed so the app
- * can recomposite tiles and refresh the UI. GPU-free, so it is unit-tested.
+ * Edits one canvas: layers, strokes and which layer is active. The changes
+ * themselves are commands run through the workspace's single undo history,
+ * so undo spans every canvas. GPU-free, so it is unit-tested.
  */
 export class Editor {
-  readonly doc: PaintDocument;
-  readonly history: History;
   activeLayerId: LayerId;
-  private listeners: ((change: Change) => void)[] = [];
-  private readonly ctx: CommandContext;
 
-  constructor(store = new TileStore(), historyBudgetBytes = HISTORY_BUDGET_BYTES, canvasId = 'main') {
-    this.doc = new PaintDocument(canvasId, store);
-    this.ctx = { canvas: () => this.doc };
-    this.history = new History(this.ctx, historyBudgetBytes, () => this.historyBytes());
-    const first = this.doc.createLayer();
-    this.doc.insertLayer(first, 0); // the initial layer is not an undoable step
-    this.activeLayerId = first.id;
+  constructor(
+    readonly workspace: Workspace,
+    readonly doc: PaintDocument,
+  ) {
+    this.activeLayerId = doc.layers[doc.layers.length - 1]!.id;
   }
 
   get store(): TileStore {
-    return this.doc.store;
+    return this.workspace.store;
+  }
+
+  get history(): History {
+    return this.workspace.history;
   }
 
   get activeLayer() {
     return this.doc.layer(this.activeLayerId);
   }
 
+  /** Every change in the workspace (not only this canvas's). */
   onChange(listener: (change: Change) => void): void {
-    this.listeners.push(listener);
+    this.workspace.onChange(listener);
   }
 
-  /** Bytes of tile memory kept alive only by undo/redo history. */
+  /** Bytes of tile memory kept alive only by undo/redo history (workspace-wide). */
   historyBytes(): number {
-    return (this.store.usedSlots - this.doc.usedSlotCount()) * TILE_BYTES;
+    return this.workspace.historyBytes();
   }
 
   stats(): EditorStats {
+    const w = this.workspace.stats();
     return {
       layers: this.doc.layers.length,
       tileEntries: this.doc.tileEntryCount(),
-      usedSlots: this.store.usedSlots,
-      capacitySlots: this.store.capacity,
+      usedSlots: w.usedSlots,
+      capacitySlots: w.capacitySlots,
       pages: this.store.pagesNeeded,
-      historySteps: this.history.undoCount,
-      redoSteps: this.history.redoCount,
-      historyBytes: this.historyBytes(),
+      historySteps: w.historySteps,
+      redoSteps: w.redoSteps,
+      historyBytes: w.historyBytes,
     };
   }
 
   setActiveLayer(id: LayerId): void {
     if (!this.doc.hasLayer(id) || id === this.activeLayerId) return;
     this.activeLayerId = id;
-    this.emit({ canvasId: this.doc.id, tiles: [], layers: [], structure: true });
+    this.workspace.emit({ canvasId: this.doc.id, tiles: [], layers: [], structure: true });
   }
 
   // --- history ----------------------------------------------------------------
 
   undo(): boolean {
-    const change = this.history.undo();
-    if (change) this.emit(change);
-    return change !== null;
+    return this.workspace.undo() !== null;
   }
 
   redo(): boolean {
-    const change = this.history.redo();
-    if (change) this.emit(change);
-    return change !== null;
+    return this.workspace.redo() !== null;
   }
 
   private execute(command: Command): void {
-    this.emit(this.history.execute(command));
+    this.workspace.execute(command);
   }
 
-  private emit(change: Change): void {
+  /** Called by the workspace for every change to this canvas, before listeners run. */
+  noteChange(change: Change): void {
     if (change.select && this.doc.hasLayer(change.select)) this.activeLayerId = change.select;
     if (!this.doc.hasLayer(this.activeLayerId)) {
       // The active layer went away (undo of "add", delete): pick the nearest one.
       this.activeLayerId = this.doc.layers[Math.max(0, this.doc.layers.length - 1)]!.id;
     }
-    for (const l of this.listeners) l(change);
   }
 
   // --- strokes ----------------------------------------------------------------
@@ -156,19 +153,9 @@ export class Editor {
     return jobs;
   }
 
-  /**
-   * The GPU found these tiles fully transparent (after erasing). Drop them
-   * everywhere: "empty tile" and "no tile" look the same, and no tile costs
-   * no memory. `generation` guards against a slot reused in the meantime.
-   */
+  /** See `Workspace.forgetEmptyTiles`. */
   forgetEmptyTiles(found: { slot: TileSlot; generation: number }[]): void {
-    for (const { slot, generation } of found) {
-      if (this.store.refCount(slot) === 0 || this.store.generation(slot) !== generation) continue;
-      for (const layer of this.doc.layers) {
-        for (const [key, s] of layer.tiles) if (s === slot) setLayerTile(this.store, layer, key, null);
-      }
-      this.history.forEachCommand((c) => c.forgetEmptySlot?.(this.ctx, slot));
-    }
+    this.workspace.forgetEmptyTiles(found);
   }
 
   // --- layers -----------------------------------------------------------------

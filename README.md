@@ -1,18 +1,24 @@
-# VC Prototype: Phase 1 (painting core)
+# VC Prototype: Phase 2 (multi-canvas workspace)
 
 A tablet-first web drawing tool, combining Procreate-style raster painting with Figma-style multi-canvas
-layout. **Phase 1 gate:** a finished sketch can be drawn on one canvas on an iPad, with no crashes.
+layout. **Phase 2 gate:** a 20-canvas project at print size stays within iPad memory limits, with smooth
+panning and no crashes.
 
-Phase 1 adds the painting core on a single 4096 × 4096 canvas:
-- tiled layers (up to 32) with opacity, visibility and blend modes (normal, multiply);
-- an eraser to transparency;
-- undo/redo with a memory budget;
-- a layers panel, colour picker and eyedropper;
-- touch gestures and keyboard shortcuts.
+Phase 2 replaces the single canvas with an infinite workspace of independent canvases (each up to
+4096 × 4096, with its own layers):
+- pan and zoom anywhere; canvases are created from print presets, moved, resized, renamed, duplicated,
+  deleted and reordered, all undoable in one workspace-wide history;
+- each canvas's composite is a cached tile pyramid, so a zoomed-out view of many canvases stays cheap;
+- layer tiles stay on the GPU within a budget; the rest are compressed in memory and reloaded on demand;
+- a finger or a mouse can draw, erase and pick colours, not only a pen;
+- the HUD and stress mode measure memory, evictions and reload times.
 
-Saving and multiple canvases are later phases.
+Phase 1 (layers, eraser, undo, layers panel, colour picker) carries over unchanged inside each canvas.
+Saving is a later phase.
 
-- [Phase 1 on-device checklist](docs/phase1-ipad-checklist.md): what to try on the iPad
+- [Phase 2 on-device checklist](docs/phase2-ipad-checklist.md): what to try on the iPad
+- [Phase 2 findings](docs/phase2-findings.md): desktop measurements, recommended iPad memory budget, known issues
+- [Phase 1 on-device checklist](docs/phase1-ipad-checklist.md)
 - [Phase 1 findings](docs/phase1-findings.md): design decisions, desktop measurements, risks to check on device
 - [Phase 0 checklist](docs/ipad-checklist.md) and [Phase 0 findings](docs/phase0-findings.md)
 
@@ -97,12 +103,19 @@ push to `main`.
 | ---------------------------------- | ----------------------------------------------------------------- |
 | Apple Pencil / pen                 | Use the current tool (brush, eraser or eyedropper)                |
 | Pen eraser end (Wacom etc.)        | Erase to transparent, whatever tool is selected                   |
-| Mouse, left button                 | Use the current tool at full pressure                             |
+| Mouse, left button                 | Use the current tool (full pressure, or "pressure from speed")    |
+| Alt/Option + click or drag         | Eyedropper                                                        |
+| One finger                         | Use the current tool when finger drawing is on; pan when it's off |
+| Second finger right after a one-finger stroke starts | Cancels that stroke (no undo step); then pinch or tap as usual |
 | Two fingers                        | Pan and pinch-zoom (rotation: tick "Two-finger rotate")           |
 | Two-finger tap / three-finger tap  | Undo / redo                                                       |
-| One finger, touch and hold         | Eyedropper (samples what you see: all visible layers + background); a second finger cancels it |
-| Mouse wheel / trackpad pinch       | Zoom at the cursor                                                |
-| Middle-drag, or Space + drag       | Pan                                                               |
+| One finger, touch and hold (0.4 s) | Eyedropper (samples what you see: all visible layers + background); discards the tiny stroke it started; a second finger cancels it |
+| Drag a canvas's name label         | Move the canvas (tap: select, double tap: zoom to it)             |
+| Trackpad two-finger scroll / wheel | Pan (Shift + wheel pans sideways)                                 |
+| Trackpad pinch, or ⌘/Ctrl + wheel  | Zoom at the cursor                                                |
+| Drag on empty space (pen, mouse or finger), middle-drag, or Space + drag | Pan                         |
+| ⌘/Ctrl + = / − / 0                 | Zoom in / out / 100%                                              |
+| ⇧1 / ⇧2                            | Fit all canvases / fit the selected canvas                        |
 
 | Key                       | Action                       |
 | ------------------------- | ---------------------------- |
@@ -113,8 +126,32 @@ push to `main`.
 | ⇧N                        | New layer                    |
 | H                         | Toggle HUD                   |
 
+**Finger drawing** (brush panel, "Finger draws"): *Auto* (default) lets one finger draw until a pen is
+used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it either way. The
+**Finger** button in the toolbar switches it on or off at any time.
+
 **Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
-layers.
+Finger (finger drawing on/off), Canvases, Layers.
+
+### The workspace
+
+- **Drawing** happens on whichever canvas the stroke starts on, clipped to that canvas, and selects it
+  (the layers panel then shows its layers). A stroke that starts outside every canvas pans instead.
+- **Name labels** sit above each canvas at a constant size. Tap one to select its canvas, double-tap to
+  zoom to it, and drag it to move the canvas (one undo step per drag). Moves snap to other canvases' edges
+  and, if enabled, to a 256 px grid.
+- **Canvases panel** (toolbar → Canvases):
+  - a list of every canvas (tap one to select it and zoom to it) and **Fit all**;
+  - **New canvas** from a preset or a custom size up to 4096 × 4096: A4 300 dpi (2480 × 3508),
+    US Letter 300 dpi (2550 × 3300), comic page 6.625 × 10.25 in at 300 dpi (1988 × 3075),
+    square 2048 × 2048, and 1920 × 1080. New canvases go to the right of the others;
+  - for the selected canvas: rename, **resize** (presets or width × height, around one of nine anchor
+    points; this extends or crops the canvas, it never rescales pixels), duplicate, bring to front, delete;
+  - snapping options for moving canvases.
+- **Undo** is workspace-wide. Undoing a change to a canvas that is off screen doesn't move the camera: an
+  amber chip at the screen edge points to it (tap it to go there). A change to another canvas that is on
+  screen gets a brief amber outline.
+- The selected canvas has a blue outline; a faint grid marks empty space.
 
 **Layers panel:** the top layer is listed first. Tap a row to select it. Use ● to show or hide a layer, and
 drag ≡ to reorder. The selected layer shows its opacity (one undo step per slider drag), blend mode, rename,
@@ -125,18 +162,36 @@ pinch when the pen lands, the view snaps back. Touches with a large contact area
 (`GESTURES.palmContactPx` in `src/config.ts`) never count as taps or holds. All gesture thresholds live in
 that one object.
 
-**Memory limits:** tiles come from a fixed pool of 2048 tiles (512 MB). Undo history may use up to 256 MB
-of it, and the oldest steps are dropped first. If the drawing itself fills the pool, the stroke is refused
-and a banner explains why.
+### Memory settings
 
-**URL parameters:**
+| Setting | Default | Where |
+| ------- | ------- | ----- |
+| Layer tiles kept on the GPU | 256 MB (1024 tiles of 256 × 256) | `LAYER_GPU_BUDGET_BYTES` in `src/config.ts`, or `?layerBudgetMB=` (16 to 512) |
+| Composite cache | 1 full-resolution page + 2 preview pages (64 MB each) | `COMPOSITE_LEVEL0_PAGES`, `COMPOSITE_PREVIEW_PAGES` |
+| Undo history | 256 MB, counted at raw tile size; the oldest steps are dropped first | `HISTORY_BUDGET_BYTES` |
+| Tile ids (all canvases, layers and undo) | 65,536 | `MAX_TILE_IDS` |
+
+When the GPU budget is full, the least recently used layer tiles are read back, compressed (deflate) and
+kept in JS memory. They reload when a stroke, an undo, a resize or a recomposite needs them. Until then the
+canvas shows its last composite or a coarser preview, so it never goes blank.
+
+### URL parameters
+
+- `?canvases=N` starts with N A4 canvases in a grid (default: one 4096 × 4096 canvas).
+- `?layerBudgetMB=N` sets the GPU budget for layer tiles.
 - `?renderer=webgl2` forces the WebGL2 fallback.
-- `?stress` adds stress tests to the debug section: 200 strokes, fill 32 layers, undo/redo all, and fill the
-  pool.
+- `?stress` adds stress mode to **Brush details & debug**:
+  - **Build workspace**: N canvases (default 20) of a preset size, each with M layers (default 4) of
+    S scripted strokes (default 6), in a grid to the right of the existing canvases;
+  - **Auto-pan**: resets the stats, flies the view from canvas to canvas and back, then reports frame
+    times, evictions and reloads during the pan, reload latency and peak GPU memory. Press
+    **Export JSON** straight after to keep the details;
+  - on the selected canvas: 200 strokes, fill 32 layers, and undo/redo all.
 
-**Brush panel:** size and opacity of the current tool (the brush and eraser have separate settings). Under
-**Brush details & debug** are spacing, smoothing, the pressure curve, pressure → size / opacity,
-two-finger rotate, fit view, toggle HUD, export JSON and reset stats.
+**Brush panel:** size and opacity of the current tool (the brush and eraser have separate settings), and
+finger drawing (Auto / On / Off). Under **Brush details & debug** are spacing, smoothing, the pressure
+curve, pressure → size / opacity, "pressure from speed" for mouse and finger (faster = thinner; otherwise
+they draw at full pressure), two-finger rotate, fit view, toggle HUD, export JSON and reset stats.
 
 ## Measurement HUD
 
@@ -155,9 +210,13 @@ The HUD shows the last 2 seconds and refreshes 4 times per second. Timing values
 | `in→gpu done ms`  | Newest sample → GPU reports the work finished (`onSubmittedWorkDone`, WebGPU only)                        |
 | `composite`       | Tiles recomposited per frame, composite CPU encode time, and composite GPU time (WebGPU with timestamp queries only) |
 | counters          | Strokes, strokes ended by `pointercancel`, and touches ignored by palm rejection                          |
-| `tiles … slots … pages` | Tile entries in the document, used/total pool slots (document + history), allocated atlas pages |
-| `gpu memory`      | Estimate of the textures the app allocated (atlas pages, masks, composite cache)                         |
-| `history`         | Undo/redo steps and the pool memory that only history keeps alive                                        |
+| `canvases`        | Canvases in the workspace, and the selected canvas's tiles and layers                                     |
+| `tiles`           | Layer tiles in use (all canvases and undo), how many are on the GPU out of the budget (and their MB), and how many are compressed in JS memory (and their MB) |
+| `visible canvases`| Canvases at least partly on screen in the last frame                                                      |
+| `evictions … reloads` | Layer tiles moved off / back onto the GPU per second over the last second (totals in brackets)         |
+| `reload ms`       | Time from asking for an evicted tile to its pixels being ready to upload (p50 / p95 of the last 200)    |
+| `gpu memory`      | Estimate of the textures the app allocated (layer pages, composite pages, masks)                         |
+| `undo memory`     | Undo/redo steps and the tiles only history keeps alive, counted at raw size                              |
 
 > **These latencies are estimates of software latency, not on-glass latency.** They start at the event's
 > timestamp (when the browser received the input) and stop when our GPU work was submitted or completed.
@@ -174,8 +233,10 @@ sheet (choose "Save to Files"). On desktop it downloads `measurements-<label>-<t
 - `brush`: the brush settings at export time
 - `document`: layer/tile/slot counts, history steps and bytes, atlas pages and GPU memory
 - `counters` and `summary`: the HUD statistics over the whole recording, not just the last 2 seconds
-- `frames`: one record per rendered frame, with interval, CPU time, sample/event/dab counts and the
-  latency estimates
+- `frames`: one record per rendered frame, with interval, CPU time, sample/event/dab counts, the
+  latency estimates, visible canvases and running eviction/reload totals
+- `residency`, `reloadTimes`: eviction/reload rates and every reload latency (ms)
+- `memory`: four samples a second of tiles on the GPU, GPU bytes, compressed tiles and bytes, and undo memory
 
 Press **Reset stats** before each test run so every file covers exactly one configuration.
 
@@ -183,48 +244,64 @@ Press **Reset stats** before each test run so every file covers exactly one conf
 
 ```
 src/
-  config.ts   canvas size, tile size, layer/pool/history limits, gesture thresholds
-  document/   tiles, ref-counted TileStore, PaintDocument + layers, blend maths, Editor
+  config.ts   sizes, memory budgets, gesture thresholds
+  workspace/  Workspace (canvases + one history), coordinates, snapping, presets
+  document/   tiles, ref-counted TileStore, PaintDocument + layers, blend maths, Editor, resize planning
   history/    Command interface, History (budgeted undo/redo), the commands
   app/        StrokeController (input → brush → GPU → undo step), composite state builder
   tools/      current tool, brush/eraser settings, recent colours
-  input/      PenSample, pointer routing, two-finger navigation, tap/hold recogniser
-  brush/      pressure curve, stabilizer, dab interpolation, StrokeEngine (pure logic)
-  render/     Renderer interface, FrameQueue, packing helpers, webgpu/ and webgl2/ backends
-  ui/         toolbar, layers panel, colour picker, thumbnails, loupe, shortcuts
-  viewport/   document ↔ screen transform
-  debug/      metrics, HUD, controls, JSON export, stress tests
+  input/      PenSample, pointer routing, finger drawing, two-finger navigation, taps/holds, wheel
+  brush/      pressure (real or from speed), stabilizer, dab interpolation, StrokeEngine (pure logic)
+  render/     Renderer interface, RenderCore (shared by both backends), pyramid planner, tile
+              residency + compressed store, packing helpers, webgpu/ and webgl2/ backends
+  ui/         toolbar, canvas labels, canvases panel, layers panel, colour picker, undo indicator, …
+  viewport/   workspace ↔ screen transform
+  debug/      metrics, HUD, controls, JSON export, stress mode
 ```
 
+**Three coordinate spaces:** screen (CSS px), workspace (1 unit = 1 canvas pixel; canvases are placed in
+it) and canvas (pixels of one canvas). `viewport/` maps screen ↔ workspace, a canvas's placement maps
+workspace ↔ canvas. The renderer builds clip-space positions on the CPU in 64-bit floats, so drawing stays
+exact far from the origin.
+
 **Document model (CPU, no pixels):**
-- A layer is a sparse map from tile key to *tile slot*. Tiles are 256 × 256 and only exist where something
-  was painted.
-- Slots are reference-counted by `TileStore`. Tiles are **immutable**: a stroke never changes a tile in
-  place. It writes "old tile + stroke" into a fresh slot.
-- An undo step therefore just holds references to the old slots. Undo and redo swap references, and
-  duplicating a layer shares its tiles.
-- Every command carries a `canvasId`, ready for multiple canvases.
+- A layer is a sparse map from tile key to *tile id*. Tiles are 256 × 256 and only exist where something
+  was painted. Tiles are **immutable**: a stroke writes "old tile + stroke" into a new tile.
+- Tile ids are reference-counted by `TileStore`, so an undo step just holds ids, and duplicating a layer
+  or a canvas shares tiles.
+- The `Workspace` holds the canvases in z-order and one undo history. Every command records its canvas.
 
 **GPU:**
-- **Tile pool.** Slots live in 4096² `rgba8` atlas pages (256 tiles, 64 MB each), allocated on demand up to
-  8 pages. Pixels are 8-bit premultiplied alpha throughout.
+- **Layer tiles and residency.** A tile id is not a GPU location. `TileResidency` keeps the most
+  recently used tiles in GPU slots (4096² atlas pages) within the budget. When it needs room it evicts the
+  least recently used tile: the GPU copy is read back, deflate-compressed (`CompressionStream`) and kept by
+  a `TileBackingStore` (Phase 4 can replace it with OPFS storage). Work that reads an evicted tile waits,
+  in order, until it is reloaded. Each frame maps ids to the slots they occupy that frame.
 - **Strokes.** While drawing, dabs go into a canvas-sized stroke mask and the compositor shows them on the
-  active layer. On pen-up, each touched tile is copied into its new slot and the mask is blended on: source-over
-  to paint, destination-out to erase.
-- **Freeing erased tiles.** After an eraser stroke, a small GPU reduction finds tiles that became fully
-  transparent so they can be freed.
-- **Compositor.** One instanced draw over the dirty tiles. Per pixel, it starts with the paper colour and
-  blends each visible layer's tile (found through a tile lookup texture) with that layer's opacity and blend
-  mode. The result is cached in a canvas-sized texture, and only dirty tiles are recomposited.
-- **Display.** The display pass draws the cache through the viewport and box-filters it when zoomed out.
-- **Batching.** Input handlers only queue work in a `FrameQueue`, which is drained once per animation frame.
+  active layer. On pen-up, each touched tile is copied into its new tile and the mask is blended on.
+- **Composite pyramid.** Each canvas's composite is cached as 256² tiles at five levels: level 0 is full
+  resolution and each level halves it (level 4 is a whole 4096 px canvas in one tile). Level 0 is
+  composited from the layer tiles; coarser levels are box-filtered straight from level-0 tiles, so a
+  changed tile only updates its small region of each cached level. The display draws the level that
+  matches the zoom; levels 3–4 are kept for every canvas, so any canvas can always be shown, and a missing
+  tile is drawn from the nearest coarser one. `PyramidPlanner` makes these decisions (pure, unit-tested)
+  and both backends just execute its plan, a limited amount per frame.
+- **Display and overlay.** One pass draws each visible canvas (a shadow, then its tiles) and then the
+  overlay: selection outline, undo highlight, and later Phase 3's arrows.
+- **Batching.** Input handlers only queue work. `RenderCore` turns it into one frame's ops once per
+  animation frame, and only when something changed.
 
 **Data flow:** `PointerEvent` → `PenSample` → `StrokeEngine` (dabs) → `StrokeController` → renderer
-(mask). On pen-up, `Editor.commitStroke` (new slots + undo step) → `renderer.mergeStroke`. The editor's
+(mask). On pen-up, `Editor.commitStroke` (new tiles + undo step) → `renderer.mergeStroke`. Workspace
 change events tell the renderer which tiles to recomposite and which thumbnails to refresh.
 
-**Phase 3 hook:** the compositor takes a list of generic *sources*, not layers. That way, inherited content
-from other canvases can later be added as extra sources at the bottom.
+**Phase 3 hooks:**
+- `renderer.onCompositeChanged(canvasId, dirtyRect)` fires whenever a canvas's composite changes;
+- `renderer.requestComposite(canvasId, level, rect)` builds part of a canvas's composite at a pyramid level,
+  even off screen, and `renderer.compositeTiles(canvasId, level, rect)` says which composite page texels to
+  draw it from (falling back to coarser tiles or paper);
+- the overlay pass above the canvases;
+- the compositor takes generic *sources*, not layers, so inherited content can be added as a source.
 
 ## Licence
 

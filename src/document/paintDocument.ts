@@ -1,10 +1,11 @@
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from '../config';
+import type { Placement } from '../workspace/coords';
 import type { BlendMode, RGB } from './blend';
 import type { TileKey, TileSlot } from './tiles';
 import type { TileStore } from './tileStore';
 
 export type LayerId = string;
-/** Identifies a canvas. Phase 1 has exactly one; the workspace in later phases has many. */
+/** Identifies a canvas in the workspace. */
 export type CanvasId = string;
 
 export interface LayerProps {
@@ -52,10 +53,18 @@ export function releaseAllTiles(store: TileStore, tiles: Map<TileKey, TileSlot>)
   tiles.clear();
 }
 
-/** One canvas: paper colour plus a stack of raster layers (index 0 = bottom). */
+/**
+ * One canvas: a name, a place in the workspace, a paper colour and a stack of
+ * raster layers (index 0 = bottom). Position and size change only through
+ * commands, so they can be undone.
+ */
 export class PaintDocument {
-  readonly width = CANVAS_WIDTH;
-  readonly height = CANVAS_HEIGHT;
+  name: string;
+  /** Workspace position of the top-left corner (whole pixels). */
+  x = 0;
+  y = 0;
+  width: number;
+  height: number;
   layers: RasterLayer[] = [];
   /** Non-erasable background, below every layer. sRGB 0..1. */
   paper: RGB = [1, 1, 1];
@@ -64,7 +73,17 @@ export class PaintDocument {
   constructor(
     readonly id: CanvasId,
     readonly store: TileStore,
-  ) {}
+    size: { width: number; height: number } = { width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
+    name = 'Canvas',
+  ) {
+    this.width = size.width;
+    this.height = size.height;
+    this.name = name;
+  }
+
+  get placement(): Placement {
+    return { x: this.x, y: this.y, width: this.width, height: this.height };
+  }
 
   createLayer(name?: string): RasterLayer {
     this.layerCounter++;
@@ -96,11 +115,15 @@ export class PaintDocument {
     return { layer: layer!, index };
   }
 
+  /** Adds every tile slot referenced by this canvas's layers to `into`. */
+  collectSlots(into: Set<TileSlot>): Set<TileSlot> {
+    for (const layer of this.layers) for (const slot of layer.tiles.values()) into.add(slot);
+    return into;
+  }
+
   /** Distinct tile slots referenced by layers currently in the document. */
   usedSlotCount(): number {
-    const slots = new Set<TileSlot>();
-    for (const layer of this.layers) for (const slot of layer.tiles.values()) slots.add(slot);
-    return slots.size;
+    return this.collectSlots(new Set()).size;
   }
 
   /** Tiles allocated across all layers (shared tiles counted once per layer). */

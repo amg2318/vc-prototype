@@ -1,47 +1,51 @@
-import { TILE_COUNT } from '../config';
-import { DirtyTiles, type TileKey, type TileSlot } from '../document/tiles';
-import type { CompositeState, Dab, MergeJob, Rgba8, StrokeStyle } from './renderer';
+import type { Size } from './renderCore';
+import type { Dab, MergeJob, Rgba8, StrokeStyle } from './renderer';
+import type { TileKey, TileSlot } from '../document/tiles';
 
 /**
- * Backend-independent bookkeeping shared by the WebGPU and WebGL2 renderers:
- * the ordered GPU operations queued since the last frame, the current
- * prediction, the dirty tiles of the composite and pending readbacks.
- * Each backend drains this once per frame in `render()`.
+ * The ordered GPU operations on layer tiles queued since the last frame,
+ * the current prediction and pending readbacks. Drained once per frame.
+ *
+ * Queued ops name tiles by id; RenderCore turns them into the same ops on
+ * GPU slots (adding evictions and reload uploads) before a backend runs them.
  */
+
+/** Copy a region between tile slots (tile-local pixels). */
+export interface TileCopy {
+  src: TileSlot;
+  sx: number;
+  sy: number;
+  dst: TileSlot;
+  dx: number;
+  dy: number;
+  width: number;
+  height: number;
+}
 
 export type FrameOp =
   | { kind: 'clearMask' }
   | { kind: 'dabs'; dabs: Dab[] }
-  | { kind: 'merge'; jobs: MergeJob[]; style: StrokeStyle };
+  | { kind: 'merge'; jobs: MergeJob[]; style: StrokeStyle; canvas: Size }
+  /** Zero `zero` slots, then run `copies` in order (resizing a canvas). */
+  | { kind: 'copies'; zero: TileSlot[]; copies: TileCopy[] }
+  /** Read a slot's pixels back before it is reused (slot level only). */
+  | { kind: 'evict'; slot: TileSlot; done: (rgba: Uint8Array) => void }
+  /** Write reloaded pixels into a slot (slot level only). */
+  | { kind: 'upload'; slot: TileSlot; rgba: Uint8Array };
 
 export type Readback =
-  | { kind: 'pixel'; x: number; y: number; resolve: (rgba: Rgba8) => void }
+  | { kind: 'screenPixel'; x: number; y: number; resolve: (rgba: Rgba8) => void }
   | { kind: 'empty'; slots: TileSlot[]; resolve: (empty: boolean[]) => void }
   | { kind: 'thumbnail'; tiles: [TileKey, TileSlot][]; resolve: (pixels: Uint8Array) => void };
-
-export interface DrainedFrame {
-  ops: FrameOp[];
-  /** Predicted dabs to redraw, or null if the prediction is unchanged. */
-  prediction: Dab[] | null;
-  /** Tiles to recomposite. */
-  dirty: TileKey[];
-  /** Composite state, or null if unchanged since the last frame. */
-  state: CompositeState | null;
-  readbacks: Readback[];
-}
 
 export class FrameQueue {
   private ops: FrameOp[] = [];
   private readbacks: Readback[] = [];
   private prediction: Dab[] = [];
   private predictionChanged = false;
-  private readonly dirty = new DirtyTiles();
-  private allDirty = true; // first frame composites everything
-  private state: CompositeState = { paper: [1, 1, 1], sources: [], liveStroke: null };
-  private stateChanged = true;
 
-  get compositeState(): CompositeState {
-    return this.state;
+  get currentPrediction(): readonly Dab[] {
+    return this.prediction;
   }
 
   clearMask(): void {
@@ -50,7 +54,6 @@ export class FrameQueue {
 
   addDabs(dabs: readonly Dab[]): void {
     if (dabs.length === 0) return;
-    this.dirty.addDabs(dabs);
     const last = this.ops[this.ops.length - 1];
     if (last?.kind === 'dabs') last.dabs.push(...dabs);
     else this.ops.push({ kind: 'dabs', dabs: [...dabs] });
@@ -58,53 +61,23 @@ export class FrameQueue {
 
   setPrediction(dabs: readonly Dab[]): void {
     if (dabs.length === 0 && this.prediction.length === 0) return;
-    this.dirty.addDabs(this.prediction); // where the old prediction was
-    this.dirty.addDabs(dabs);
     this.prediction = [...dabs];
     this.predictionChanged = true;
   }
 
-  merge(jobs: readonly MergeJob[], style: StrokeStyle): void {
-    if (jobs.length === 0) return;
-    this.dirty.addAll(jobs.map((j) => j.key));
-    this.ops.push({ kind: 'merge', jobs: [...jobs], style: { ...style } });
-  }
-
-  setState(state: CompositeState): void {
-    this.state = state;
-    this.stateChanged = true;
-  }
-
-  invalidate(keys: readonly TileKey[] | 'all'): void {
-    if (keys === 'all') this.allDirty = true;
-    else this.dirty.addAll(keys);
+  push(op: FrameOp): void {
+    this.ops.push(op);
   }
 
   addReadback(readback: Readback): void {
     this.readbacks.push(readback);
   }
 
-  /** True if render() would do anything. */
-  get hasWork(): boolean {
-    return (
-      this.ops.length > 0 || this.readbacks.length > 0 || this.predictionChanged || this.allDirty || this.dirty.size > 0
-    );
-  }
-
-  drain(): DrainedFrame {
-    const frame: DrainedFrame = {
-      ops: this.ops,
-      prediction: this.predictionChanged ? this.prediction : null,
-      dirty: this.allDirty ? Array.from({ length: TILE_COUNT }, (_, i) => i) : [...this.dirty.keys],
-      state: this.stateChanged ? this.state : null,
-      readbacks: this.readbacks,
-    };
+  drain(): { ops: FrameOp[]; prediction: Dab[] | null; readbacks: Readback[] } {
+    const frame = { ops: this.ops, prediction: this.predictionChanged ? this.prediction : null, readbacks: this.readbacks };
     this.ops = [];
     this.readbacks = [];
     this.predictionChanged = false;
-    this.dirty.clear();
-    this.allDirty = false;
-    this.stateChanged = false;
     return frame;
   }
 }

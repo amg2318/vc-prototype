@@ -1,14 +1,18 @@
 import {
   ATLAS_PAGE_SIZE,
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
+  COMPOSITE_LEVEL0_PAGES,
   MAX_ATLAS_PAGES,
   PAGE_BYTES,
+  TILE_BYTES,
   THUMBNAIL_SIZE,
   TILE_COUNT,
   TILE_SIZE,
 } from '../../config';
-import { slotLocation, type TileKey, type TileSlot } from '../../document/tiles';
+import type { StrokeMode } from '../../document/editor';
+import type { CanvasId } from '../../document/paintDocument';
+import type { Rect } from '../../workspace/coords';
+import type { TileStore } from '../../document/tileStore';
+import { slotLocation, type TileId, type TileKey, type TileSlot } from '../../document/tiles';
 import {
   EMPTY_CHECK_BATCH,
   EMPTY_CHECK_BLOCK,
@@ -17,27 +21,49 @@ import {
   emptyTilesFromReadback,
   groupByDstPage,
   packCompositeUniforms,
-  packLookup,
   packMergeInstance,
   packThumbnailInstances,
-  packTileOrigins,
 } from '../compositePacking';
-import { DAB_FLOATS, DAB_HARDNESS, FrameQueue, ensureCapacity, packDabs, type Readback } from '../frameQueue';
+import { DAB_FLOATS, DAB_HARDNESS, ensureCapacity, packDabs, type FrameOp, type Readback } from '../frameQueue';
 import type {
-  CompositeState,
+  CanvasRenderState,
   Dab,
   FrameInfo,
   MergeJob,
+  OverlayRect,
+  CompositeTile,
   Renderer,
+  RendererMemory,
+  RetileJob,
   Rgba8,
   StrokeStyle,
+  ViewState,
 } from '../renderer';
+import {
+  COMPOSITE_INSTANCE_FLOATS,
+  DOWNSAMPLE_INSTANCE_FLOATS,
+  RenderCore,
+  SOLID_QUAD_FLOATS,
+  TILE_QUAD_FLOATS,
+  type Frame,
+} from '../renderCore';
 import { WORKSPACE_BACKGROUND } from '../workspace';
-import { COMPOSITE_WGSL, DAB_WGSL, DISPLAY_WGSL, EMPTY_CHECK_WGSL, MERGE_WGSL, THUMBNAIL_WGSL } from './shaders';
+import {
+  COMPOSITE_WGSL,
+  DAB_WGSL,
+  DISPLAY_WGSL,
+  DOWNSAMPLE_WGSL,
+  EMPTY_CHECK_WGSL,
+  MASK_SIZE,
+  MERGE_WGSL,
+  SOLID_WGSL,
+  THUMBNAIL_WGSL,
+} from './shaders';
 
 const TILE_FORMAT: GPUTextureFormat = 'rgba8unorm';
 const MASK_FORMAT: GPUTextureFormat = 'r8unorm';
 const EMPTY_TARGET_WIDTH = EMPTY_CHECK_BATCH * EMPTY_CHECK_BLOCK;
+const LOOKUP_BYTES = TILE_COUNT * MAX_SOURCES * 4;
 
 /** Dynamic vertex buffer that grows to fit. */
 class GrowableBuffer {
@@ -47,7 +73,7 @@ class GrowableBuffer {
     private readonly label: string,
   ) {}
 
-  upload(data: Float32Array, floats: number): GPUBuffer {
+  upload(data: Float32Array, floats = data.length): GPUBuffer {
     const bytes = Math.max(16, floats * 4);
     if (!this.buffer || this.buffer.size < bytes) {
       this.buffer?.destroy();
@@ -62,55 +88,97 @@ class GrowableBuffer {
   }
 }
 
+/** A growable set of atlas page textures. */
+class Pages {
+  readonly textures: GPUTexture[] = [];
+  constructor(
+    private readonly device: GPUDevice,
+    private readonly label: string,
+    private readonly max: number,
+  ) {}
+
+  /** Returns true if pages were added. */
+  ensure(count: number): boolean {
+    if (count > this.max) throw new Error(`${this.label}: ${count} > ${this.max} pages`);
+    if (count <= this.textures.length) return false;
+    while (this.textures.length < count) {
+      this.textures.push(
+        this.device.createTexture({
+          label: `${this.label} ${this.textures.length}`,
+          size: [ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE],
+          format: TILE_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+        }),
+      );
+    }
+    return true;
+  }
+}
+
+/** Compositor inputs of one canvas: uniforms and tile lookup, plus their bind group. */
+interface CanvasGpu {
+  uniforms: GPUBuffer;
+  lookup: GPUTexture;
+  bindGroup: GPUBindGroup | null;
+}
+
 export class WebGPURenderer implements Renderer {
   readonly kind = 'webgpu' as const;
   readonly maxCanvasSize: number;
   onLost: ((message: string) => void) | null = null;
+  onNeedsFrame: (() => void) | null = null;
+  onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null = null;
 
-  private readonly queue = new FrameQueue();
+  private readonly core: RenderCore;
   private lost = false;
 
-  private readonly pages: GPUTexture[] = [];
+  private readonly layerPages: Pages;
+  private readonly level0Pages: Pages;
+  private readonly previewPages: Pages;
   private readonly dummyPage: GPUTexture;
-  private readonly composite: GPUTexture;
   private readonly strokeMask: GPUTexture;
   private readonly predictionMask: GPUTexture;
-  private readonly lookup: GPUTexture;
-  private readonly lookupData = new Uint32Array(TILE_COUNT * MAX_SOURCES);
   private readonly zeroTile: GPUTexture;
   private readonly scratchTile: GPUTexture;
   private readonly emptyTarget: GPUTexture;
   private readonly thumbTarget: GPUTexture;
+  private readonly canvasFormat: GPUTextureFormat;
 
   private readonly dabPipeline: GPURenderPipeline;
-  private readonly mergePipeline: GPURenderPipeline;
+  /** One merge pipeline per stroke mode: they differ only in blending. */
+  private readonly mergePipelines: Record<StrokeMode, GPURenderPipeline>;
   private readonly compositePipeline: GPURenderPipeline;
+  private readonly downsamplePipeline: GPURenderPipeline;
   private readonly displayPipeline: GPURenderPipeline;
+  private readonly solidPipeline: GPURenderPipeline;
   private readonly emptyPipeline: GPURenderPipeline;
   private readonly thumbPipeline: GPURenderPipeline;
 
-  private readonly compositeUniforms: GPUBuffer;
-  private readonly displayUniforms: GPUBuffer;
+  private readonly linearSampler: GPUSampler;
   private readonly dabBindGroup: GPUBindGroup;
-  private readonly mergeBindGroup: GPUBindGroup;
-  private readonly displayBindGroup: GPUBindGroup;
+  private readonly mergeBindGroups: Record<StrokeMode, GPUBindGroup>;
   private readonly emptyUniformBindings: GPUBuffer;
   private readonly thumbUniformBindings: GPUBuffer;
-  private compositeBindGroup!: GPUBindGroup;
   private emptyBindGroup!: GPUBindGroup;
   private thumbBindGroup!: GPUBindGroup;
+  private downsampleBindGroup!: GPUBindGroup;
+  private displayBindGroups = new Map<string, GPUBindGroup>();
+  private readonly canvasGpu = new Map<CanvasId, CanvasGpu>();
 
   private readonly dabBuffer: GrowableBuffer;
   private readonly mergeBuffer: GrowableBuffer;
-  private readonly originBuffer: GrowableBuffer;
+  private readonly compositeBuffer: GrowableBuffer;
+  private readonly downsampleBuffer: GrowableBuffer;
+  private readonly tileQuadBuffer: GrowableBuffer;
+  private readonly solidBuffer: GrowableBuffer;
   private dabStaging = new Float32Array(4096);
   private mergeStaging = new Float32Array(1024);
 
-  /** GPU timing of the composite pass, if the device supports timestamp queries. */
+  /** GPU timing of the composite passes, if the device supports timestamp queries. */
   private readonly timestamps: { query: GPUQuerySet; resolve: GPUBuffer; read: GPUBuffer; busy: boolean } | null;
 
   /** Throws if WebGPU is unavailable or setup fails; the caller falls back to WebGL2. */
-  static async create(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
+  static async create(canvas: HTMLCanvasElement, layerSlots: number): Promise<WebGPURenderer> {
     if (!('gpu' in navigator) || !navigator.gpu) throw new Error('navigator.gpu is not available');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No WebGPU adapter');
@@ -121,11 +189,15 @@ export class WebGPURenderer implements Renderer {
     const context = canvas.getContext('webgpu');
     if (!context) throw new Error('Could not get a webgpu canvas context');
     const format = navigator.gpu.getPreferredCanvasFormat();
-    context.configure({ device, format, alphaMode: 'opaque' });
+    // COPY_SRC lets the eyedropper read what is on screen.
+    context.configure({
+      device, format, alphaMode: 'opaque',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
 
     device.pushErrorScope('validation');
     device.pushErrorScope('out-of-memory');
-    const renderer = new WebGPURenderer(device, context, format, wantTimestamps);
+    const renderer = new WebGPURenderer(device, context, format, wantTimestamps, layerSlots);
     const oom = await device.popErrorScope();
     const invalid = await device.popErrorScope();
     const error = oom ?? invalid;
@@ -141,7 +213,12 @@ export class WebGPURenderer implements Renderer {
     private readonly context: GPUCanvasContext,
     canvasFormat: GPUTextureFormat,
     timestampsSupported: boolean,
+    layerSlots: number,
   ) {
+    this.core = RenderCore.withLayerBudget(layerSlots);
+    this.core.residency.onReloaded = () => this.onNeedsFrame?.();
+    this.core.onCompositeChanged = (canvasId, dirty) => this.onCompositeChanged?.(canvasId, dirty);
+    this.canvasFormat = canvasFormat;
     this.maxCanvasSize = device.limits.maxTextureDimension2D;
     void device.lost.then((info) => {
       this.lost = true;
@@ -150,18 +227,14 @@ export class WebGPURenderer implements Renderer {
     device.onuncapturederror = (e) => console.error('WebGPU error:', e.error.message);
 
     const T = GPUTextureUsage;
-    const canvasSize = { width: CANVAS_WIDTH, height: CANVAS_HEIGHT };
+    this.layerPages = new Pages(device, 'layer page', MAX_ATLAS_PAGES);
+    this.level0Pages = new Pages(device, 'composite page', COMPOSITE_LEVEL0_PAGES);
+    this.previewPages = new Pages(device, 'preview page', Number.MAX_SAFE_INTEGER);
     this.dummyPage = device.createTexture({ label: 'dummy page', size: [1, 1], format: TILE_FORMAT, usage: T.TEXTURE_BINDING });
-    this.composite = device.createTexture({
-      label: 'composite cache', size: canvasSize, format: TILE_FORMAT,
-      usage: T.RENDER_ATTACHMENT | T.TEXTURE_BINDING | T.COPY_SRC,
-    });
     const maskUsage = T.RENDER_ATTACHMENT | T.TEXTURE_BINDING;
-    this.strokeMask = device.createTexture({ label: 'stroke mask', size: canvasSize, format: MASK_FORMAT, usage: maskUsage });
-    this.predictionMask = device.createTexture({ label: 'prediction mask', size: canvasSize, format: MASK_FORMAT, usage: maskUsage });
-    this.lookup = device.createTexture({
-      label: 'tile lookup', size: [TILE_COUNT, MAX_SOURCES], format: 'r32uint', usage: T.TEXTURE_BINDING | T.COPY_DST,
-    });
+    const maskSize = [MASK_SIZE, MASK_SIZE];
+    this.strokeMask = device.createTexture({ label: 'stroke mask', size: maskSize, format: MASK_FORMAT, usage: maskUsage });
+    this.predictionMask = device.createTexture({ label: 'prediction mask', size: maskSize, format: MASK_FORMAT, usage: maskUsage });
     // Textures start zeroed in WebGPU, so this is a transparent tile to copy from.
     this.zeroTile = device.createTexture({ label: 'zero tile', size: [TILE_SIZE, TILE_SIZE], format: TILE_FORMAT, usage: T.COPY_SRC });
     this.scratchTile = device.createTexture({
@@ -184,81 +257,81 @@ export class WebGPURenderer implements Renderer {
       color: { operation: 'add', srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
       alpha: { operation: 'add', srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
     };
+    // Eraser ("destination-out"): out = dst · (1 − m), for colour and alpha alike.
+    const eraseOut: GPUBlendComponent = { operation: 'add', srcFactor: 'zero', dstFactor: 'one-minus-src-alpha' };
     const max: GPUBlendComponent = { operation: 'max', srcFactor: 'one', dstFactor: 'one' };
-    const strip: GPUPrimitiveState = { topology: 'triangle-strip' };
     const pipeline = (
       label: string,
       code: string,
       format: GPUTextureFormat,
       blend: GPUBlendState | undefined,
-      buffers: GPUVertexBufferLayout[] = [],
+      vec4s: number,
+      stride = vec4s * 16,
     ): GPURenderPipeline => {
       const module = device.createShaderModule({ label, code });
+      const attributes: GPUVertexAttribute[] = Array.from({ length: vec4s }, (_, i) => ({
+        shaderLocation: i, offset: i * 16, format: 'float32x4',
+      }));
       return device.createRenderPipeline({
         label,
         layout: 'auto',
-        vertex: { module, entryPoint: 'vs', buffers },
+        vertex: { module, entryPoint: 'vs', buffers: vec4s > 0 ? [{ arrayStride: stride, stepMode: 'instance', attributes }] : [] },
         fragment: { module, entryPoint: 'fs', targets: [{ format, ...(blend ? { blend } : {}) }] },
-        primitive: strip,
+        primitive: { topology: 'triangle-strip' },
       });
     };
-    const instanced = (stride: number, attributes: GPUVertexAttribute[]): GPUVertexBufferLayout => ({
-      arrayStride: stride, stepMode: 'instance', attributes,
-    });
 
-    this.dabPipeline = pipeline('dab', DAB_WGSL, MASK_FORMAT, { color: max, alpha: max }, [
-      instanced(DAB_FLOATS * 4, [{ shaderLocation: 0, offset: 0, format: 'float32x4' }]),
-    ]);
-    this.mergePipeline = pipeline('merge', MERGE_WGSL, TILE_FORMAT, premultipliedOver, [
-      instanced(MERGE_INSTANCE_FLOATS * 4, [
-        { shaderLocation: 0, offset: 0, format: 'float32x4' },
-        { shaderLocation: 1, offset: 16, format: 'float32x4' },
-        { shaderLocation: 2, offset: 32, format: 'float32x4' },
-      ]),
-    ]);
-    this.compositePipeline = pipeline('composite', COMPOSITE_WGSL, TILE_FORMAT, replace, [
-      instanced(8, [{ shaderLocation: 0, offset: 0, format: 'float32x2' }]),
-    ]);
-    this.displayPipeline = pipeline('display', DISPLAY_WGSL, canvasFormat, undefined);
-    this.emptyPipeline = pipeline('empty check', EMPTY_CHECK_WGSL, TILE_FORMAT, replace, [
-      instanced(4, [{ shaderLocation: 0, offset: 0, format: 'float32' }]),
-    ]);
-    this.thumbPipeline = pipeline('thumbnail', THUMBNAIL_WGSL, TILE_FORMAT, replace, [
-      instanced(16, [{ shaderLocation: 0, offset: 0, format: 'float32x4' }]),
-    ]);
+    this.dabPipeline = pipeline('dab', DAB_WGSL, MASK_FORMAT, { color: max, alpha: max }, 1, DAB_FLOATS * 4);
+    this.mergePipelines = {
+      paint: pipeline('merge paint', MERGE_WGSL, TILE_FORMAT, premultipliedOver, 3, MERGE_INSTANCE_FLOATS * 4),
+      erase: pipeline('merge erase', MERGE_WGSL, TILE_FORMAT, { color: eraseOut, alpha: eraseOut }, 3, MERGE_INSTANCE_FLOATS * 4),
+    };
+    this.compositePipeline = pipeline('composite', COMPOSITE_WGSL, TILE_FORMAT, replace, 1, COMPOSITE_INSTANCE_FLOATS * 4);
+    this.downsamplePipeline = pipeline('downsample', DOWNSAMPLE_WGSL, TILE_FORMAT, replace, 3, DOWNSAMPLE_INSTANCE_FLOATS * 4);
+    this.displayPipeline = pipeline('display', DISPLAY_WGSL, canvasFormat, premultipliedOver, 4, TILE_QUAD_FLOATS * 4);
+    this.solidPipeline = pipeline('solid', SOLID_WGSL, canvasFormat, premultipliedOver, 3, SOLID_QUAD_FLOATS * 4);
+    this.emptyPipeline = device.createRenderPipeline({
+      label: 'empty check',
+      layout: 'auto',
+      vertex: {
+        module: device.createShaderModule({ code: EMPTY_CHECK_WGSL }), entryPoint: 'vs',
+        buffers: [{ arrayStride: 4, stepMode: 'instance', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32' }] }],
+      },
+      fragment: { module: device.createShaderModule({ code: EMPTY_CHECK_WGSL }), entryPoint: 'fs', targets: [{ format: TILE_FORMAT }] },
+      primitive: { topology: 'triangle-strip' },
+    });
+    this.thumbPipeline = pipeline('thumbnail', THUMBNAIL_WGSL, TILE_FORMAT, replace, 1);
 
     const uniform = (size: number, data?: Float32Array): GPUBuffer => {
       const buffer = device.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       if (data) device.queue.writeBuffer(buffer, 0, data);
       return buffer;
     };
-    const dabUniforms = uniform(16, new Float32Array([CANVAS_WIDTH, CANVAS_HEIGHT, DAB_HARDNESS, 0]));
-    this.compositeUniforms = uniform(packCompositeUniforms(this.queue.compositeState).byteLength);
-    this.displayUniforms = uniform(64);
+    const dabUniforms = uniform(16, new Float32Array([MASK_SIZE, MASK_SIZE, DAB_HARDNESS, 0]));
     this.emptyUniformBindings = uniform(16, new Float32Array([EMPTY_TARGET_WIDTH, EMPTY_CHECK_BLOCK, 0, 0]));
     this.thumbUniformBindings = uniform(16, new Float32Array([THUMBNAIL_SIZE, THUMBNAIL_SIZE, 0, 0]));
+    this.linearSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 
     this.dabBindGroup = device.createBindGroup({
       layout: this.dabPipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: { buffer: dabUniforms } }],
     });
-    this.mergeBindGroup = device.createBindGroup({
-      layout: this.mergePipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: this.strokeMask.createView() }],
-    });
-    this.displayBindGroup = device.createBindGroup({
-      layout: this.displayPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.displayUniforms } },
-        { binding: 1, resource: device.createSampler({ magFilter: 'linear', minFilter: 'linear' }) },
-        { binding: 2, resource: this.composite.createView() },
-      ],
-    });
-    this.rebuildPageBindGroups();
+    const mergeBindGroup = (mode: StrokeMode): GPUBindGroup =>
+      device.createBindGroup({
+        layout: this.mergePipelines[mode].getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: this.strokeMask.createView() }],
+      });
+    this.mergeBindGroups = { paint: mergeBindGroup('paint'), erase: mergeBindGroup('erase') };
+    this.level0Pages.ensure(1); // scratch tiles live on page 0
+    this.rebuildLayerBindGroups();
+    this.rebuildCompositeBindGroups();
 
     this.dabBuffer = new GrowableBuffer(device, 'dab instances');
     this.mergeBuffer = new GrowableBuffer(device, 'merge instances');
-    this.originBuffer = new GrowableBuffer(device, 'composite tile origins');
+    this.compositeBuffer = new GrowableBuffer(device, 'composite instances');
+    this.downsampleBuffer = new GrowableBuffer(device, 'downsample instances');
+    this.tileQuadBuffer = new GrowableBuffer(device, 'display tile quads');
+    this.solidBuffer = new GrowableBuffer(device, 'display solid quads');
 
     this.timestamps = timestampsSupported
       ? {
@@ -275,13 +348,23 @@ export class WebGPURenderer implements Renderer {
     device.queue.submit([encoder.finish()]);
   }
 
-  get pageCount(): number {
-    return this.pages.length;
+  memory(): RendererMemory {
+    const compositePages = this.level0Pages.textures.length + this.previewPages.textures.length;
+    const masks = MASK_SIZE * MASK_SIZE * 2;
+    return {
+      layerPages: this.layerPages.textures.length,
+      compositePages,
+      bytes: (this.layerPages.textures.length + compositePages) * PAGE_BYTES + masks + this.canvasGpu.size * LOOKUP_BYTES,
+      ...this.core.tileMemory(),
+    };
   }
 
-  gpuMemoryBytes(): number {
-    const canvasPixels = CANVAS_WIDTH * CANVAS_HEIGHT;
-    return this.pages.length * PAGE_BYTES + canvasPixels * 4 + canvasPixels * 2 + TILE_COUNT * MAX_SOURCES * 4;
+  takeReloadTimes(): number[] {
+    return this.core.residency.takeReloadTimes();
+  }
+
+  useTileStore(store: TileStore): void {
+    this.core.useTileStore(store);
   }
 
   resize(pixelWidth: number, pixelHeight: number): void {
@@ -290,53 +373,131 @@ export class WebGPURenderer implements Renderer {
     if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   }
 
-  beginStroke(): void {
-    this.queue.clearMask();
+  setCanvases(canvases: readonly CanvasRenderState[]): void {
+    this.core.setCanvases(canvases);
+  }
+
+  invalidateTiles(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void {
+    this.core.invalidate(canvasId, keys);
+  }
+
+  setOverlay(rects: readonly OverlayRect[]): void {
+    this.core.setOverlay(rects);
+  }
+
+  requestComposite(canvasId: CanvasId, level: number, rect: Rect): void {
+    this.core.requestComposite(canvasId, level, rect);
+  }
+
+  compositeTiles(canvasId: CanvasId, level: number, rect: Rect): CompositeTile[] {
+    return this.core.compositeTiles(canvasId, level, rect);
+  }
+
+  beginStroke(canvasId: CanvasId): void {
+    this.core.beginStroke(canvasId);
   }
 
   addStrokeDabs(dabs: readonly Dab[]): void {
-    this.queue.addDabs(dabs);
+    this.core.addDabs(dabs);
   }
 
   setPredictedDabs(dabs: readonly Dab[]): void {
-    this.queue.setPrediction(dabs);
+    this.core.setPrediction(dabs);
   }
 
-  mergeStroke(jobs: readonly MergeJob[], style: StrokeStyle): void {
-    if (jobs.length === 0) return;
-    const pagesNeeded = Math.max(...jobs.map((j) => slotLocation(j.dst).page)) + 1;
-    this.ensurePages(pagesNeeded);
-    this.queue.merge(jobs, style);
+  mergeStroke(canvasId: CanvasId, jobs: readonly MergeJob[], style: StrokeStyle): void {
+    this.core.merge(canvasId, jobs, style);
   }
 
-  setCompositeState(state: CompositeState): void {
-    this.queue.setState(state);
+  retile(canvasId: CanvasId, jobs: readonly RetileJob[]): void {
+    this.core.retile(jobs);
+    this.core.invalidate(canvasId, 'all');
   }
 
-  invalidateTiles(keys: readonly TileKey[] | 'all'): void {
-    this.queue.invalidate(keys);
+  readScreenPixel(x: number, y: number): Promise<Rgba8> {
+    return new Promise((resolve) => this.core.queue.addReadback({ kind: 'screenPixel', x, y, resolve }));
   }
 
-  readPixel(x: number, y: number): Promise<Rgba8> {
-    return new Promise((resolve) => this.queue.addReadback({ kind: 'pixel', x, y, resolve }));
+  findEmptyTiles(slots: readonly TileId[]): Promise<boolean[]> {
+    return new Promise((resolve) => this.core.queue.addReadback({ kind: 'empty', slots: [...slots], resolve }));
   }
 
-  findEmptyTiles(slots: readonly TileSlot[]): Promise<boolean[]> {
-    return new Promise((resolve) => this.queue.addReadback({ kind: 'empty', slots: [...slots], resolve }));
+  readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array> {
+    return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
-  readThumbnail(tiles: ReadonlyMap<TileKey, TileSlot>): Promise<Uint8Array> {
-    return new Promise((resolve) => this.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
-  }
-
-  render(docToClip: Float32Array, texelsPerPixel: number): FrameInfo {
-    if (this.lost) return { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, compositeCpuMs: 0 };
+  render(view: ViewState): FrameInfo {
+    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false };
+    if (this.lost) return idle;
     const device = this.device;
-    const frame = this.queue.drain();
+    const canvas = this.context.canvas as HTMLCanvasElement;
+    const compositeStart = performance.now();
+    const frame = this.core.buildFrame(view, [2 / canvas.width, 2 / canvas.height]);
+    this.syncPages();
+    for (const id of frame.removedCanvases) this.releaseCanvas(id);
 
+    const encoder = device.createCommandEncoder();
+    const afterLayerOps = this.encodeLayerOps(encoder, frame.ops, frame.prediction);
+
+    const timing = this.timestamps && !this.timestamps.busy && (frame.composites.length > 0 || frame.downsample.runs.length > 0)
+      ? this.timestamps : null;
+    const passes: GPURenderPassEncoder[] = [];
+    const beginTimed = (descriptor: GPURenderPassDescriptor, index: number, total: number): GPURenderPassEncoder => {
+      const writes = timing
+        ? {
+            timestampWrites: {
+              querySet: timing.query,
+              ...(index === 0 ? { beginningOfPassWriteIndex: 0 } : {}),
+              ...(index === total - 1 ? { endOfPassWriteIndex: 1 } : {}),
+            },
+          }
+        : {};
+      const pass = encoder.beginRenderPass({ ...descriptor, ...(index === 0 || index === total - 1 ? writes : {}) });
+      passes.push(pass);
+      return pass;
+    };
+    const totalPasses =
+      frame.composites.reduce((n, b) => n + b.runs.length, 0) + frame.downsample.runs.length;
+    this.encodeComposites(frame, (d, i) => beginTimed(d, i, totalPasses));
+    const compositeCpuMs = performance.now() - compositeStart;
+    if (timing && totalPasses > 0) {
+      encoder.resolveQuerySet(timing.query, 0, 2, timing.resolve, 0);
+      encoder.copyBufferToBuffer(timing.resolve, 0, timing.read, 0, 16);
+    }
+
+    const screen = this.context.getCurrentTexture();
+    this.encodeDisplay(encoder, screen, frame.display);
+    const pendingReadbacks = frame.readbacks.map((r) => this.encodeReadback(encoder, r, screen));
+
+    device.queue.submit([encoder.finish()]);
+    const submittedAt = performance.now();
+    for (const finish of [...afterLayerOps, ...pendingReadbacks]) void finish();
+    const compositeGpuMs = timing && totalPasses > 0 ? this.readTimestamps(timing) : undefined;
+    const gpuDone = device.queue.onSubmittedWorkDone().then(() => performance.now());
+    return {
+      submittedAt,
+      gpuDone,
+      compositedTiles: frame.stats.composited,
+      downsampledTiles: frame.stats.downsampled,
+      visibleCanvases: frame.stats.visibleCanvases,
+      moreWork: frame.moreWork,
+      compositeCpuMs,
+      ...(compositeGpuMs ? { compositeGpuMs } : {}),
+    };
+  }
+
+  destroy(): void {
+    this.device.destroy();
+  }
+
+  // --- layer tile work ----------------------------------------------------------
+
+  /** Encodes the layer ops; returns work to run after submit (mapping eviction readbacks). */
+  private encodeLayerOps(encoder: GPUCommandEncoder, ops: readonly FrameOp[], prediction: Dab[] | null): (() => Promise<void>)[] {
+    const afterSubmit: (() => Promise<void>)[] = [];
     // Upload every dab used this frame (stroke ops, then the prediction) in one go.
-    const dabBatches = frame.ops.flatMap((op) => (op.kind === 'dabs' ? [op.dabs] : []));
-    if (frame.prediction) dabBatches.push(frame.prediction);
+    const dabBatches = ops.flatMap((op) => (op.kind === 'dabs' ? [op.dabs] : []));
+    if (prediction) dabBatches.push(prediction);
     const totalDabs = dabBatches.reduce((n, b) => n + b.length, 0);
     this.dabStaging = ensureCapacity(this.dabStaging, totalDabs * DAB_FLOATS);
     let dabCursor = 0;
@@ -347,182 +508,197 @@ export class WebGPURenderer implements Renderer {
     const dabBuffer = this.dabBuffer.upload(this.dabStaging, totalDabs * DAB_FLOATS);
 
     // Merge instances, ordered by merge op and then by destination page.
-    const mergeGroups = frame.ops.flatMap((op) =>
-      op.kind === 'merge' ? [{ op, groups: [...groupByDstPage(op.jobs)] }] : [],
-    );
+    const mergeGroups = ops.flatMap((op) => (op.kind === 'merge' ? [{ op, groups: [...groupByDstPage(op.jobs)] }] : []));
     const totalJobs = mergeGroups.reduce((n, m) => n + m.op.jobs.length, 0);
     this.mergeStaging = ensureCapacity(this.mergeStaging, totalJobs * MERGE_INSTANCE_FLOATS);
     let mergeCursor = 0;
     for (const { op, groups } of mergeGroups) {
-      for (const [, jobs] of groups) for (const job of jobs) packMergeInstance(job, op.style, this.mergeStaging, mergeCursor++);
+      for (const [, jobs] of groups) for (const job of jobs) packMergeInstance(job, op.style, op.canvas, this.mergeStaging, mergeCursor++);
     }
     const mergeBuffer = this.mergeBuffer.upload(this.mergeStaging, totalJobs * MERGE_INSTANCE_FLOATS);
 
-    const encoder = device.createCommandEncoder();
     let dabOffset = 0;
     let mergeOffset = 0;
     let mergeIndex = 0;
-    for (const op of frame.ops) {
+    for (const op of ops) {
       if (op.kind === 'clearMask') {
         this.clearPass(encoder, this.strokeMask);
       } else if (op.kind === 'dabs') {
         this.dabPass(encoder, this.strokeMask, dabBuffer, dabOffset, op.dabs.length);
         dabOffset += op.dabs.length;
-      } else {
+      } else if (op.kind === 'merge') {
         const { groups } = mergeGroups[mergeIndex++]!;
-        this.copySourceTiles(encoder, op.jobs);
+        for (const job of op.jobs) {
+          this.copyTile(encoder, job.src, 0, 0, job.dst, 0, 0, TILE_SIZE, TILE_SIZE);
+        }
         for (const [page, jobs] of groups) {
-          this.mergePass(encoder, page, mergeBuffer, mergeOffset, jobs.length);
+          const pass = encoder.beginRenderPass({
+            colorAttachments: [{ view: this.layerPages.textures[page]!.createView(), loadOp: 'load', storeOp: 'store' }],
+          });
+          pass.setPipeline(this.mergePipelines[op.style.mode]);
+          pass.setBindGroup(0, this.mergeBindGroups[op.style.mode]);
+          pass.setVertexBuffer(0, mergeBuffer);
+          pass.draw(4, jobs.length, 0, mergeOffset);
+          pass.end();
           mergeOffset += jobs.length;
         }
+      } else if (op.kind === 'copies') {
+        for (const slot of op.zero) this.copyTile(encoder, null, 0, 0, slot, 0, 0, TILE_SIZE, TILE_SIZE);
+        for (const c of op.copies) this.copyTile(encoder, c.src, c.sx, c.sy, c.dst, c.dx, c.dy, c.width, c.height);
+      } else if (op.kind === 'evict') {
+        // Read the tile back before anything later in this encoder reuses the slot.
+        const buffer = this.device.createBuffer({ size: TILE_BYTES, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const at = slotLocation(op.slot);
+        encoder.copyTextureToBuffer(
+          { texture: this.layerPages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+          { buffer, bytesPerRow: TILE_SIZE * 4 },
+          [TILE_SIZE, TILE_SIZE],
+        );
+        afterSubmit.push(async () => {
+          await buffer.mapAsync(GPUMapMode.READ);
+          const rgba = new Uint8Array(buffer.getMappedRange().slice(0));
+          buffer.destroy();
+          op.done(rgba);
+        });
+      } else {
+        // Upload through a staging buffer, so it stays in order with the other commands
+        // (queue.writeTexture would run before this whole encoder).
+        const staging = this.device.createBuffer({ size: TILE_BYTES, usage: GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
+        new Uint8Array(staging.getMappedRange()).set(op.rgba);
+        staging.unmap();
+        const at = slotLocation(op.slot);
+        encoder.copyBufferToTexture(
+          { buffer: staging, bytesPerRow: TILE_SIZE * 4 },
+          { texture: this.layerPages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+          [TILE_SIZE, TILE_SIZE],
+        );
+        afterSubmit.push(async () => staging.destroy());
       }
     }
-    if (frame.prediction) {
+    if (prediction) {
       this.clearPass(encoder, this.predictionMask);
-      this.dabPass(encoder, this.predictionMask, dabBuffer, dabOffset, frame.prediction.length);
+      this.dabPass(encoder, this.predictionMask, dabBuffer, dabOffset, prediction.length);
     }
-
-    // Composite the dirty tiles.
-    const compositeStart = performance.now();
-    if (frame.state) {
-      device.queue.writeBuffer(this.compositeUniforms, 0, packCompositeUniforms(frame.state));
-      packLookup(frame.state, this.lookupData);
-      device.queue.writeTexture(
-        { texture: this.lookup },
-        this.lookupData,
-        { bytesPerRow: TILE_COUNT * 4 },
-        [TILE_COUNT, MAX_SOURCES],
-      );
-    }
-    const timing = this.timestamps && !this.timestamps.busy && frame.dirty.length > 0 ? this.timestamps : null;
-    if (frame.dirty.length > 0) {
-      const origins = packTileOrigins(frame.dirty);
-      const originBuffer = this.originBuffer.upload(origins, origins.length);
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: this.composite.createView(), loadOp: 'load', storeOp: 'store' }],
-        ...(timing ? { timestampWrites: { querySet: timing.query, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : {}),
-      });
-      pass.setPipeline(this.compositePipeline);
-      pass.setBindGroup(0, this.compositeBindGroup);
-      pass.setVertexBuffer(0, originBuffer);
-      pass.draw(4, frame.dirty.length);
-      pass.end();
-      if (timing) {
-        encoder.resolveQuerySet(timing.query, 0, 2, timing.resolve, 0);
-        encoder.copyBufferToBuffer(timing.resolve, 0, timing.read, 0, 16);
-      }
-    }
-    const compositeCpuMs = performance.now() - compositeStart;
-
-    this.displayPass(encoder, docToClip, texelsPerPixel);
-    const pendingReadbacks = frame.readbacks.map((r) => this.encodeReadback(encoder, r));
-
-    device.queue.submit([encoder.finish()]);
-    const submittedAt = performance.now();
-    for (const finish of pendingReadbacks) void finish();
-    let compositeGpuMs: Promise<number> | undefined;
-    if (timing) compositeGpuMs = this.readTimestamps(timing);
-    const gpuDone = device.queue.onSubmittedWorkDone().then(() => performance.now());
-    return {
-      submittedAt,
-      gpuDone,
-      compositedTiles: frame.dirty.length,
-      compositeCpuMs,
-      ...(compositeGpuMs ? { compositeGpuMs } : {}),
-    };
-  }
-
-  destroy(): void {
-    this.device.destroy();
-  }
-
-  // --- passes -------------------------------------------------------------
-
-  private clearPass(encoder: GPUCommandEncoder, texture: GPUTexture): void {
-    encoder
-      .beginRenderPass({
-        colorAttachments: [{ view: texture.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }],
-      })
-      .end();
-  }
-
-  private dabPass(encoder: GPUCommandEncoder, target: GPUTexture, buffer: GPUBuffer, first: number, count: number): void {
-    if (count === 0) return;
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: target.createView(), loadOp: 'load', storeOp: 'store' }],
-    });
-    pass.setPipeline(this.dabPipeline);
-    pass.setBindGroup(0, this.dabBindGroup);
-    pass.setVertexBuffer(0, buffer);
-    pass.draw(4, count, 0, first);
-    pass.end();
+    return afterSubmit;
   }
 
   /**
-   * Copy each job's source tile into its destination slot (or zero it), so
-   * the merge pass can blend the stroke on top. WebGPU can't copy within one
-   * texture, so same-page copies go through a scratch tile.
+   * Copy a region between layer tile slots (src null = transparent). WebGPU
+   * can't copy within one texture, so same-page copies go through a scratch tile.
    */
-  private copySourceTiles(encoder: GPUCommandEncoder, jobs: readonly MergeJob[]): void {
-    const size = { width: TILE_SIZE, height: TILE_SIZE };
-    for (const job of jobs) {
-      const dst = slotLocation(job.dst);
-      const dstCopy = { texture: this.pages[dst.page]!, origin: { x: dst.x, y: dst.y } };
-      if (job.src === null) {
-        encoder.copyTextureToTexture({ texture: this.zeroTile }, dstCopy, size);
-        continue;
+  private copyTile(
+    encoder: GPUCommandEncoder,
+    src: TileSlot | null, sx: number, sy: number,
+    dst: TileSlot, dx: number, dy: number,
+    width: number, height: number,
+  ): void {
+    const size = { width, height };
+    const d = slotLocation(dst);
+    const dstCopy = { texture: this.layerPages.textures[d.page]!, origin: { x: d.x + dx, y: d.y + dy } };
+    if (src === null) {
+      encoder.copyTextureToTexture({ texture: this.zeroTile }, dstCopy, size);
+      return;
+    }
+    const s = slotLocation(src);
+    const srcCopy = { texture: this.layerPages.textures[s.page]!, origin: { x: s.x + sx, y: s.y + sy } };
+    if (s.page === d.page) {
+      encoder.copyTextureToTexture(srcCopy, { texture: this.scratchTile }, size);
+      encoder.copyTextureToTexture({ texture: this.scratchTile }, dstCopy, size);
+    } else {
+      encoder.copyTextureToTexture(srcCopy, dstCopy, size);
+    }
+  }
+
+  // --- composite pyramid ----------------------------------------------------------
+
+  private encodeComposites(
+    frame: Frame,
+    begin: (descriptor: GPURenderPassDescriptor, index: number) => GPURenderPassEncoder,
+  ): void {
+    let passIndex = 0;
+    // All composite instances in one buffer, batches one after another.
+    const total = frame.composites.reduce((n, b) => n + b.instances.length, 0);
+    const all = new Float32Array(total);
+    let offset = 0;
+    const firsts: number[] = [];
+    for (const batch of frame.composites) {
+      all.set(batch.instances, offset);
+      firsts.push(offset / COMPOSITE_INSTANCE_FLOATS);
+      offset += batch.instances.length;
+    }
+    const compositeBuffer = this.compositeBuffer.upload(all);
+
+    frame.composites.forEach((batch, b) => {
+      const gpu = this.canvasResources(batch.canvasId);
+      if (batch.upload) {
+        this.device.queue.writeBuffer(gpu.uniforms, 0, batch.upload.uniforms);
+        this.device.queue.writeTexture({ texture: gpu.lookup }, batch.upload.lookup, { bytesPerRow: TILE_COUNT * 4 }, [TILE_COUNT, MAX_SOURCES]);
       }
-      const src = slotLocation(job.src);
-      const srcCopy = { texture: this.pages[src.page]!, origin: { x: src.x, y: src.y } };
-      if (src.page === dst.page) {
-        encoder.copyTextureToTexture(srcCopy, { texture: this.scratchTile }, size);
-        encoder.copyTextureToTexture({ texture: this.scratchTile }, dstCopy, size);
-      } else {
-        encoder.copyTextureToTexture(srcCopy, dstCopy, size);
+      for (const run of batch.runs) {
+        const pass = begin({ colorAttachments: [{ view: this.level0Pages.textures[run.page]!.createView(), loadOp: 'load', storeOp: 'store' }] }, passIndex++);
+        pass.setPipeline(this.compositePipeline);
+        pass.setBindGroup(0, gpu.bindGroup!);
+        pass.setVertexBuffer(0, compositeBuffer);
+        pass.draw(4, run.count, 0, firsts[b]! + run.first);
+        pass.end();
+      }
+    });
+
+    if (frame.downsample.runs.length > 0) {
+      const buffer = this.downsampleBuffer.upload(frame.downsample.instances);
+      for (const run of frame.downsample.runs) {
+        const pass = begin({ colorAttachments: [{ view: this.previewPages.textures[run.page]!.createView(), loadOp: 'load', storeOp: 'store' }] }, passIndex++);
+        pass.setPipeline(this.downsamplePipeline);
+        pass.setBindGroup(0, this.downsampleBindGroup);
+        pass.setVertexBuffer(0, buffer);
+        pass.draw(4, run.count, 0, run.first);
+        pass.end();
       }
     }
   }
 
-  private mergePass(encoder: GPUCommandEncoder, page: number, buffer: GPUBuffer, first: number, count: number): void {
+  private encodeDisplay(encoder: GPUCommandEncoder, screen: GPUTexture, display: Frame['display']): void {
+    const [r, g, b] = WORKSPACE_BACKGROUND;
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.pages[page]!.createView(), loadOp: 'load', storeOp: 'store' }],
+      colorAttachments: [{ view: screen.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r, g, b, a: 1 } }],
     });
-    pass.setPipeline(this.mergePipeline);
-    pass.setBindGroup(0, this.mergeBindGroup);
-    pass.setVertexBuffer(0, buffer);
-    pass.draw(4, count, 0, first);
+    const tileBuffer = this.tileQuadBuffer.upload(display.tiles);
+    const solidBuffer = this.solidBuffer.upload(display.solids);
+    for (const run of display.runs) {
+      if (run.kind === 'solid') {
+        pass.setPipeline(this.solidPipeline);
+        pass.setVertexBuffer(0, solidBuffer);
+      } else {
+        pass.setPipeline(this.displayPipeline);
+        pass.setBindGroup(0, this.displayBindGroup(run.pool, run.page));
+        pass.setVertexBuffer(0, tileBuffer);
+      }
+      pass.draw(4, run.count, 0, run.first);
+    }
     pass.end();
   }
 
-  private displayPass(encoder: GPUCommandEncoder, m: Float32Array, texelsPerPixel: number): void {
-    // prettier-ignore
-    this.device.queue.writeBuffer(this.displayUniforms, 0, new Float32Array([
-      m[0]!, m[1]!, m[2]!, 0,
-      m[3]!, m[4]!, m[5]!, 0,
-      m[6]!, m[7]!, m[8]!, 0,
-      CANVAS_WIDTH, CANVAS_HEIGHT, texelsPerPixel, 0,
-    ]));
-    const [r, g, b] = WORKSPACE_BACKGROUND;
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.context.getCurrentTexture().createView(),
-          loadOp: 'clear',
-          storeOp: 'store',
-          clearValue: { r, g, b, a: 1 },
-        },
-      ],
-    });
-    pass.setPipeline(this.displayPipeline);
-    pass.setBindGroup(0, this.displayBindGroup);
-    pass.draw(4);
-    pass.end();
+  private displayBindGroup(pool: 'level0' | 'preview', page: number): GPUBindGroup {
+    const key = `${pool}:${page}`;
+    let group = this.displayBindGroups.get(key);
+    if (!group) {
+      const texture = (pool === 'level0' ? this.level0Pages : this.previewPages).textures[page]!;
+      group = this.device.createBindGroup({
+        layout: this.displayPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: this.linearSampler },
+          { binding: 1, resource: texture.createView() },
+        ],
+      });
+      this.displayBindGroups.set(key, group);
+    }
+    return group;
   }
 
   // --- readbacks ------------------------------------------------------------
 
   /** Encodes the GPU side of a readback; returns a function that maps the result after submit. */
-  private encodeReadback(encoder: GPUCommandEncoder, readback: Readback): () => Promise<void> {
+  private encodeReadback(encoder: GPUCommandEncoder, readback: Readback, screen: GPUTexture): () => Promise<void> {
     const device = this.device;
     const readBuffer = (bytes: number): GPUBuffer =>
       device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -536,18 +712,18 @@ export class WebGPURenderer implements Renderer {
     };
 
     switch (readback.kind) {
-      case 'pixel': {
+      case 'screenPixel': {
         const buffer = readBuffer(256);
-        const x = Math.min(CANVAS_WIDTH - 1, Math.max(0, Math.floor(readback.x)));
-        const y = Math.min(CANVAS_HEIGHT - 1, Math.max(0, Math.floor(readback.y)));
-        encoder.copyTextureToBuffer({ texture: this.composite, origin: { x, y } }, { buffer, bytesPerRow: 256 }, [1, 1]);
-        return () => mapped(buffer, (b) => readback.resolve([b[0]!, b[1]!, b[2]!, b[3]!]));
+        const x = Math.min(screen.width - 1, Math.max(0, Math.floor(readback.x)));
+        const y = Math.min(screen.height - 1, Math.max(0, Math.floor(readback.y)));
+        encoder.copyTextureToBuffer({ texture: screen, origin: { x, y } }, { buffer, bytesPerRow: 256 }, [1, 1]);
+        const bgra = this.canvasFormat === 'bgra8unorm';
+        return () => mapped(buffer, (b) => readback.resolve(bgra ? [b[2]!, b[1]!, b[0]!, 255] : [b[0]!, b[1]!, b[2]!, 255]));
       }
       case 'thumbnail': {
         const bytesPerRow = THUMBNAIL_SIZE * 4; // 256: already aligned
         const buffer = readBuffer(bytesPerRow * THUMBNAIL_SIZE);
-        const instances = packThumbnailInstances(readback.tiles);
-        const vertex = this.instanceBuffer(instances);
+        const vertex = this.instanceBuffer(packThumbnailInstances(readback.tiles));
         const pass = encoder.beginRenderPass({
           colorAttachments: [{ view: this.thumbTarget.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }],
         });
@@ -611,6 +787,26 @@ export class WebGPURenderer implements Renderer {
 
   // --- resources ------------------------------------------------------------
 
+  private clearPass(encoder: GPUCommandEncoder, texture: GPUTexture): void {
+    encoder
+      .beginRenderPass({
+        colorAttachments: [{ view: texture.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }],
+      })
+      .end();
+  }
+
+  private dabPass(encoder: GPUCommandEncoder, target: GPUTexture, buffer: GPUBuffer, first: number, count: number): void {
+    if (count === 0) return;
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), loadOp: 'load', storeOp: 'store' }],
+    });
+    pass.setPipeline(this.dabPipeline);
+    pass.setBindGroup(0, this.dabBindGroup);
+    pass.setVertexBuffer(0, buffer);
+    pass.draw(4, count, 0, first);
+    pass.end();
+  }
+
   private instanceBuffer(data: Float32Array): GPUBuffer {
     const buffer = this.device.createBuffer({
       size: Math.max(16, data.byteLength),
@@ -620,46 +816,76 @@ export class WebGPURenderer implements Renderer {
     return buffer;
   }
 
-  private ensurePages(count: number): void {
-    if (count > MAX_ATLAS_PAGES) throw new Error(`Tile pool limit: ${count} > ${MAX_ATLAS_PAGES} pages`);
-    if (count <= this.pages.length) return;
-    while (this.pages.length < count) {
-      this.pages.push(
-        this.device.createTexture({
-          label: `atlas page ${this.pages.length}`,
-          size: [ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE],
-          format: TILE_FORMAT,
-          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-        }),
-      );
-    }
-    this.rebuildPageBindGroups();
+  /** Create the atlas pages the slot pools now need. */
+  private syncPages(): void {
+    if (this.layerPages.ensure(this.core.residency.slots.pagesNeeded)) this.rebuildLayerBindGroups();
+    const level0 = this.level0Pages.ensure(this.core.planner.level0Pool.pagesNeeded);
+    const preview = this.previewPages.ensure(this.core.planner.previewPool.pagesNeeded);
+    if (level0 || preview) this.rebuildCompositeBindGroups();
   }
 
-  /** Bind groups that include every page (unallocated pages are bound to a 1×1 dummy). */
-  private rebuildPageBindGroups(): void {
-    const pageEntries = (first: number): GPUBindGroupEntry[] =>
-      Array.from({ length: MAX_ATLAS_PAGES }, (_, i) => ({
-        binding: first + i,
-        resource: (this.pages[i] ?? this.dummyPage).createView(),
-      }));
-    this.compositeBindGroup = this.device.createBindGroup({
+  private canvasResources(id: CanvasId): CanvasGpu {
+    let gpu = this.canvasGpu.get(id);
+    if (!gpu) {
+      gpu = {
+        uniforms: this.device.createBuffer({
+          size: packCompositeUniforms({ paper: [1, 1, 1], sources: [], liveStroke: null }).byteLength,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+        lookup: this.device.createTexture({
+          label: `lookup ${id}`, size: [TILE_COUNT, MAX_SOURCES], format: 'r32uint',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        }),
+        bindGroup: null,
+      };
+      this.canvasGpu.set(id, gpu);
+    }
+    gpu.bindGroup ??= this.device.createBindGroup({
       layout: this.compositePipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: { buffer: this.compositeUniforms } },
-        { binding: 1, resource: this.lookup.createView() },
+        { binding: 0, resource: { buffer: gpu.uniforms } },
+        { binding: 1, resource: gpu.lookup.createView() },
         { binding: 2, resource: this.strokeMask.createView() },
         { binding: 3, resource: this.predictionMask.createView() },
-        ...pageEntries(4),
+        ...this.pageEntries(this.layerPages, MAX_ATLAS_PAGES, 4),
       ],
     });
+    return gpu;
+  }
+
+  private releaseCanvas(id: CanvasId): void {
+    const gpu = this.canvasGpu.get(id);
+    if (!gpu) return;
+    gpu.uniforms.destroy();
+    gpu.lookup.destroy();
+    this.canvasGpu.delete(id);
+  }
+
+  /** Bind group entries for every page of a pool (missing pages bound to a 1×1 dummy). */
+  private pageEntries(pages: Pages, count: number, first: number): GPUBindGroupEntry[] {
+    return Array.from({ length: count }, (_, i) => ({
+      binding: first + i,
+      resource: (pages.textures[i] ?? this.dummyPage).createView(),
+    }));
+  }
+
+  private rebuildLayerBindGroups(): void {
+    for (const gpu of this.canvasGpu.values()) gpu.bindGroup = null;
     this.emptyBindGroup = this.device.createBindGroup({
       layout: this.emptyPipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.emptyUniformBindings } }, ...pageEntries(1)],
+      entries: [{ binding: 0, resource: { buffer: this.emptyUniformBindings } }, ...this.pageEntries(this.layerPages, MAX_ATLAS_PAGES, 1)],
     });
     this.thumbBindGroup = this.device.createBindGroup({
       layout: this.thumbPipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.thumbUniformBindings } }, ...pageEntries(1)],
+      entries: [{ binding: 0, resource: { buffer: this.thumbUniformBindings } }, ...this.pageEntries(this.layerPages, MAX_ATLAS_PAGES, 1)],
+    });
+  }
+
+  private rebuildCompositeBindGroups(): void {
+    this.displayBindGroups.clear();
+    this.downsampleBindGroup = this.device.createBindGroup({
+      layout: this.downsamplePipeline.getBindGroupLayout(0),
+      entries: this.pageEntries(this.level0Pages, COMPOSITE_LEVEL0_PAGES, 0),
     });
   }
 }

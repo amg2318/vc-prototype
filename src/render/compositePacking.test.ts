@@ -9,9 +9,9 @@ import {
   packLookup,
   packMergeInstance,
 } from './compositePacking';
-import type { CompositeState } from './renderer';
+import type { CompositeInput } from './compositePacking';
 
-const state: CompositeState = {
+const state: CompositeInput = {
   paper: [0.9, 0.9, 0.8],
   sources: [
     { kind: 'raster', opacity: 1, blendMode: 'normal', tiles: new Map([[0, 5]]) },
@@ -46,12 +46,13 @@ describe('packCompositeUniforms', () => {
 });
 
 describe('merge packing', () => {
-  it('packs destination slot position, tile origin, colour and mode', () => {
+  it('packs destination slot position, tile origin, colour, mode and canvas size', () => {
     const out = new Float32Array(MERGE_INSTANCE_FLOATS);
-    packMergeInstance({ key: 17, src: null, dst: 1 }, { color: [0.1, 0.2, 0.3], opacity: 0.5, mode: 'paint' }, out, 0);
+    const style = { color: [0.1, 0.2, 0.3] as [number, number, number], opacity: 0.5, mode: 'paint' as const };
+    packMergeInstance({ key: 17, src: null, dst: 1 }, style, { width: 2480, height: 3508 }, out, 0);
     expect([...out.slice(0, 4)]).toEqual([TILE_SIZE, 0, TILE_SIZE, TILE_SIZE]);
     expect(out[7]).toBeCloseTo(0.5);
-    expect(out[8]).toBe(0);
+    expect([...out.slice(8, 11)]).toEqual([0, 2480, 3508]); // paint, clipped to the canvas size
   });
 
   it('groups jobs by destination page', () => {

@@ -8,6 +8,8 @@ export interface ToolbarActions {
   redo(): void;
   toggleColorPicker(): void;
   toggleLayers(): void;
+  toggleCanvases(): void;
+  toggleFingerDrawing(): void;
 }
 
 const TOOLS: { tool: Tool; label: string; key: string }[] = [
@@ -23,6 +25,7 @@ export class Toolbar {
   private readonly swatch: HTMLButtonElement;
   private readonly undoButton: HTMLButtonElement;
   private readonly redoButton: HTMLButtonElement;
+  private readonly fingerButton: HTMLButtonElement;
 
   constructor(actions: ToolbarActions) {
     this.element = document.createElement('nav');
@@ -37,17 +40,23 @@ export class Toolbar {
     this.swatch.classList.add('swatch', 'toolbar-swatch');
     this.undoButton = button('↶', actions.undo, 'Undo (two-finger tap, ⌘Z)');
     this.redoButton = button('↷', actions.redo, 'Redo (three-finger tap, ⇧⌘Z)');
+    this.fingerButton = button('Finger', actions.toggleFingerDrawing, 'Finger drawing on/off');
     this.element.append(
       this.swatch,
       separator(),
       this.undoButton,
       this.redoButton,
+      this.fingerButton,
       separator(),
+      button('Canvases', actions.toggleCanvases, 'Canvases'),
       button('Layers', actions.toggleLayers, 'Layers'),
     );
   }
 
-  update(state: { tool: Tool; color: RGB; canUndo: boolean; canRedo: boolean }): void {
+  update(state: { tool: Tool; color: RGB; canUndo: boolean; canRedo: boolean; fingerDraws: boolean }): void {
+    // Lit while one finger draws; dim while one finger pans.
+    this.fingerButton.classList.toggle('active', state.fingerDraws);
+    this.fingerButton.title = state.fingerDraws ? 'One finger draws (tap: finger pans)' : 'One finger pans (tap: finger draws)';
     for (const [tool, b] of this.toolButtons) b.classList.toggle('active', tool === state.tool);
     this.swatch.style.background = rgbToHex(state.color);
     this.undoButton.disabled = !state.canUndo;
