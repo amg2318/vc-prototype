@@ -39,6 +39,16 @@ describe('dabPointFor', () => {
     expect(p(0).opacity).toBeCloseTo(brush.minOpacityFraction);
   });
 
+  it('reaches full opacity at fullOpacityPressure, while size keeps following pressure', () => {
+    const light = { ...brush, fullOpacityPressure: 0.4 };
+    const p = (pressure: number) => dabPointFor({ x: 0, y: 0, pressure, time: 0 }, light);
+    expect(p(0.4).opacity).toBeCloseTo(1);
+    expect(p(0.7).opacity).toBe(1);
+    expect(p(0.2).opacity).toBeCloseTo((brush.minOpacityFraction + 1) / 2);
+    const min = brush.minSizeFraction;
+    expect(p(0.4).radius).toBeCloseTo(10 * (min + 0.4 * (1 - min))); // size: unchanged, linear in pressure
+  });
+
   it('ignores pressure when the toggles are off', () => {
     const fixed = { ...brush, pressureAffectsSize: false, pressureAffectsOpacity: false };
     const d = dabPointFor({ x: 0, y: 0, pressure: 0.1, time: 0 }, fixed);

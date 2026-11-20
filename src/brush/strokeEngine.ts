@@ -39,7 +39,8 @@ function lerp(a: number, b: number, t: number): number {
 export function dabPointFor(p: StrokePoint, brush: BrushSettings): DabPoint {
   const curved = evaluatePressureCurve(PRESSURE_CURVE_PRESETS[brush.pressureCurve], p.pressure);
   const sizeFactor = brush.pressureAffectsSize ? lerp(brush.minSizeFraction, 1, curved) : 1;
-  const opacity = brush.pressureAffectsOpacity ? lerp(brush.minOpacityFraction, 1, curved) : 1;
+  const opacityPressure = Math.min(1, curved / brush.fullOpacityPressure);
+  const opacity = brush.pressureAffectsOpacity ? lerp(brush.minOpacityFraction, 1, opacityPressure) : 1;
   return { x: p.x, y: p.y, radius: (brush.diameter / 2) * sizeFactor, opacity };
 }
 

@@ -14,7 +14,8 @@ export class ToolState {
   /** The tool to go back to after a one-off eyedropper pick. */
   private lastPaintingTool: Tool = 'brush';
   readonly brush: BrushSettings = { ...DEFAULT_BRUSH, color: [...DEFAULT_BRUSH.color] };
-  readonly eraser: BrushSettings = { ...DEFAULT_BRUSH, diameter: 48, color: [0, 0, 0] };
+  /** The eraser erases fully at a medium press (a full-strength Pencil press is tiring). */
+  readonly eraser: BrushSettings = { ...DEFAULT_BRUSH, diameter: 48, fullOpacityPressure: 0.4, color: [0, 0, 0] };
   recentColors: RGB[] = [];
   private listeners: (() => void)[] = [];
 
