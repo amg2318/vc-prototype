@@ -89,6 +89,12 @@ export interface PlannerCanvas {
   isReady(key: TileKey): boolean;
   /** Depth in the inheritance graph (0 if absent): sources get the per-frame budget before their inheritors. */
   depth?: number;
+  /**
+   * Leave this canvas's changes pending for now (an off-screen inheritor
+   * during a stroke): its cached tiles keep their old content, and are
+   * updated once it is no longer deferred.
+   */
+  deferUpdates?: boolean;
 }
 
 /** Composite level-0 tile `key` of a canvas into `dst` (a level-0 pool slot). */
@@ -331,6 +337,7 @@ export class PyramidPlanner {
 
     // 2. Changed content reaches every cached tile that shows it.
     for (const c of priority) {
+      if (c.deferUpdates) continue;
       const cache = this.caches.get(c.id)!;
       for (const key0 of [...cache.pending]) {
         const coarser: { tile: CachedTile; l: number }[] = [];
@@ -354,7 +361,7 @@ export class PyramidPlanner {
 
     // 3. Build tiles that aren't complete yet (on-screen ones first).
     for (const { c, level: l, tile } of needed) {
-      if (tile.todo === null) continue;
+      if (tile.todo === null || c.deferUpdates) continue;
       const cache = this.caches.get(c.id)!;
       if (l === 0) {
         const key0 = tile.todo[0]!;

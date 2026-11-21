@@ -362,6 +362,41 @@ describe('RenderCore: inherited blocks', () => {
     expect(frames).toBeLessThan(200);
   });
 
+  it('defers off-screen inheritors during a stroke and catches them up afterwards', () => {
+    const core = new RenderCore(new PyramidPlanner(256, 256, 16));
+    const a = canvas('a', 0);
+    const onScreen = { ...canvas('b', 600), inherited: createBlock('a', size, size) };
+    const offScreen = { ...canvas('c', 5000), inherited: createBlock('a', size, size) };
+    core.setCanvases([a, onScreen, offScreen]);
+    for (let i = 0; i < 3; i++) core.buildFrame(view, px);
+
+    const drawing = { ...a, liveStroke: { sourceIndex: 0, style: { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const } } };
+    core.setCanvases([drawing, onScreen, offScreen]);
+    core.beginStroke('a');
+    core.addDabs([{ x: 10, y: 10, radius: 4, opacity: 1 }]);
+    const during = core.buildFrame(view, px);
+    const composited = (f: Frame) => new Set(allComposites(f).map((b) => b.canvasId));
+    expect(composited(during)).toEqual(new Set(['a', 'b'])); // c waits…
+    expect(during.stats.staleInheritors).toBe(1);
+    expect(during.stats.inheritorsUpdated).toBe(2); // …but is still told about the change
+
+    core.setCanvases([a, onScreen, offScreen]); // pen up
+    const after = core.buildFrame(view, px);
+    expect(composited(after).has('c')).toBe(true);
+    expect(after.stats.staleInheritors).toBe(0);
+  });
+
+  it('does not defer an off-screen source that a visible inheritor shows', () => {
+    const core = offscreenChain();
+    for (let i = 0; i < 3; i++) core.buildFrame(view, px);
+    const a = core.canvas('a')!;
+    core.setCanvases([{ ...a, liveStroke: { sourceIndex: 0, style: { color: [0, 0, 0], opacity: 1, mode: 'paint' } } }, core.canvas('b')!, core.canvas('c')!]);
+    core.invalidate('a', [0]);
+    const frame = core.buildFrame(view, px);
+    expect(frame.stats.staleInheritors).toBe(0); // b is off screen, but c (visible) needs it
+    expect(frame.stats.maxDepth).toBe(2);
+  });
+
   it('treats tiles under the block as content, not plain paper', () => {
     const core = new RenderCore(new PyramidPlanner(256, 256, 16));
     core.setCanvases([canvas('a', 600), { ...canvas('c', 0), inherited: createBlock('a', size, size) }]);

@@ -97,7 +97,19 @@ export interface Frame {
   /** Composite work in dependency order: sources' stages before their inheritors'. */
   stages: CompositeStage[];
   display: { tiles: Float32Array; solids: Float32Array; runs: DisplayRun[] };
-  stats: { composited: number; downsampled: number; visibleCanvases: number; inheritorTiles: number };
+  stats: {
+    composited: number;
+    downsampled: number;
+    visibleCanvases: number;
+    /** Level-0 tiles of canvases with an inherited block composited this frame. */
+    inheritorTiles: number;
+    /** Inheritors that changed through an arrow this frame. */
+    inheritorsUpdated: number;
+    /** Inheritors with changes not yet shown (off screen during a stroke, or over budget). */
+    staleInheritors: number;
+    /** Deepest inheritance chain in the workspace. */
+    maxDepth: number;
+  };
   moreWork: boolean;
 }
 
@@ -328,6 +340,8 @@ export class RenderCore {
     const blocks = this.activeBlocks();
     const needs = this.requestBlockSources(blocks, view.visible, viewLevel);
     const arrows = this.propagation.arrows;
+    // During a stroke, inheritors nobody can see wait (they are "stale") and catch up afterwards.
+    const strokeInProgress = this.canvases.some((c) => c.liveStroke !== null);
     const plannerCanvases: PlannerCanvas[] = this.canvases.map((c) => {
       const block = blocks.get(c.id);
       const bounds = block?.bounds ?? null;
@@ -341,6 +355,7 @@ export class RenderCore {
         placement: c.placement,
         paper: paperRgba(c),
         depth: arrows.depth(c.id),
+        deferUpdates: strokeInProgress && block !== undefined && !needs.has(c.id),
         isPaperOnly: (key) =>
           !(bounds && intersect(tileRect(key), bounds)) &&
           c.sources.every((s) => !s.tiles.has(key)) &&
@@ -371,6 +386,9 @@ export class RenderCore {
         downsampled: plan.downsamples.length,
         visibleCanvases,
         inheritorTiles: plan.composites.filter((j) => blocks.has(j.canvasId)).length,
+        inheritorsUpdated: this.inheritorsUpdated,
+        staleInheritors: [...blocks.keys()].filter((id) => this.planner.hasPendingChanges(id, wholeCanvas(this.byId.get(id)!))).length,
+        maxDepth: Math.max(0, ...[...blocks.keys()].map((id) => arrows.depth(id))),
       },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
@@ -650,6 +668,11 @@ function coarserBy(need: BlockNeed | undefined): number {
 /** The source level an inheritor samples this frame. */
 function sampleLevel(b: ActiveBlock, need: BlockNeed | undefined): number {
   return blockLevel(b.block.placement.scale, coarserBy(need));
+}
+
+/** A canvas's own pixels, as a rect. */
+function wholeCanvas(c: CanvasRenderState): Rect {
+  return { x: 0, y: 0, width: c.placement.width, height: c.placement.height };
 }
 
 /** Canvas-pixel rect of level-0 tile `key`. */
