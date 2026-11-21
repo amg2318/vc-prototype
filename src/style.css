@@ -542,3 +542,77 @@ body {
 .undo-indicator-arrow {
   display: inline-block;
 }
+
+/* --- Arrows between canvases ------------------------------------------------ */
+
+.arrow-controls {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Connection handle: a 44 px target with a small ring in the middle. */
+.connect-handle,
+.arrow-grip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+}
+
+.connect-handle::after,
+.arrow-grip::after {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(10, 132, 255, 0.85);
+  background: rgba(30, 30, 32, 0.9);
+}
+
+.connect-handle:hover::after,
+.connect-handle.active::after,
+.arrow-grip::after {
+  background: #0a84ff;
+}
+
+.arrow-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  margin-left: -110px; /* roughly centred under the arrow */
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+/* While choosing a canvas by tapping: catches the next tap anywhere. */
+.arrow-picker {
+  position: fixed;
+  inset: 0;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.arrow-picker-hint {
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 24px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 16px;
+  cursor: default;
+}

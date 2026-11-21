@@ -24,8 +24,7 @@ import { installShortcuts } from './ui/shortcuts';
 import { CanvasLabels } from './ui/canvasLabels';
 import { CanvasPanel } from './ui/canvasPanel';
 import { HIGHLIGHT, selectionOutline } from './ui/selectionOutline';
-import { arrowEmphasis, arrowLines, arrowQuads } from './ui/arrows';
-import type { CanvasId } from './document/paintDocument';
+import { ArrowControls } from './ui/arrowControls';
 import type { OverlayShape } from './render/renderer';
 import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicator';
 import type { Change } from './history/command';
@@ -62,15 +61,6 @@ async function main(): Promise<void> {
 
   // --- render loop: only runs when something changed ----------------------
 
-  /** Global "show arrows" toggle (toolbar). */
-  let showArrows = true;
-  function arrowOverlay(selectedCanvas: CanvasId | null, canvasPxPerDevicePx: number): OverlayShape[] {
-    const canvases = workspace.canvases.map((c) => ({ id: c.id, placement: c.placement, inherited: c.inherited }));
-    const lines = arrowLines(canvases, canvasPxPerDevicePx);
-    const emphasis = arrowEmphasis(lines, workspace.graph(), selectedCanvas, null);
-    return arrowQuads(lines, emphasis, canvasPxPerDevicePx);
-  }
-
   const MEMORY_SAMPLE_MS = 250;
   let lastMemorySample = -Infinity;
   let framePending = false;
@@ -84,7 +74,7 @@ async function main(): Promise<void> {
     const start = performance.now();
     const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
     const selected = active()?.doc;
-    const overlay: OverlayShape[] = showArrows ? arrowOverlay(selected?.id ?? null, canvasPxPerDevicePx) : [];
+    const overlay: OverlayShape[] = arrowControls.overlay(selected?.id ?? null, canvasPxPerDevicePx);
     if (selected) overlay.push(...selectionOutline(selected.placement, canvasPxPerDevicePx));
     if (highlighted && workspace.hasCanvas(highlighted)) {
       overlay.push(...selectionOutline(workspace.canvas(highlighted).placement, canvasPxPerDevicePx, HIGHLIGHT));
@@ -113,6 +103,7 @@ async function main(): Promise<void> {
       });
     }
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
+    arrowControls.update(view, cssWidth, cssHeight);
     if (info.moreWork) requestFrame();
   }
 
@@ -241,13 +232,17 @@ async function main(): Promise<void> {
   }
   const thumbnails = new Thumbnails(workspace, renderer, requestFrame);
   const labels = new CanvasLabels(() => view, {
-    select: (id) => workspace.setActiveCanvas(id),
+    select: (id) => {
+      arrowControls.select(null);
+      workspace.setActiveCanvas(id);
+    },
     zoomTo: (id) => {
       workspace.setActiveCanvas(id);
       zoomToCanvas(id);
     },
     drag: dragCanvas,
   });
+  const arrowControls = new ArrowControls({ workspace, getView: () => view, requestFrame: () => requestFrame() });
   workspace.onChange((change) => {
     updateCompositeState();
     renderer.invalidateTiles(change.canvasId, change.tiles);
@@ -339,6 +334,7 @@ async function main(): Promise<void> {
       if (phase === 'end') tools.returnFromEyedropper();
     },
     canDrawAt: (p) => hitTest(workspace.canvases, p) !== null,
+    emptySpacePress: (p) => arrowControls.pressAt(p),
     tap(fingers) {
       if (fingers === 2) undo();
       else redo();
@@ -469,7 +465,8 @@ async function main(): Promise<void> {
       input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
     },
     toggleArrows: () => {
-      showArrows = !showArrows;
+      arrowControls.shown = !arrowControls.shown;
+      if (!arrowControls.shown) arrowControls.select(null);
       refreshUi();
       requestFrame();
     },
@@ -486,7 +483,7 @@ async function main(): Promise<void> {
       canUndo: workspace.history.canUndo,
       canRedo: workspace.history.canRedo,
       fingerDraws: input.fingers.enabled,
-      showArrows,
+      showArrows: arrowControls.shown,
     });
     layersPanel.update();
     canvasPanel.update();
@@ -529,7 +526,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
   refreshUi();
 
   installShortcuts({

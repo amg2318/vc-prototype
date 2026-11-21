@@ -236,6 +236,34 @@ export class ResizeCanvasCommand implements Command {
  * Commands with the same `mergeKey` in a row (one slider or handle drag)
  * become one undo step.
  */
+/**
+ * Changes several canvases' blocks as one undo step (moving an arrow's head
+ * to another canvas empties one block and links another).
+ */
+export class SetBlocksCommand implements Command {
+  constructor(
+    private readonly entries: readonly { canvasId: CanvasId; before: InheritedBlock | null; after: InheritedBlock | null }[],
+    readonly label: string,
+  ) {}
+
+  /** The last canvas changed (which ends up selected). */
+  get canvasId(): CanvasId {
+    return this.entries[this.entries.length - 1]!.canvasId;
+  }
+
+  apply(ctx: CommandContext): Change {
+    for (const e of this.entries) ctx.canvas(e.canvasId).inherited = e.after;
+    return canvasChange(this.canvasId);
+  }
+
+  revert(ctx: CommandContext): Change {
+    for (const e of this.entries) ctx.canvas(e.canvasId).inherited = e.before;
+    return canvasChange(this.canvasId);
+  }
+
+  dispose(): void {}
+}
+
 export class SetBlockCommand implements Command {
   constructor(
     readonly canvasId: CanvasId,

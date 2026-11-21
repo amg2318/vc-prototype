@@ -179,6 +179,19 @@ describe('inheritance commands', () => {
     expect(b.inherited?.placement).toMatchObject({ x: 150, y: 160 });
   });
 
+  it('moves an arrow head to another canvas in one undo step', () => {
+    const { ws, a, b, c } = setup();
+    ws.connect(b.id, a.id);
+    expect(ws.moveArrowHead(b.id, c.id)).toBe(true);
+    expect(b.inherited!.source).toEqual({ kind: 'empty' });
+    expect(c.inherited!.source).toEqual({ kind: 'linked', canvasId: a.id });
+    expect(ws.history.nextUndoLabel).toBe('Move arrow');
+    ws.undo();
+    expect(b.inherited!.source).toEqual({ kind: 'linked', canvasId: a.id });
+    expect(c.inherited).toBeNull();
+    expect(ws.moveArrowHead(b.id, a.id)).toBe(false); // a can't inherit itself
+  });
+
   it('hiding and showing the background is undoable, and duplicates keep it', () => {
     const { ws, a } = setup();
     ws.editor(a.id).setPaperVisible(false);

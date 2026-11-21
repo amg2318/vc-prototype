@@ -12,12 +12,14 @@ import {
   ReorderCanvasCommand,
   ResizeCanvasCommand,
   SetBlockCommand,
+  SetBlocksCommand,
 } from '../history/canvasCommands';
 import {
   createBlock,
   emptyBlock,
   fitPlacement,
   linkBlock,
+  linkedSource,
   refitBlock,
   type BlockPlacement,
   type InheritedBlock,
@@ -287,10 +289,37 @@ export class Workspace {
     return true;
   }
 
-  /** Delete the arrow into `targetId`: the block stays, empty, with its settings. */
+  /**
+   * Move the head of the arrow into `fromId` to `toId`: `toId` inherits the
+   * same source (keeping its own block settings, if it had a block), and
+   * `fromId`'s block is left empty. One undo step.
+   */
+  moveArrowHead(fromId: CanvasId, toId: CanvasId): boolean {
+    const from = this.canvas(fromId);
+    const sourceId = from.inherited ? linkedSource(from.inherited) : null;
+    if (sourceId === null || fromId === toId || !this.canConnect(toId, sourceId)) return false;
+    const to = this.canvas(toId);
+    const sourceSize = sizeOf(this.canvas(sourceId));
+    const linked = to.inherited ? linkBlock(to.inherited, sourceId, sourceSize, sizeOf(to)) : createBlock(sourceId, sourceSize, sizeOf(to));
+    this.execute(
+      new SetBlocksCommand(
+        [
+          { canvasId: fromId, before: from.inherited, after: emptyBlock(from.inherited!) },
+          { canvasId: toId, before: to.inherited, after: linked },
+        ],
+        'Move arrow',
+      ),
+    );
+    return true;
+  }
+
+  /**
+   * Delete the arrow into `targetId` (or its broken stub, if the source was
+   * deleted): the block stays, empty, with its settings.
+   */
   deleteArrow(targetId: CanvasId): void {
     const before = this.canvas(targetId).inherited;
-    if (before?.source.kind !== 'linked') return;
+    if (before?.source.kind !== 'linked' && before?.source.kind !== 'missing') return;
     this.execute(new SetBlockCommand(targetId, before, emptyBlock(before), 'Delete arrow'));
   }
 
