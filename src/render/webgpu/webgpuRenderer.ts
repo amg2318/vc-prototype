@@ -1,6 +1,7 @@
 import {
   ATLAS_PAGE_SIZE,
   COMPOSITE_LEVEL0_PAGES,
+  COMPOSITE_PREVIEW_PAGES,
   MAX_ATLAS_PAGES,
   PAGE_BYTES,
   TILE_BYTES,
@@ -24,6 +25,7 @@ import {
   packMergeInstance,
   packThumbnailInstances,
 } from '../compositePacking';
+import { BLOCK_LOOKUP_WIDTH, BLOCK_PAGES, STAGING_SIZE, stagingOrigin } from '../blockPacking';
 import { DAB_FLOATS, DAB_HARDNESS, ensureCapacity, packDabs, type FrameOp, type Readback } from '../frameQueue';
 import type {
   CanvasRenderState,
@@ -49,6 +51,7 @@ import {
 } from '../renderCore';
 import { WORKSPACE_BACKGROUND } from '../workspace';
 import {
+  BLOCK_BINDING,
   COMPOSITE_WGSL,
   DAB_WGSL,
   DISPLAY_WGSL,
@@ -119,7 +122,12 @@ class Pages {
 interface CanvasGpu {
   uniforms: GPUBuffer;
   lookup: GPUTexture;
+  /** Where the inherited block's source composite is (see packBlockLookup). */
+  blockLookup: GPUTexture;
+  /** For rendering into a level-0 page: composite pages are not bound (dummies instead). */
   bindGroup: GPUBindGroup | null;
+  /** For canvases with a block, rendering into the staging target: composite pages bound. */
+  blockBindGroup: GPUBindGroup | null;
 }
 
 export class WebGPURenderer implements Renderer {
@@ -140,6 +148,8 @@ export class WebGPURenderer implements Renderer {
   private readonly predictionMask: GPUTexture;
   private readonly zeroTile: GPUTexture;
   private readonly scratchTile: GPUTexture;
+  /** Composites of canvases with a block go here first (they read composite pages), then are copied. */
+  private readonly stagingTarget: GPUTexture;
   private readonly emptyTarget: GPUTexture;
   private readonly thumbTarget: GPUTexture;
   private readonly canvasFormat: GPUTextureFormat;
@@ -239,6 +249,9 @@ export class WebGPURenderer implements Renderer {
     this.zeroTile = device.createTexture({ label: 'zero tile', size: [TILE_SIZE, TILE_SIZE], format: TILE_FORMAT, usage: T.COPY_SRC });
     this.scratchTile = device.createTexture({
       label: 'scratch tile', size: [TILE_SIZE, TILE_SIZE], format: TILE_FORMAT, usage: T.COPY_SRC | T.COPY_DST,
+    });
+    this.stagingTarget = device.createTexture({
+      label: 'block staging', size: [STAGING_SIZE, STAGING_SIZE], format: TILE_FORMAT, usage: T.RENDER_ATTACHMENT | T.COPY_SRC,
     });
     this.emptyTarget = device.createTexture({
       label: 'empty check', size: [EMPTY_TARGET_WIDTH, EMPTY_CHECK_BLOCK], format: TILE_FORMAT,
@@ -439,8 +452,11 @@ export class WebGPURenderer implements Renderer {
     const encoder = device.createCommandEncoder();
     const afterLayerOps = this.encodeLayerOps(encoder, frame.ops, frame.prediction);
 
-    const timing = this.timestamps && !this.timestamps.busy && (frame.composites.length > 0 || frame.downsample.runs.length > 0)
-      ? this.timestamps : null;
+    const totalPasses = frame.stages.reduce(
+      (n, stage) => n + stage.composites.reduce((m, b) => m + b.runs.length, 0) + stage.downsample.runs.length,
+      0,
+    );
+    const timing = this.timestamps && !this.timestamps.busy && totalPasses > 0 ? this.timestamps : null;
     const passes: GPURenderPassEncoder[] = [];
     const beginTimed = (descriptor: GPURenderPassDescriptor, index: number, total: number): GPURenderPassEncoder => {
       const writes = timing
@@ -456,9 +472,7 @@ export class WebGPURenderer implements Renderer {
       passes.push(pass);
       return pass;
     };
-    const totalPasses =
-      frame.composites.reduce((n, b) => n + b.runs.length, 0) + frame.downsample.runs.length;
-    this.encodeComposites(frame, (d, i) => beginTimed(d, i, totalPasses));
+    this.encodeComposites(encoder, frame, (d, i) => beginTimed(d, i, totalPasses));
     const compositeCpuMs = performance.now() - compositeStart;
     if (timing && totalPasses > 0) {
       encoder.resolveQuerySet(timing.query, 0, 2, timing.resolve, 0);
@@ -611,49 +625,61 @@ export class WebGPURenderer implements Renderer {
 
   // --- composite pyramid ----------------------------------------------------------
 
+  /**
+   * Composite and downsample passes, stage by stage (sources before the
+   * canvases that inherit them, so inheritors read this frame's content).
+   */
   private encodeComposites(
+    encoder: GPUCommandEncoder,
     frame: Frame,
     begin: (descriptor: GPURenderPassDescriptor, index: number) => GPURenderPassEncoder,
   ): void {
     let passIndex = 0;
-    // All composite instances in one buffer, batches one after another.
-    const total = frame.composites.reduce((n, b) => n + b.instances.length, 0);
-    const all = new Float32Array(total);
-    let offset = 0;
-    const firsts: number[] = [];
-    for (const batch of frame.composites) {
-      all.set(batch.instances, offset);
-      firsts.push(offset / COMPOSITE_INSTANCE_FLOATS);
-      offset += batch.instances.length;
-    }
-    const compositeBuffer = this.compositeBuffer.upload(all);
+    // All instances of a kind in one buffer (queue writes all land before the passes run).
+    const batches = frame.stages.flatMap((s) => s.composites);
+    const compositeBuffer = this.compositeBuffer.upload(concat(batches.map((b) => b.instances)));
+    const downsampleBuffer = this.downsampleBuffer.upload(concat(frame.stages.map((s) => s.downsample.instances)));
+    let compositeFirst = 0;
+    let downsampleFirst = 0;
 
-    frame.composites.forEach((batch, b) => {
-      const gpu = this.canvasResources(batch.canvasId);
-      if (batch.upload) {
+    for (const stage of frame.stages) {
+      for (const batch of stage.composites) {
+        const gpu = this.canvasResources(batch.canvasId);
         this.device.queue.writeBuffer(gpu.uniforms, 0, batch.upload.uniforms);
         this.device.queue.writeTexture({ texture: gpu.lookup }, batch.upload.lookup, { bytesPerRow: TILE_COUNT * 4 }, [TILE_COUNT, MAX_SOURCES]);
+        if (batch.upload.blockLookup) {
+          this.device.queue.writeTexture({ texture: gpu.blockLookup }, batch.upload.blockLookup, { bytesPerRow: BLOCK_LOOKUP_WIDTH * 16 }, [BLOCK_LOOKUP_WIDTH, 1]);
+        }
+        for (const run of batch.runs) {
+          const target = batch.staged ? this.stagingTarget : this.level0Pages.textures[run.page]!;
+          const pass = begin({ colorAttachments: [{ view: target.createView(), loadOp: 'load', storeOp: 'store' }] }, passIndex++);
+          pass.setPipeline(this.compositePipeline);
+          pass.setBindGroup(0, batch.staged ? this.compositeBindGroup(gpu, true) : this.compositeBindGroup(gpu, false));
+          pass.setVertexBuffer(0, compositeBuffer);
+          pass.draw(4, run.count, 0, compositeFirst + run.first);
+          pass.end();
+        }
+        // Staged tiles go to their level-0 slots.
+        batch.staged?.forEach((slot, i) => {
+          const dst = slotLocation(slot);
+          encoder.copyTextureToTexture(
+            { texture: this.stagingTarget, origin: stagingOrigin(i) },
+            { texture: this.level0Pages.textures[dst.page]!, origin: { x: dst.x, y: dst.y } },
+            [TILE_SIZE, TILE_SIZE],
+          );
+        });
+        compositeFirst += batch.instances.length / COMPOSITE_INSTANCE_FLOATS;
       }
-      for (const run of batch.runs) {
-        const pass = begin({ colorAttachments: [{ view: this.level0Pages.textures[run.page]!.createView(), loadOp: 'load', storeOp: 'store' }] }, passIndex++);
-        pass.setPipeline(this.compositePipeline);
-        pass.setBindGroup(0, gpu.bindGroup!);
-        pass.setVertexBuffer(0, compositeBuffer);
-        pass.draw(4, run.count, 0, firsts[b]! + run.first);
-        pass.end();
-      }
-    });
 
-    if (frame.downsample.runs.length > 0) {
-      const buffer = this.downsampleBuffer.upload(frame.downsample.instances);
-      for (const run of frame.downsample.runs) {
+      for (const run of stage.downsample.runs) {
         const pass = begin({ colorAttachments: [{ view: this.previewPages.textures[run.page]!.createView(), loadOp: 'load', storeOp: 'store' }] }, passIndex++);
         pass.setPipeline(this.downsamplePipeline);
         pass.setBindGroup(0, this.downsampleBindGroup);
-        pass.setVertexBuffer(0, buffer);
-        pass.draw(4, run.count, 0, run.first);
+        pass.setVertexBuffer(0, downsampleBuffer);
+        pass.draw(4, run.count, 0, downsampleFirst + run.first);
         pass.end();
       }
+      downsampleFirst += stage.downsample.instances.length / DOWNSAMPLE_INSTANCE_FLOATS;
     }
   }
 
@@ -836,11 +862,30 @@ export class WebGPURenderer implements Renderer {
           label: `lookup ${id}`, size: [TILE_COUNT, MAX_SOURCES], format: 'r32uint',
           usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         }),
+        blockLookup: this.device.createTexture({
+          label: `block lookup ${id}`, size: [BLOCK_LOOKUP_WIDTH, 1], format: 'rgba32uint',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        }),
         bindGroup: null,
+        blockBindGroup: null,
       };
       this.canvasGpu.set(id, gpu);
     }
-    gpu.bindGroup ??= this.device.createBindGroup({
+    return gpu;
+  }
+
+  /**
+   * The composite bind group of a canvas. With `withBlockPages`, the
+   * composite pages are bound so the block can sample them (the pass must
+   * then render into the staging target, not a page); otherwise 1×1 dummies.
+   */
+  private compositeBindGroup(gpu: CanvasGpu, withBlockPages: boolean): GPUBindGroup {
+    const existing = withBlockPages ? gpu.blockBindGroup : gpu.bindGroup;
+    if (existing) return existing;
+    const pages = withBlockPages
+      ? [...this.pageEntries(this.level0Pages, COMPOSITE_LEVEL0_PAGES, BLOCK_BINDING + 2), ...this.pageEntries(this.previewPages, COMPOSITE_PREVIEW_PAGES, BLOCK_BINDING + 2 + COMPOSITE_LEVEL0_PAGES)]
+      : Array.from({ length: BLOCK_PAGES }, (_, i) => ({ binding: BLOCK_BINDING + 2 + i, resource: this.dummyPage.createView() }));
+    const group = this.device.createBindGroup({
       layout: this.compositePipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: gpu.uniforms } },
@@ -848,9 +893,14 @@ export class WebGPURenderer implements Renderer {
         { binding: 2, resource: this.strokeMask.createView() },
         { binding: 3, resource: this.predictionMask.createView() },
         ...this.pageEntries(this.layerPages, MAX_ATLAS_PAGES, 4),
+        { binding: BLOCK_BINDING, resource: gpu.blockLookup.createView() },
+        { binding: BLOCK_BINDING + 1, resource: this.linearSampler },
+        ...pages,
       ],
     });
-    return gpu;
+    if (withBlockPages) gpu.blockBindGroup = group;
+    else gpu.bindGroup = group;
+    return group;
   }
 
   private releaseCanvas(id: CanvasId): void {
@@ -858,6 +908,7 @@ export class WebGPURenderer implements Renderer {
     if (!gpu) return;
     gpu.uniforms.destroy();
     gpu.lookup.destroy();
+    gpu.blockLookup.destroy();
     this.canvasGpu.delete(id);
   }
 
@@ -870,7 +921,10 @@ export class WebGPURenderer implements Renderer {
   }
 
   private rebuildLayerBindGroups(): void {
-    for (const gpu of this.canvasGpu.values()) gpu.bindGroup = null;
+    for (const gpu of this.canvasGpu.values()) {
+      gpu.bindGroup = null;
+      gpu.blockBindGroup = null;
+    }
     this.emptyBindGroup = this.device.createBindGroup({
       layout: this.emptyPipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: { buffer: this.emptyUniformBindings } }, ...this.pageEntries(this.layerPages, MAX_ATLAS_PAGES, 1)],
@@ -883,9 +937,21 @@ export class WebGPURenderer implements Renderer {
 
   private rebuildCompositeBindGroups(): void {
     this.displayBindGroups.clear();
+    for (const gpu of this.canvasGpu.values()) gpu.blockBindGroup = null;
     this.downsampleBindGroup = this.device.createBindGroup({
       layout: this.downsamplePipeline.getBindGroupLayout(0),
       entries: this.pageEntries(this.level0Pages, COMPOSITE_LEVEL0_PAGES, 0),
     });
   }
+}
+
+/** One array holding all of `parts`, one after another. */
+function concat(parts: readonly Float32Array[]): Float32Array {
+  const all = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const p of parts) {
+    all.set(p, offset);
+    offset += p.length;
+  }
+  return all;
 }

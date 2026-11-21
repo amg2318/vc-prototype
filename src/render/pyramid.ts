@@ -86,6 +86,8 @@ export interface PlannerCanvas {
   isPaperOnly(key: TileKey): boolean;
   /** False while a layer tile at this key isn't on the GPU yet; compositing it waits. */
   isReady(key: TileKey): boolean;
+  /** Depth in the inheritance graph (0 if absent): sources get the per-frame budget before their inheritors. */
+  depth?: number;
 }
 
 /** Composite level-0 tile `key` of a canvas into `dst` (a level-0 pool slot). */
@@ -100,6 +102,9 @@ export interface CompositeJob {
  * square region (x, y, size) of preview tile `dst` at `level`.
  */
 export interface DownsampleJob {
+  canvasId: CanvasId;
+  /** The preview tile being written (its key at `level`). */
+  key: TileKey;
   src: TileSlot | null;
   paper: RGB;
   dst: TileSlot;
@@ -146,6 +151,7 @@ export class PyramidPlanner {
   readonly level0Pool: TileStore;
   readonly previewPool: TileStore;
   private readonly scratch: TileSlot[] = [];
+  private readonly scratchSlots = new Set<TileSlot>();
   private readonly caches = new Map<CanvasId, CanvasCache>();
   /** Regions asked for through `request()` since the last plan. */
   private requests: { canvasId: CanvasId; level: number; rect: Rect }[] = [];
@@ -159,6 +165,48 @@ export class PyramidPlanner {
     this.level0Pool = new TileStore(level0Capacity);
     this.previewPool = new TileStore(previewCapacity);
     for (let i = 0; i < budgetPerFrame; i++) this.scratch.push(this.level0Pool.allocate()!);
+    for (const slot of this.scratch) this.scratchSlots.add(slot);
+  }
+
+  /** True for the per-frame scratch tiles (level-0 composites that are only downsampled, not kept). */
+  isScratch(slot: TileSlot): boolean {
+    return this.scratchSlots.has(slot);
+  }
+
+  /**
+   * True if a tile of `level` over `rect` is out of date but needed this
+   * frame, so a later frame will bring it up to date. Inheritors that
+   * sampled it are composited again then. Tiles that aren't cached, or that
+   * nothing needs, return false: waiting for them could take forever.
+   */
+  willUpdate(canvasId: CanvasId, level: number, rect: Rect): boolean {
+    const cache = this.caches.get(canvasId);
+    if (!cache) return false;
+    const changed = new Set([...cache.pending].map((key0) => ancestorKey(key0, level)));
+    return levelTilesInRect(cache, rect, level).some((key) => {
+      const tile = cache.levels[level]!.get(key);
+      return tile !== undefined && tile.lastUsed === this.frame && (tile.todo !== null || changed.has(key));
+    });
+  }
+
+  /** True if content changed inside `rect` (canvas px) and hasn't reached the cached tiles yet. */
+  hasPendingChanges(canvasId: CanvasId, rect: Rect): boolean {
+    const cache = this.caches.get(canvasId);
+    if (!cache || cache.pending.size === 0) return false;
+    return levelTilesInRect(cache, rect, 0).some((key) => cache.pending.has(key));
+  }
+
+  /**
+   * Drop one cached tile (it was built at lower quality than its level
+   * promises). The GPU may still read it this frame; its slot is only reused
+   * from the next plan on.
+   */
+  forgetTile(canvasId: CanvasId, level: number, key: TileKey): void {
+    const cache = this.caches.get(canvasId);
+    const tile = cache?.levels[level]!.get(key);
+    if (!cache || !tile || this.isScratch(tile.slot)) return;
+    cache.levels[level]!.delete(key);
+    this.poolFor(level).release(tile.slot);
   }
 
   /** Content changed at these level-0 keys (or everywhere). */
@@ -221,7 +269,10 @@ export class PyramidPlanner {
       return r && { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height };
     };
     const onScreen = canvases.filter((c) => localVisible(c) !== null);
-    const priority = [...[...onScreen].reverse(), ...canvases.filter((c) => !onScreen.includes(c))];
+    // On-screen canvases front to back, then the rest; sources before the canvases that inherit them.
+    const priority = [...[...onScreen].reverse(), ...canvases.filter((c) => !onScreen.includes(c))].sort(
+      (a, b) => (a.depth ?? 0) - (b.depth ?? 0),
+    );
 
     // 1. The tiles each canvas needs: the display level while on screen, and the pinned levels always.
     const needed: { c: PlannerCanvas; level: number; tile: CachedTile }[] = [];
@@ -272,7 +323,7 @@ export class PyramidPlanner {
       const size = TILE_SIZE >> l;
       const parent = tileCoords(ancestorKey(key0, l));
       out.downsamples.push({
-        src, paper: c.paper, dst: tile.slot, level: l,
+        canvasId: c.id, key: ancestorKey(key0, l), src, paper: c.paper, dst: tile.slot, level: l,
         x: (tx - (parent.tx << l)) * size, y: (ty - (parent.ty << l)) * size, size,
       });
     };

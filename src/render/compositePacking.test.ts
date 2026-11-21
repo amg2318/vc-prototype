@@ -35,7 +35,7 @@ describe('packCompositeUniforms', () => {
     const u = [...packCompositeUniforms(state)];
     expect(u.slice(0, 4).map((v) => +v.toFixed(3))).toEqual([0.9, 0.9, 0.8, 1]);
     expect(u.slice(4, 8).map((v) => +v.toFixed(3))).toEqual([1, 0, 0, 0.8]);
-    expect(u.slice(8, 12)).toEqual([2, 1, 1, 0]);
+    expect(u.slice(8, 12)).toEqual([2, 1, 1, 4096]);
     expect(u.slice(12, 16)).toEqual([1, 0, 0, 0]);
     expect(u.slice(16, 20)).toEqual([0.5, 1, 0, 0]);
   });

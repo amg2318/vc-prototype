@@ -120,28 +120,80 @@ void main() {
 // --- compositor (layer tiles → level-0 composite tiles) ---------------------------
 
 export const COMPOSITE_VS = `${HEADER}${TO_CLIP}
-layout(location = 0) in vec4 a_origins;   // dst x, y in the level-0 page · tile origin x, y in the canvas
+uniform vec4 u_v[${COMPOSITE_UNIFORM_VEC4S}];
+layout(location = 0) in vec4 a_origins;   // dst x, y in the target · tile origin x, y in the canvas
 flat out vec4 v_origins;
 void main() {
   v_origins = a_origins;
-  gl_Position = toClip(a_origins.xy + quadCorner() * ${C.TILE_SIZE}.0, vec2(${PAGE}));
+  // The target is a level-0 page, or the staging target for canvases with a block (u_v[2].w is its size).
+  gl_Position = toClip(a_origins.xy + quadCorner() * ${C.TILE_SIZE}.0, vec2(u_v[2].w));
 }`;
+
+/** Composite page samplers a block can read (level-0 pages, then preview pages). */
+export const BLOCK_PAGE_UNIFORMS = pageUniforms('u_blockPage', C.BLOCK_PAGES);
+
+const B = C.BLOCK_UNIFORM_BASE;
 
 export const COMPOSITE_FS = `${HEADER}
 uniform vec4 u_v[${COMPOSITE_UNIFORM_VEC4S}];
 uniform usampler2D u_lookup;
 uniform sampler2D u_strokeMask;
 uniform sampler2D u_predictionMask;
+uniform usampler2D u_blockLookup;
+${BLOCK_PAGE_UNIFORMS.map((u) => `uniform sampler2D ${u};`).join('\n')}
 ${FETCH_SLOT}
 flat in vec4 v_origins;
 out vec4 o_color;
 
+// Premultiplied blending (W3C formulas). Layers: normal 0, multiply 1; blocks also screen 2, overlay 3.
 vec4 blendOnto(vec4 dst, vec4 src, int mode) {
   float outA = src.a + dst.a * (1.0 - src.a);
-  if (mode == 1) { // multiply (premultiplied W3C formula)
-    return vec4(src.rgb * dst.rgb + src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a), outA);
+  if (mode == 1) return vec4(src.rgb * dst.rgb + src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a), outA);
+  if (mode == 2) return vec4(src.rgb + dst.rgb - src.rgb * dst.rgb, outA);
+  if (mode == 3) {
+    vec3 cs = src.rgb / max(src.a, 1e-6);
+    vec3 cb = dst.rgb / max(dst.a, 1e-6);
+    vec3 mixed = mix(1.0 - 2.0 * (1.0 - cs) * (1.0 - cb), 2.0 * cs * cb, vec3(lessThanEqual(cb, vec3(0.5))));
+    return vec4(src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a) + src.a * dst.a * mixed, outA);
   }
-  return vec4(src.rgb + dst.rgb * (1.0 - src.a), outA); // normal
+  return vec4(src.rgb + dst.rgb * (1.0 - src.a), outA);
+}
+
+vec4 sampleBlockPage(uint page, vec2 uv) {
+${BLOCK_PAGE_UNIFORMS.map((u, i) => `  if (page == ${i}u) return textureLod(${u}, uv, 0.0);`).join('\n')}
+  return vec4(0.0);
+}
+
+// The inherited block: map the pixel into the source, find the cached tile, sample it (bilinear, inside the tile).
+vec4 blockColor(vec2 p) {
+  vec4 m = u_v[${B}];
+  vec4 t = u_v[${B} + 1];
+  vec4 crop = u_v[${B} + 2];
+  vec2 s = vec2(m.x * p.x + m.z * p.y + t.x, m.y * p.x + m.w * p.y + t.y);
+  if (any(lessThan(s, crop.xy)) || any(greaterThanEqual(s, crop.zw))) return vec4(0.0);
+  ivec2 cell = ivec2(floor(s / t.z));
+  int index = cell.y * ${C.TILES_X} + cell.x;
+  uvec4 e0 = texelFetch(u_blockLookup, ivec2(index * 2, 0), 0);
+  uvec4 e1 = texelFetch(u_blockLookup, ivec2(index * 2 + 1, 0), 0);
+  if (e0.x == 0u) return vec4(vec3(e1.rgb) / 255.0, 1.0);
+  vec2 texel = vec2(e0.yz) + (s - vec2(cell) * t.z) * exp2(-float(e0.w));
+  vec2 tileOrigin = vec2(e1.xy);
+  vec2 uv = clamp(texel, tileOrigin + 0.5, tileOrigin + ${C.TILE_SIZE}.0 - 0.5) / ${PAGE};
+  return sampleBlockPage(e0.x - 1u, uv);
+}
+
+vec4 applyEffects(vec4 c) {
+  if (c.a <= 0.0) return c;
+  vec3 rgb = c.rgb / c.a;
+  int count = int(u_v[${B} + 3].z);
+  for (int i = 0; i < 3; i++) {
+    if (i >= count) break;
+    vec4 e = u_v[${B} + 4 + i];
+    if (e.x == 1.0) rgb = vec3(dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
+    else if (e.x == 2.0) rgb = 1.0 - rgb;
+    else if (e.x == 3.0) { float n = max(e.y, 2.0) - 1.0; rgb = floor(rgb * n + 0.5) / n; }
+  }
+  return vec4(rgb * c.a, c.a);
 }
 
 void main() {
@@ -154,6 +206,10 @@ void main() {
   int count = int(info.x);
   int strokeSource = int(info.y);
   vec4 acc = vec4(u_v[0].rgb, 1.0);
+
+  vec4 block = u_v[${B} + 3];
+  if (u_v[${B} + 1].w > 0.5) acc = blendOnto(acc, applyEffects(blockColor(vec2(p) + 0.5)) * block.x, int(block.y));
+
   for (int i = 0; i < ${C.MAX_SOURCES}; i++) {
     if (i >= count) break;
     uint slot1 = texelFetch(u_lookup, ivec2(key, i), 0).r;

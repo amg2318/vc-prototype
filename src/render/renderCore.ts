@@ -1,4 +1,4 @@
-import { LAYER_GPU_SLOTS, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
+import { LAYER_GPU_SLOTS, PINNED_PREVIEW_LEVEL, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
 import type { TileStore } from '../document/tileStore';
 import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type TileSlot } from '../document/tiles';
 import type { CanvasId } from '../document/paintDocument';
@@ -6,7 +6,9 @@ import { canvasTilesInRect, intersect, union, type Rect } from '../workspace/coo
 import { Propagation } from './propagation';
 import { packCompositeUniforms, packLookup } from './compositePacking';
 import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
-import { levelForZoom, PyramidPlanner, type DisplayQuad, type PlannerCanvas } from './pyramid';
+import { levelForZoom, PyramidPlanner, type DisplayQuad, type DownsampleJob, type FramePlan, type PlannerCanvas } from './pyramid';
+import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUniforms, stagingOrigin, STAGING_TILES } from './blockPacking';
+import type { InheritedBlock } from '../document/inheritedBlock';
 import { TileResidency, type Eviction } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
 import type { CanvasRenderState, CompositeTile, Dab, MergeJob, OverlayRect, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
@@ -40,11 +42,40 @@ export const SOLID_QUAD_FLOATS = 12; // clip origin, x axis, y axis · rgba · 0
 
 export interface CompositeBatch {
   canvasId: CanvasId;
-  /** The canvas's compositor inputs (tile lookup in GPU slots, which can move between frames). */
-  upload: { uniforms: Float32Array; lookup: Uint32Array };
-  /** Instances grouped by level-0 page. */
+  /**
+   * The canvas's compositor inputs: tile lookup in GPU slots (which can move
+   * between frames) and, if it draws an inherited block, where to find each
+   * part of the source's composite.
+   */
+  upload: { uniforms: Float32Array; lookup: Uint32Array; blockLookup: Uint32Array | null };
+  /** Instances grouped by level-0 page (or staging tiles, see `staged`). */
   instances: Float32Array;
   runs: { page: number; first: number; count: number }[];
+  /**
+   * Set for canvases with an inherited block. They read composite pages, so
+   * they can't render into one: instance i renders into staging tile i, and
+   * is then copied to level-0 slot `staged[i]`. Runs are then one run on page 0.
+   */
+  staged: TileSlot[] | null;
+}
+
+/**
+ * One depth of the inheritance graph: composite and downsample the canvases
+ * at this depth, after the stages of their sources.
+ */
+export interface CompositeStage {
+  depth: number;
+  composites: CompositeBatch[];
+  downsample: { instances: Float32Array; runs: { page: number; first: number; count: number }[] };
+}
+
+/** An inherited block the compositor draws this frame. */
+interface ActiveBlock {
+  block: InheritedBlock;
+  sourceId: CanvasId;
+  sourceSize: Size;
+  /** The block's bounding box on the inheritor, null if off the canvas. */
+  bounds: Rect | null;
 }
 
 export type DisplayRun =
@@ -61,10 +92,10 @@ export interface Frame {
   readbacks: Readback[];
   /** Per-canvas GPU resources to release. */
   removedCanvases: CanvasId[];
-  composites: CompositeBatch[];
-  downsample: { instances: Float32Array; runs: { page: number; first: number; count: number }[] };
+  /** Composite work in dependency order: sources' stages before their inheritors'. */
+  stages: CompositeStage[];
   display: { tiles: Float32Array; solids: Float32Array; runs: DisplayRun[] };
-  stats: { composited: number; downsampled: number; visibleCanvases: number };
+  stats: { composited: number; downsampled: number; visibleCanvases: number; inheritorTiles: number };
   moreWork: boolean;
 }
 
@@ -291,53 +322,38 @@ export class RenderCore {
     }
     this.waiting = work.slice(done);
 
-    const plannerCanvases: PlannerCanvas[] = this.canvases.map((c) => ({
-      id: c.id,
-      placement: c.placement,
-      paper: c.paper,
-      isPaperOnly: (key) =>
-        c.sources.every((s) => !s.tiles.has(key)) && !(c.liveStroke !== null && c.id === this.strokeCanvas && this.strokeTiles.has(key)),
-      // Every layer tile under the key must be on the GPU (ensure() starts reloads).
-      isReady: (key) => {
-        const ids = tileIdsAt(c, key);
-        return r.ensure(ids) && !ids.some((id) => this.unwritten.has(id));
-      },
-    }));
-    const plan = this.planner.plan(plannerCanvases, view.visible, levelForZoom(view.canvasPxPerDevicePx));
-
-    // Level-0 composites, one batch per canvas.
-    const byCanvas = new Map<CanvasId, { key: TileKey; dst: TileSlot }[]>();
-    for (const job of plan.composites) {
-      const list = byCanvas.get(job.canvasId) ?? [];
-      list.push(job);
-      byCanvas.set(job.canvasId, list);
-    }
-    const composites: CompositeBatch[] = [];
-    for (const [canvasId, jobs] of byCanvas) {
-      const c = this.byId.get(canvasId)!;
-      const upload = { uniforms: packCompositeUniforms(c), lookup: packLookup(c, (id) => r.slotOf(id)) };
-      const sorted = [...jobs].sort((a, b) => a.dst - b.dst); // groups by page
-      const instances = new Float32Array(sorted.length * COMPOSITE_INSTANCE_FLOATS);
-      sorted.forEach((job, i) => {
-        const dst = slotLocation(job.dst);
-        const { tx, ty } = tileCoords(job.key);
-        instances.set([dst.x, dst.y, tx * TILE_SIZE, ty * TILE_SIZE], i * COMPOSITE_INSTANCE_FLOATS);
-      });
-      composites.push({ canvasId, upload, instances, runs: pageRuns(sorted.map((j) => j.dst)) });
-    }
-
-    // Downsamples, grouped by destination preview page.
-    const downs = [...plan.downsamples].sort((a, b) => a.dst - b.dst);
-    const downInstances = new Float32Array(downs.length * DOWNSAMPLE_INSTANCE_FLOATS);
-    downs.forEach((d, i) => {
-      const dst = slotLocation(d.dst);
-      const src = d.src === null ? null : slotLocation(d.src);
-      downInstances.set(
-        [dst.x + d.x, dst.y + d.y, d.size, d.level, src?.x ?? 0, src?.y ?? 0, src ? 1 : 0, src?.page ?? 0, ...d.paper, 0],
-        i * DOWNSAMPLE_INSTANCE_FLOATS,
-      );
+    const viewLevel = levelForZoom(view.canvasPxPerDevicePx);
+    const blocks = this.activeBlocks();
+    const needs = this.requestBlockSources(blocks, view.visible, viewLevel);
+    const arrows = this.propagation.arrows;
+    const plannerCanvases: PlannerCanvas[] = this.canvases.map((c) => {
+      const block = blocks.get(c.id);
+      const bounds = block?.bounds ?? null;
+      /** An inheritor tile waits while the part of the source it shows still has changes to apply. */
+      const sourceSettled = (key: TileKey): boolean => {
+        const rect = block && blockSourceRect(block.block, block.sourceSize, tileRect(key));
+        return !rect || !this.planner.hasPendingChanges(block.sourceId, rect);
+      };
+      return {
+        id: c.id,
+        placement: c.placement,
+        paper: c.paper,
+        depth: arrows.depth(c.id),
+        isPaperOnly: (key) =>
+          !(bounds && intersect(tileRect(key), bounds)) &&
+          c.sources.every((s) => !s.tiles.has(key)) &&
+          !(c.liveStroke !== null && c.id === this.strokeCanvas && this.strokeTiles.has(key)),
+        // Every layer tile under the key must be on the GPU (ensure() starts reloads).
+        isReady: (key) => {
+          const ids = tileIdsAt(c, key);
+          return r.ensure(ids) && !ids.some((id) => this.unwritten.has(id)) && sourceSettled(key);
+        },
+      };
     });
-
+    const plan = this.planner.plan(plannerCanvases, view.visible, viewLevel);
+    const followUps = this.blockFollowUps(plan, blocks, needs);
+    const stages = this.packStages(plan, blocks, needs);
+    for (const [id, keys] of followUps) this.invalidate(id, keys);
     const visibleCanvases = new Set(plan.display.map((q) => q.canvasId)).size;
     // Screen-pixel readbacks go last: they read the finished frame.
     readbacks.sort((a, b) => Number(a.kind === 'screenPixel') - Number(b.kind === 'screenPixel'));
@@ -346,16 +362,145 @@ export class RenderCore {
       prediction: drained.prediction,
       readbacks,
       removedCanvases: this.removed,
-      composites,
-      downsample: { instances: downInstances, runs: pageRuns(downs.map((d) => d.dst)) },
+      stages,
       display: this.packDisplay(plan.display, view, clipPerDevicePx),
-      stats: { composited: plan.composites.length, downsampled: plan.downsamples.length, visibleCanvases },
+      stats: {
+        composited: plan.composites.length,
+        downsampled: plan.downsamples.length,
+        visibleCanvases,
+        inheritorTiles: plan.composites.filter((j) => blocks.has(j.canvasId)).length,
+      },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
-      moreWork: plan.overBudget || r.hasUploads || heldForRoom,
+      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0,
     };
     this.removed = [];
     return frame;
+  }
+
+  // --- inherited blocks ---------------------------------------------------------
+
+  /** Blocks to draw: linked, visible, and with their source in the workspace. */
+  private activeBlocks(): Map<CanvasId, ActiveBlock> {
+    const blocks = new Map<CanvasId, ActiveBlock>();
+    for (const c of this.canvases) {
+      const source = c.inherited?.source.kind === 'linked' ? this.byId.get(c.inherited.source.canvasId) : undefined;
+      if (!c.inherited || !source) continue;
+      const sourceSize = { width: source.placement.width, height: source.placement.height };
+      blocks.set(c.id, {
+        block: c.inherited,
+        sourceId: source.id,
+        sourceSize,
+        bounds: blockBounds(c.inherited, sourceSize, { width: c.placement.width, height: c.placement.height }),
+      });
+    }
+    return blocks;
+  }
+
+  /**
+   * Which part of each canvas's composite is needed this frame, and at which
+   * pyramid level: the visible part at the display level, plus whatever
+   * visible inheritors show of it, through the whole upstream chain. The
+   * sources' parts are requested from the planner, so they are built even
+   * off screen, and kept (not evicted) while needed.
+   */
+  private requestBlockSources(blocks: ReadonlyMap<CanvasId, ActiveBlock>, visible: Rect, viewLevel: number): Map<CanvasId, BlockNeed> {
+    const needs = new Map<CanvasId, BlockNeed>();
+    for (const c of this.canvases) {
+      const r = intersect(c.placement, visible);
+      if (r) needs.set(c.id, { level: viewLevel, rect: { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height } });
+    }
+    // Inheritors before their sources (deepest first), so a source has every need before passing its own up.
+    const arrows = this.propagation.arrows;
+    const order = [...blocks.keys()].sort((a, b) => arrows.depth(b) - arrows.depth(a));
+    for (const id of order) {
+      const need = needs.get(id);
+      const b = blocks.get(id)!;
+      const rect = need && blockSourceRect(b.block, b.sourceSize, need.rect);
+      if (!need || !rect) continue;
+      const level = sampleLevel(b, need);
+      this.planner.request(b.sourceId, level, rect);
+      const previous = needs.get(b.sourceId);
+      needs.set(b.sourceId, previous ? { level: Math.min(previous.level, level), rect: union([previous.rect, rect])! } : { level, rect });
+    }
+    return needs;
+  }
+
+  /**
+   * After planning: inheritor tiles composited from source tiles that are
+   * still being brought up to date are composited again next frame (the
+   * returned keys). Cached tiles composited at lower quality than their
+   * level (because the inheritor was only needed at a coarser level) are
+   * dropped, so they are rebuilt properly when needed.
+   */
+  private blockFollowUps(plan: FramePlan, blocks: ReadonlyMap<CanvasId, ActiveBlock>, needs: ReadonlyMap<CanvasId, BlockNeed>): Map<CanvasId, TileKey[]> {
+    const again = new Map<CanvasId, TileKey[]>();
+    for (const job of plan.composites) {
+      const b = blocks.get(job.canvasId);
+      if (!b) continue;
+      const need = needs.get(job.canvasId);
+      const rect = blockSourceRect(b.block, b.sourceSize, tileRect(job.key));
+      if (rect && this.planner.willUpdate(b.sourceId, sampleLevel(b, need), rect)) {
+        again.set(job.canvasId, [...(again.get(job.canvasId) ?? []), job.key]);
+      }
+      if (coarserBy(need) > 0 && !this.planner.isScratch(job.dst)) this.planner.forgetTile(job.canvasId, 0, job.key);
+    }
+    for (const d of plan.downsamples) {
+      if (blocks.has(d.canvasId) && d.level < coarserBy(needs.get(d.canvasId))) this.planner.forgetTile(d.canvasId, d.level, d.key);
+    }
+    return again;
+  }
+
+  /** Group the plan's work into stages by graph depth and pack it for the GPU. */
+  private packStages(plan: FramePlan, blocks: ReadonlyMap<CanvasId, ActiveBlock>, needs: ReadonlyMap<CanvasId, BlockNeed>): CompositeStage[] {
+    const arrows = this.propagation.arrows;
+    const stages = new Map<number, { composites: CompositeBatch[]; downs: DownsampleJob[] }>();
+    const stage = (id: CanvasId) => {
+      const depth = arrows.depth(id);
+      let s = stages.get(depth);
+      if (!s) stages.set(depth, (s = { composites: [], downs: [] }));
+      return s;
+    };
+
+    const byCanvas = new Map<CanvasId, { key: TileKey; dst: TileSlot }[]>();
+    for (const job of plan.composites) {
+      const list = byCanvas.get(job.canvasId) ?? [];
+      list.push(job);
+      byCanvas.set(job.canvasId, list);
+    }
+    for (const [canvasId, jobs] of byCanvas) {
+      const c = this.byId.get(canvasId)!;
+      const b = blocks.get(canvasId);
+      let blockUniforms: Float32Array | null = null;
+      let blockLookup: Uint32Array | null = null;
+      if (b) {
+        const level = sampleLevel(b, needs.get(canvasId));
+        blockUniforms = packBlockUniforms(b.block, b.sourceSize, level);
+        blockLookup = packBlockLookup(this.compositeTiles(b.sourceId, level, { x: 0, y: 0, ...b.sourceSize }), level);
+      }
+      const upload = {
+        uniforms: packCompositeUniforms(c, blockUniforms),
+        lookup: packLookup(c, (id) => this.residency.slotOf(id)),
+        blockLookup,
+      };
+      if (!b) {
+        const sorted = [...jobs].sort((x, y) => x.dst - y.dst); // groups by page
+        const instances = packCompositeInstances(sorted, (job) => slotLocation(job.dst));
+        stage(canvasId).composites.push({ canvasId, upload, instances, runs: pageRuns(sorted.map((j) => j.dst)), staged: null });
+        continue;
+      }
+      for (let i = 0; i < jobs.length; i += STAGING_TILES) {
+        const chunk = jobs.slice(i, i + STAGING_TILES);
+        const instances = packCompositeInstances(chunk, (_, n) => stagingOrigin(n));
+        const staged = chunk.map((j) => j.dst);
+        stage(canvasId).composites.push({ canvasId, upload, instances, runs: [{ page: 0, first: 0, count: chunk.length }], staged });
+      }
+    }
+    for (const d of plan.downsamples) stage(d.canvasId).downs.push(d);
+
+    return [...stages.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([depth, s]) => ({ depth, composites: s.composites, downsample: packDownsamples(s.downs) }));
   }
 
   /** Tile ids a piece of queued work reads. */
@@ -479,6 +624,59 @@ export class RenderCore {
     for (const o of this.overlay) addSolid(clipQuad(m, o.rect), o.color);
     return { tiles: new Float32Array(tiles), solids: new Float32Array(solids), runs };
   }
+}
+
+/** Which part of a canvas's composite is needed this frame (canvas px), at which pyramid level. */
+interface BlockNeed {
+  level: number;
+  rect: Rect;
+}
+
+/**
+ * How many levels coarser than full quality an inheritor's composites are
+ * this frame: matching the level it is needed at, but never coarser than the
+ * always-kept preview levels (so those are always built at full quality).
+ * A canvas that nothing needs only builds those kept levels.
+ */
+function coarserBy(need: BlockNeed | undefined): number {
+  return Math.min(need?.level ?? PINNED_PREVIEW_LEVEL, PINNED_PREVIEW_LEVEL);
+}
+
+/** The source level an inheritor samples this frame. */
+function sampleLevel(b: ActiveBlock, need: BlockNeed | undefined): number {
+  return blockLevel(b.block.placement.scale, coarserBy(need));
+}
+
+/** Canvas-pixel rect of level-0 tile `key`. */
+function tileRect(key: TileKey): Rect {
+  const { tx, ty } = tileCoords(key);
+  return { x: tx * TILE_SIZE, y: ty * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE };
+}
+
+/** Composite instances: where each tile is written, and its origin in the canvas. */
+function packCompositeInstances<T extends { key: TileKey }>(jobs: readonly T[], target: (job: T, i: number) => { x: number; y: number }): Float32Array {
+  const instances = new Float32Array(jobs.length * COMPOSITE_INSTANCE_FLOATS);
+  jobs.forEach((job, i) => {
+    const dst = target(job, i);
+    const { tx, ty } = tileCoords(job.key);
+    instances.set([dst.x, dst.y, tx * TILE_SIZE, ty * TILE_SIZE], i * COMPOSITE_INSTANCE_FLOATS);
+  });
+  return instances;
+}
+
+/** Downsample instances, grouped by destination preview page. */
+function packDownsamples(jobs: readonly DownsampleJob[]): CompositeStage['downsample'] {
+  const downs = [...jobs].sort((a, b) => a.dst - b.dst);
+  const instances = new Float32Array(downs.length * DOWNSAMPLE_INSTANCE_FLOATS);
+  downs.forEach((d, i) => {
+    const dst = slotLocation(d.dst);
+    const src = d.src === null ? null : slotLocation(d.src);
+    instances.set(
+      [dst.x + d.x, dst.y + d.y, d.size, d.level, src?.x ?? 0, src?.y ?? 0, src ? 1 : 0, src?.page ?? 0, ...d.paper, 0],
+      i * DOWNSAMPLE_INSTANCE_FLOATS,
+    );
+  });
+  return { instances, runs: pageRuns(downs.map((d) => d.dst)) };
 }
 
 /** A parallelogram in clip space: origin, x axis, y axis. */

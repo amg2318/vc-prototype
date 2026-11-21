@@ -1,5 +1,6 @@
-import { MAX_LAYERS, PAGE_SIDE_TILES, TILES_X, TILE_COUNT, TILE_SIZE, THUMBNAIL_SIZE } from '../config';
+import { ATLAS_PAGE_SIZE, MAX_LAYERS, PAGE_SIDE_TILES, TILES_X, TILE_COUNT, TILE_SIZE, THUMBNAIL_SIZE } from '../config';
 import { BLEND_MODE_IDS } from '../document/blend';
+import { BLOCK_LOOKUP_WIDTH, BLOCK_PAGES, BLOCK_VEC4S, STAGING_SIZE } from './blockPacking';
 import { slotLocation, tileCoords, type TileKey, type TileSlot } from '../document/tiles';
 import type { CanvasRenderState, MergeJob, StrokeStyle } from './renderer';
 import type { Size } from './renderCore';
@@ -40,12 +41,16 @@ export function packLookup(
  * Composite uniforms, as vec4s:
  *   [0] paper rgb, 1
  *   [1] live stroke rgb, opacity
- *   [2] source count, live stroke source index (-1 = none), stroke mode (0 paint, 1 erase), 0
+ *   [2] source count, live stroke source index (-1 = none), stroke mode (0 paint, 1 erase),
+ *       render target size (an atlas page, or the staging target for canvases with a block)
  *   [3 + i] source i: opacity, blend mode id, 0, 0
+ *   [BLOCK_UNIFORM_BASE …] the inherited block (see packBlockUniforms; all zero = no block)
  */
-export const COMPOSITE_UNIFORM_VEC4S = 3 + MAX_SOURCES;
+export const BLOCK_UNIFORM_BASE = 3 + MAX_SOURCES;
+export const COMPOSITE_UNIFORM_VEC4S = BLOCK_UNIFORM_BASE + BLOCK_VEC4S;
 
-export function packCompositeUniforms(state: CompositeInput): Float32Array {
+/** `block`: the block's uniforms from packBlockUniforms, if the canvas draws one. */
+export function packCompositeUniforms(state: CompositeInput, block: Float32Array | null = null): Float32Array {
   const u = new Float32Array(COMPOSITE_UNIFORM_VEC4S * 4);
   u.set([...state.paper, 1], 0);
   const live = state.liveStroke;
@@ -55,13 +60,14 @@ export function packCompositeUniforms(state: CompositeInput): Float32Array {
       Math.min(state.sources.length, MAX_SOURCES),
       live ? live.sourceIndex : -1,
       live?.style.mode === 'erase' ? 1 : 0,
-      0,
+      block ? STAGING_SIZE : ATLAS_PAGE_SIZE,
     ],
     8,
   );
   state.sources.slice(0, MAX_SOURCES).forEach((s, i) => {
     u.set([s.opacity, BLEND_MODE_IDS[s.blendMode], 0, 0], 12 + i * 4);
   });
+  if (block) u.set(block, BLOCK_UNIFORM_BASE * 4);
   return u;
 }
 
@@ -142,4 +148,7 @@ export const SHADER_CONSTANTS = {
   MAX_SOURCES,
   THUMBNAIL_PIXELS_PER_TILE,
   EMPTY_CHECK_BLOCK,
+  BLOCK_UNIFORM_BASE,
+  BLOCK_LOOKUP_WIDTH,
+  BLOCK_PAGES,
 };

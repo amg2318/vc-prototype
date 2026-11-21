@@ -490,6 +490,9 @@ async function main(): Promise<void> {
   renderer.onLost = (message) => showBanner(message, true);
   renderer.onNeedsFrame = requestFrame;
 
+  // Development builds only: the workspace in the console, for trying things the UI can't do yet.
+  if (import.meta.env.DEV) Object.assign(window, { workspace });
+
   if (new URLSearchParams(location.search).has('stress')) {
     controls.debugBody.append(
       createStressPanel({

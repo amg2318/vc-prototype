@@ -10,6 +10,12 @@ import { CompressedTileStore } from './tileBackingStore';
 import { PyramidPlanner } from './pyramid';
 import { backgroundGrid, clipQuad, dirtyRect, RenderCore, retileCopies, SOLID_QUAD_FLOATS } from './renderCore';
 import type { CanvasRenderState, ViewState } from './renderer';
+import type { Frame } from './renderCore';
+
+/** Every composite batch of a frame, whatever its stage. */
+function allComposites(frame: Frame) {
+  return frame.stages.flatMap((s) => s.composites);
+}
 
 function canvas(id: string, x: number, painted: number[] = []): CanvasRenderState {
   return {
@@ -79,7 +85,7 @@ describe('RenderCore', () => {
     core.setCanvases([{ ...c, liveStroke: { sourceIndex: 0, style: { color: [0, 0, 0], opacity: 1, mode: 'paint' } } }]);
     core.addDabs([{ x: 10, y: 10, radius: 4, opacity: 1 }, { x: 900, y: 10, radius: 4, opacity: 1 }]);
     const frame = core.buildFrame(view, px);
-    const keys = frame.composites.flatMap((b) => [...b.instances].filter((_, i) => i % 4 === 2 || i % 4 === 3));
+    const keys = allComposites(frame).flatMap((b) => [...b.instances].filter((_, i) => i % 4 === 2 || i % 4 === 3));
     expect(keys).toEqual([0, 0]); // only tile (0,0): its origin is (0, 0)
     expect(frame.ops.map((o) => o.kind)).toEqual(['clearMask', 'dabs']);
   });
@@ -153,12 +159,12 @@ describe('RenderCore with tile residency', () => {
     core.setCanvases([{ ...canvas('a', 0), sources: [{ kind: 'raster', opacity: 1, blendMode: 'normal', tiles: new Map([[0, 102]]) }] }]);
     core.invalidate('a', [0]);
     const waiting = core.buildFrame(view, px);
-    const origins = waiting.composites.flatMap((b) => [...b.instances].filter((_, i) => i % 4 >= 2));
+    const origins = allComposites(waiting).flatMap((b) => [...b.instances].filter((_, i) => i % 4 >= 2));
     expect(origins).not.toContain(0); // tile (0,0) is not recomposited yet
     await settle();
     const ran = core.buildFrame(view, px); // the merge runs first, then tile (0,0) is recomposited
     expect(kinds(ran)).toContain('merge');
-    expect(ran.composites.flatMap((b) => [...b.instances].filter((_, i) => i % 4 >= 2))).toContain(0);
+    expect(allComposites(ran).flatMap((b) => [...b.instances].filter((_, i) => i % 4 >= 2))).toContain(0);
   });
 
   it('puts GPU slots, not tile ids, in the compositor lookup', () => {
@@ -168,7 +174,7 @@ describe('RenderCore with tile residency', () => {
     core.buildFrame(view, px);
     core.setCanvases([{ ...canvas('a', 0), sources: [{ kind: 'raster', opacity: 1, blendMode: 'normal', tiles: new Map([[0, 500]]) }] }]);
     core.invalidate('a', [0]);
-    const batch = core.buildFrame(view, px).composites[0]!;
+    const batch = allComposites(core.buildFrame(view, px))[0]!;
     expect(batch.upload.lookup[0]).toBe(1); // tile 500 is in GPU slot 0 (stored as slot + 1)
   });
 
@@ -290,5 +296,77 @@ describe('RenderCore: composite change events', () => {
       ['b', { x: 0, y: 0, width: 512, height: 512 }],
       ['c', { x: 0, y: 0, width: 512, height: 512 }],
     ]);
+  });
+});
+
+describe('RenderCore: inherited blocks', () => {
+  const size = { width: 512, height: 512 };
+  /** a and b off screen, c on screen; c inherits b, b inherits a (identity blocks). */
+  function offscreenChain(): RenderCore {
+    const core = new RenderCore(new PyramidPlanner(256, 256, 16));
+    core.setCanvases([
+      canvas('a', 5000, [0]),
+      { ...canvas('b', 6000), inherited: createBlock('a', size, size) },
+      { ...canvas('c', 0), inherited: createBlock('b', size, size) },
+    ]);
+    return core;
+  }
+
+  it('keeps the whole upstream chain of a visible inheritor built at the needed level, even off screen', () => {
+    const core = offscreenChain();
+    for (let i = 0; i < 3; i++) core.buildFrame(view, px);
+    // Off-screen canvases normally keep only the always-kept levels (3 and 4).
+    expect(core.planner.cachedTiles('a')[0]).toBe(4);
+    expect(core.planner.cachedTiles('b')[0]).toBe(4);
+  });
+
+  it('composites sources before inheritors, inheritors through the staging target', () => {
+    const core = offscreenChain();
+    const frame = core.buildFrame(view, px);
+    expect(frame.stages.map((s) => s.depth)).toEqual([0, 1, 2]);
+    const [a, b, c] = frame.stages.map((s) => s.composites[0]);
+    expect(a?.staged ?? null).toBeNull();
+    expect(b!.staged).not.toBeNull();
+    expect(c!.upload.blockLookup).not.toBeNull();
+    expect(c!.upload.uniforms[11]).toBe(2048); // renders into the staging target
+    expect(frame.stats.inheritorTiles).toBeGreaterThan(0);
+  });
+
+  it("composites an inheritor again once its source's tiles are up to date", () => {
+    const core = offscreenChain();
+    for (let i = 0; i < 3; i++) core.buildFrame(view, px);
+    // A tiny budget: the source can't rebuild all of a big change in one frame.
+    core.invalidate('a', 'all');
+    let frames = 0;
+    while (core.buildFrame(view, px).moreWork && frames < 20) frames++;
+    expect(frames).toBeLessThan(20); // settles
+    const quiet = core.buildFrame(view, px);
+    expect(quiet.stats.inheritorTiles).toBe(0);
+  });
+
+  it('finishes a big change down a visible chain with a small budget (sources go first)', () => {
+    const big = { width: 1024, height: 1024 };
+    const at = (id: string, x: number, inherits?: string): CanvasRenderState => ({
+      ...canvas(id, x, inherits ? [] : [0]),
+      placement: { x, y: 0, width: 1024, height: 1024 },
+      inherited: inherits ? createBlock(inherits, big, big) : null,
+    });
+    const core = new RenderCore(new PyramidPlanner(256, 256, 4));
+    core.setCanvases([at('a', 0), at('b', 1100, 'a'), at('c', 2200, 'b'), at('d', 3300, 'c')]);
+    const wide: ViewState = { ...view, visible: { x: 0, y: 0, width: 4400, height: 1100 }, canvasPxPerDevicePx: 4 };
+    let frames = 0;
+    while (core.buildFrame(wide, px).moreWork && frames < 200) frames++;
+    core.invalidate('a', 'all');
+    frames = 0;
+    while (core.buildFrame(wide, px).moreWork && frames < 200) frames++;
+    expect(frames).toBeLessThan(200);
+  });
+
+  it('treats tiles under the block as content, not plain paper', () => {
+    const core = new RenderCore(new PyramidPlanner(256, 256, 16));
+    core.setCanvases([canvas('a', 600), { ...canvas('c', 0), inherited: createBlock('a', size, size) }]);
+    const frame = core.buildFrame(view, px);
+    const c = frame.stages.flatMap((s) => s.composites).find((b) => b.canvasId === 'c');
+    expect(c?.instances.length).toBe(4 * 4); // all four tiles of c
   });
 });

@@ -57,6 +57,86 @@ fn fetchSlot(slot: u32, local: vec2i) -> vec4f {
 `;
 }
 
+/** First binding of the inherited block's inputs in the composite pass. */
+export const BLOCK_BINDING = 4 + MAX_ATLAS_PAGES;
+
+/** Composite page textures a block samples, plus `sampleBlockPage(texture, uv)` (bilinear). */
+function blockPages(firstBinding: number): string {
+  const decls = Array.from({ length: C.BLOCK_PAGES }, (_, i) => `@group(0) @binding(${firstBinding + i}) var blockPage${i}: texture_2d<f32>;`).join('\n');
+  const cases = Array.from({ length: C.BLOCK_PAGES }, (_, i) => `    case ${i}u: { return textureSampleLevel(blockPage${i}, blockSampler, uv, 0.0); }`).join('\n');
+  return /* wgsl */ `
+${decls}
+
+fn sampleBlockPage(page: u32, uv: vec2f) -> vec4f {
+  switch page {
+${cases}
+    default: { return vec4f(0.0); }
+  }
+}
+`;
+}
+
+/**
+ * Premultiplied blending of `src` onto `dst` (W3C compositing formulas).
+ * Layers use normal (0) and multiply (1); blocks can also use screen (2)
+ * and overlay (3).
+ */
+const BLEND_WGSL = /* wgsl */ `
+fn blendOnto(dst: vec4f, src: vec4f, mode: i32) -> vec4f {
+  let outA = src.a + dst.a * (1.0 - src.a);
+  if (mode == 1) { // multiply
+    return vec4f(src.rgb * dst.rgb + src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a), outA);
+  }
+  if (mode == 2) { // screen
+    return vec4f(src.rgb + dst.rgb - src.rgb * dst.rgb, outA);
+  }
+  if (mode == 3) { // overlay: multiply the darks, screen the lights (of the backdrop)
+    let cs = src.rgb / max(src.a, 1e-6);
+    let cb = dst.rgb / max(dst.a, 1e-6);
+    let mixed = select(1.0 - 2.0 * (1.0 - cs) * (1.0 - cb), 2.0 * cs * cb, cb <= vec3f(0.5));
+    return vec4f(src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a) + src.a * dst.a * mixed, outA);
+  }
+  return vec4f(src.rgb + dst.rgb * (1.0 - src.a), outA); // normal
+}
+`;
+
+/**
+ * The inherited block (see blockPacking.ts for the uniforms and lookup):
+ * map the pixel into the source, look up which cached composite tile holds
+ * that spot, and sample it bilinearly, staying inside the tile.
+ */
+const BLOCK_WGSL = /* wgsl */ `
+fn blockColor(p: vec2f) -> vec4f {
+  let m = u.v[${C.BLOCK_UNIFORM_BASE}];
+  let t = u.v[${C.BLOCK_UNIFORM_BASE} + 1];
+  let crop = u.v[${C.BLOCK_UNIFORM_BASE} + 2];
+  let s = vec2f(m.x * p.x + m.z * p.y + t.x, m.y * p.x + m.w * p.y + t.y); // source pixel
+  if (any(s < crop.xy) || any(s >= crop.zw)) { return vec4f(0.0); }
+  let cell = vec2i(floor(s / t.z));
+  let index = cell.y * ${C.TILES_X} + cell.x;
+  let e0 = textureLoad(blockLookup, vec2i(index * 2, 0), 0);
+  let e1 = textureLoad(blockLookup, vec2i(index * 2 + 1, 0), 0);
+  if (e0.x == 0u) { return vec4f(vec3f(e1.rgb) / 255.0, 1.0); } // nothing cached: plain paper
+  let texel = vec2f(e0.yz) + (s - vec2f(cell) * t.z) * exp2(-f32(e0.w));
+  let tileOrigin = vec2f(e1.xy);
+  let uv = clamp(texel, tileOrigin + 0.5, tileOrigin + ${C.TILE_SIZE}.0 - 0.5) / ${PAGE};
+  return sampleBlockPage(e0.x - 1u, uv);
+}
+
+fn applyEffects(c: vec4f) -> vec4f {
+  if (c.a <= 0.0) { return c; }
+  var rgb = c.rgb / c.a;
+  let count = i32(u.v[${C.BLOCK_UNIFORM_BASE} + 3].z);
+  for (var i = 0; i < count; i++) {
+    let e = u.v[${C.BLOCK_UNIFORM_BASE} + 4 + i];
+    if (e.x == 1.0) { rgb = vec3f(dot(rgb, vec3f(0.2126, 0.7152, 0.0722))); } // grayscale
+    else if (e.x == 2.0) { rgb = 1.0 - rgb; } // invert
+    else if (e.x == 3.0) { let n = max(e.y, 2.0) - 1.0; rgb = floor(rgb * n + 0.5) / n; } // posterize to e.y levels
+  }
+  return vec4f(rgb * c.a, c.a);
+}
+`;
+
 /** Stamps one round dab per instance into a canvas-sized mask (MAX blending). */
 export const DAB_WGSL = /* wgsl */ `
 ${TO_CLIP}
@@ -155,25 +235,23 @@ struct CompositeUniforms { v: array<vec4f, ${COMPOSITE_UNIFORM_VEC4S}> };
 @group(0) @binding(2) var strokeMask: texture_2d<f32>;
 @group(0) @binding(3) var predictionMask: texture_2d<f32>;
 ${layerPages(4)}
+@group(0) @binding(${BLOCK_BINDING}) var blockLookup: texture_2d<u32>;
+@group(0) @binding(${BLOCK_BINDING + 1}) var blockSampler: sampler;
+${blockPages(BLOCK_BINDING + 2)}
 
 struct VOut { @builtin(position) position: vec4f, @location(0) @interpolate(flat) origins: vec4f };
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @location(0) origins: vec4f) -> VOut {
   var out: VOut;
-  out.position = toClip(origins.xy + quad(vi) * ${C.TILE_SIZE}.0, vec2f(${PAGE}));
+  out.position = toClip(origins.xy + quad(vi) * ${C.TILE_SIZE}.0, vec2f(u.v[2].w)); // page or staging target
   out.origins = origins;
   return out;
 }
 
-fn blendOnto(dst: vec4f, src: vec4f, mode: i32) -> vec4f {
-  let outA = src.a + dst.a * (1.0 - src.a);
-  if (mode == 1) { // multiply (premultiplied W3C formula)
-    let rgb = src.rgb * dst.rgb + src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a);
-    return vec4f(rgb, outA);
-  }
-  return vec4f(src.rgb + dst.rgb * (1.0 - src.a), outA); // normal
-}
+${BLEND_WGSL}
+
+${BLOCK_WGSL}
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
@@ -186,6 +264,12 @@ fn fs(in: VOut) -> @location(0) vec4f {
   let count = i32(info.x);
   let strokeSource = i32(info.y);
   var acc = vec4f(u.v[0].rgb, 1.0);
+
+  // The inherited block, below every layer.
+  let block = u.v[${C.BLOCK_UNIFORM_BASE} + 3];
+  if (u.v[${C.BLOCK_UNIFORM_BASE} + 1].w > 0.5) {
+    acc = blendOnto(acc, applyEffects(blockColor(vec2f(p) + 0.5)) * block.x, i32(block.y));
+  }
 
   for (var i = 0; i < count; i++) {
     let slot1 = textureLoad(lookup, vec2i(key, i), 0).r;
