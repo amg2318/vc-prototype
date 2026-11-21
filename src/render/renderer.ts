@@ -39,6 +39,8 @@ export interface CanvasRenderState {
   placement: Placement;
   /** Non-erasable background colour, below every source. */
   paper: RGB;
+  /** False: no paper, the canvas is transparent (absent = shown). */
+  paperVisible?: boolean;
   /** Visible sources, bottom to top. */
   sources: CompositeSource[];
   /** The stroke being drawn on this canvas, shown on `sources[sourceIndex]` until merged. */
@@ -61,7 +63,10 @@ export interface CanvasRenderState {
  */
 export type CompositeTile =
   | { kind: 'tile'; canvasRect: Rect; pool: 'level0' | 'preview'; page: number; x: number; y: number; texels: Rect }
-  | { kind: 'paper'; canvasRect: Rect; color: [number, number, number] };
+  | { kind: 'paper'; canvasRect: Rect; color: Rgba };
+
+/** A premultiplied colour, 0..1 (paper is [r, g, b, 1], or all zero when hidden). */
+export type Rgba = [number, number, number, number];
 
 export interface OverlayRect {
   rect: Rect;

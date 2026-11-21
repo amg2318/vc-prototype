@@ -155,6 +155,7 @@ export class Workspace {
     copy.x = source.x + source.width + 100;
     copy.y = source.y;
     copy.paper = [...source.paper];
+    copy.paperVisible = source.paperVisible;
     copy.inherited = source.inherited; // still linked to the same source (blocks are never edited in place)
     for (const layer of source.layers) {
       const l = copy.createLayer(layer.name);

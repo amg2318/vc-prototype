@@ -9,6 +9,7 @@ import {
   RenameLayerCommand,
   SetLayerPropsCommand,
   SetPaperCommand,
+  SetPaperVisibleCommand,
   StrokeCommand,
   type TileChange,
 } from '../history/commands';
@@ -223,5 +224,9 @@ export class Editor {
 
   setPaper(color: RGB): void {
     this.execute(new SetPaperCommand(this.doc.id, [...this.doc.paper], [...color]));
+  }
+
+  setPaperVisible(visible: boolean): void {
+    if (visible !== this.doc.paperVisible) this.execute(new SetPaperVisibleCommand(this.doc.id, visible));
   }
 }

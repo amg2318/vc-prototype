@@ -6,6 +6,7 @@ import {
   emptyTilesFromReadback,
   groupByDstPage,
   packCompositeUniforms,
+  paperRgba,
   packLookup,
   packMergeInstance,
 } from './compositePacking';
@@ -74,5 +75,14 @@ describe('emptyTilesFromReadback', () => {
     // A single faint pixel in tile 1's block.
     pixels[(5 * width + EMPTY_CHECK_BLOCK + 9) * 4 + 3] = 1;
     expect(emptyTilesFromReadback(pixels, width, 3)).toEqual([true, false, true]);
+  });
+});
+
+describe('paper visibility', () => {
+  it('is opaque paper when shown and fully transparent when hidden', () => {
+    expect(paperRgba({ paper: [0.5, 0.6, 0.7] })).toEqual([0.5, 0.6, 0.7, 1]);
+    expect(paperRgba({ paper: [0.5, 0.6, 0.7], paperVisible: false })).toEqual([0, 0, 0, 0]);
+    const u = packCompositeUniforms({ paper: [1, 1, 1], paperVisible: false, sources: [], liveStroke: null });
+    expect([...u.slice(0, 4)]).toEqual([0, 0, 0, 0]); // the compositor starts from transparent
   });
 });

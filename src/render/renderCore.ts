@@ -4,7 +4,7 @@ import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type T
 import type { CanvasId } from '../document/paintDocument';
 import { canvasTilesInRect, intersect, union, type Rect } from '../workspace/coords';
 import { Propagation } from './propagation';
-import { packCompositeUniforms, packLookup } from './compositePacking';
+import { packCompositeUniforms, packLookup, paperRgba } from './compositePacking';
 import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
 import { levelForZoom, PyramidPlanner, type DisplayQuad, type DownsampleJob, type FramePlan, type PlannerCanvas } from './pyramid';
 import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUniforms, stagingOrigin, STAGING_TILES } from './blockPacking';
@@ -36,9 +36,11 @@ export interface Size {
 
 /** Per-instance floats of each pass (see the shaders for the meaning). */
 export const COMPOSITE_INSTANCE_FLOATS = 4; // dst x, y in the level-0 page · tile origin x, y in the canvas
-export const DOWNSAMPLE_INSTANCE_FLOATS = 12; // dst x, y, size, level · src x, y, has src, src page · paper rgb, 0
-export const TILE_QUAD_FLOATS = 16; // clip origin, x axis, y axis · texel rect · clamp rect · 0, 0
-export const SOLID_QUAD_FLOATS = 12; // clip origin, x axis, y axis · rgba · 0, 0
+export const DOWNSAMPLE_INSTANCE_FLOATS = 12; // dst x, y, size, level · src x, y, has src, src page · paper rgba (premultiplied)
+export const TILE_QUAD_FLOATS = 16; // clip origin, x axis, y axis · texel rect · clamp rect · checker size, 0
+export const SOLID_QUAD_FLOATS = 12; // clip origin, x axis, y axis · rgba · checker size, 0
+/** Checkerboard square size (device px) under canvases whose paper is hidden. */
+export const CHECKER_DEVICE_PX = 16;
 
 export interface CompositeBatch {
   canvasId: CanvasId;
@@ -337,7 +339,7 @@ export class RenderCore {
       return {
         id: c.id,
         placement: c.placement,
-        paper: c.paper,
+        paper: paperRgba(c),
         depth: arrows.depth(c.id),
         isPaperOnly: (key) =>
           !(bounds && intersect(tileRect(key), bounds)) &&
@@ -588,11 +590,12 @@ export class RenderCore {
     const tiles: number[] = [];
     const solids: number[] = [];
     const runs: DisplayRun[] = [];
-    const addSolid = (corners: ClipQuad, rgba: readonly number[]): void => {
+    /** `checker`: checkerboard square size in device px under the colour (0 = none). */
+    const addSolid = (corners: ClipQuad, rgba: readonly number[], checker = 0): void => {
       const last = runs[runs.length - 1];
       if (last?.kind === 'solid') last.count++;
       else runs.push({ kind: 'solid', first: solids.length / SOLID_QUAD_FLOATS, count: 1 });
-      solids.push(...corners, ...rgba, 0, 0);
+      solids.push(...corners, ...rgba, checker, 0);
     };
     for (const line of backgroundGrid(view.visible, view.canvasPxPerDevicePx)) addSolid(clipQuad(m, line.rect), line.color);
     let previousCanvas: CanvasId | null = null;
@@ -606,8 +609,10 @@ export class RenderCore {
         addSolid(shadow, SHADOW_RGBA);
       }
       const rect = { ...q.canvasRect, x: q.canvasRect.x + c.placement.x, y: q.canvasRect.y + c.placement.y };
+      // A canvas with hidden paper is transparent: show a checkerboard through it.
+      const checker = c.paperVisible === false ? CHECKER_DEVICE_PX : 0;
       if (q.kind === 'paper') {
-        addSolid(clipQuad(m, rect), [...q.color, 1]);
+        addSolid(clipQuad(m, rect), q.color, checker);
         continue;
       }
       const loc = slotLocation(q.slot);
@@ -618,7 +623,7 @@ export class RenderCore {
         ...clipQuad(m, rect),
         loc.x + q.texels.x, loc.y + q.texels.y, loc.x + q.texels.x + q.texels.width, loc.y + q.texels.y + q.texels.height,
         loc.x + 0.5, loc.y + 0.5, loc.x + TILE_SIZE - 0.5, loc.y + TILE_SIZE - 0.5,
-        0, 0,
+        checker, 0,
       );
     }
     for (const o of this.overlay) addSolid(clipQuad(m, o.rect), o.color);
@@ -672,7 +677,7 @@ function packDownsamples(jobs: readonly DownsampleJob[]): CompositeStage['downsa
     const dst = slotLocation(d.dst);
     const src = d.src === null ? null : slotLocation(d.src);
     instances.set(
-      [dst.x + d.x, dst.y + d.y, d.size, d.level, src?.x ?? 0, src?.y ?? 0, src ? 1 : 0, src?.page ?? 0, ...d.paper, 0],
+      [dst.x + d.x, dst.y + d.y, d.size, d.level, src?.x ?? 0, src?.y ?? 0, src ? 1 : 0, src?.page ?? 0, ...d.paper],
       i * DOWNSAMPLE_INSTANCE_FLOATS,
     );
   });

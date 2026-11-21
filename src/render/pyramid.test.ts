@@ -8,7 +8,7 @@ function canvas(id: string, x: number, width: number, height: number, painted: T
   return {
     id,
     placement: { x, y: 0, width, height },
-    paper: [1, 1, 1],
+    paper: [1, 1, 1, 1],
     isPaperOnly: (k) => !set.has(k),
     isReady: ready,
   };

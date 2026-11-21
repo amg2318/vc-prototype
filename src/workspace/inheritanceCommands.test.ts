@@ -179,6 +179,17 @@ describe('inheritance commands', () => {
     expect(b.inherited?.placement).toMatchObject({ x: 150, y: 160 });
   });
 
+  it('hiding and showing the background is undoable, and duplicates keep it', () => {
+    const { ws, a } = setup();
+    ws.editor(a.id).setPaperVisible(false);
+    expect(a.paperVisible).toBe(false);
+    expect(ws.history.nextUndoLabel).toBe('Hide background');
+    expect(ws.duplicateCanvas(a.id).paperVisible).toBe(false);
+    ws.undo();
+    ws.undo();
+    expect(a.paperVisible).toBe(true);
+  });
+
   it('undoing past a create arrow and then making the reverse arrow clears redo (no cycle via redo)', () => {
     const { ws, a, b } = setup();
     ws.connect(b.id, a.id);

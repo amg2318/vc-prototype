@@ -17,6 +17,7 @@ export function buildCanvasState(
     id: doc.id,
     placement: doc.placement,
     paper: [...doc.paper],
+    paperVisible: doc.paperVisible,
     sources: visible.map((l) => ({ kind: 'raster', opacity: l.opacity, blendMode: l.blendMode, tiles: l.tiles })),
     liveStroke: liveStroke && sourceIndex >= 0 ? { sourceIndex, style: liveStroke.style } : null,
     inherited: doc.inherited?.visible && doc.inherited.source.kind === 'linked' ? doc.inherited : null,

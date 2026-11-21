@@ -2,11 +2,16 @@ import { ATLAS_PAGE_SIZE, MAX_LAYERS, PAGE_SIDE_TILES, TILES_X, TILE_COUNT, TILE
 import { BLEND_MODE_IDS } from '../document/blend';
 import { BLOCK_LOOKUP_WIDTH, BLOCK_PAGES, BLOCK_VEC4S, STAGING_SIZE } from './blockPacking';
 import { slotLocation, tileCoords, type TileKey, type TileSlot } from '../document/tiles';
-import type { CanvasRenderState, MergeJob, StrokeStyle } from './renderer';
+import type { CanvasRenderState, MergeJob, Rgba, StrokeStyle } from './renderer';
 import type { Size } from './renderCore';
 
 /** The parts of a canvas's render state the compositor reads. */
-export type CompositeInput = Pick<CanvasRenderState, 'paper' | 'sources' | 'liveStroke'>;
+export type CompositeInput = Pick<CanvasRenderState, 'paper' | 'paperVisible' | 'sources' | 'liveStroke'>;
+
+/** The paper as a premultiplied colour: opaque, or fully transparent when hidden. */
+export function paperRgba(state: Pick<CanvasRenderState, 'paper' | 'paperVisible'>): Rgba {
+  return state.paperVisible === false ? [0, 0, 0, 0] : [...state.paper, 1];
+}
 
 /**
  * Turns compositor and merge inputs into the flat arrays both GPU backends
@@ -39,7 +44,7 @@ export function packLookup(
 
 /**
  * Composite uniforms, as vec4s:
- *   [0] paper rgb, 1
+ *   [0] paper, premultiplied (all zero when hidden)
  *   [1] live stroke rgb, opacity
  *   [2] source count, live stroke source index (-1 = none), stroke mode (0 paint, 1 erase),
  *       render target size (an atlas page, or the staging target for canvases with a block)
@@ -52,7 +57,7 @@ export const COMPOSITE_UNIFORM_VEC4S = BLOCK_UNIFORM_BASE + BLOCK_VEC4S;
 /** `block`: the block's uniforms from packBlockUniforms, if the canvas draws one. */
 export function packCompositeUniforms(state: CompositeInput, block: Float32Array | null = null): Float32Array {
   const u = new Float32Array(COMPOSITE_UNIFORM_VEC4S * 4);
-  u.set([...state.paper, 1], 0);
+  u.set(paperRgba(state), 0);
   const live = state.liveStroke;
   if (live) u.set([...live.style.color, live.style.opacity], 4);
   u.set(

@@ -116,7 +116,7 @@ fn blockColor(p: vec2f) -> vec4f {
   let index = cell.y * ${C.TILES_X} + cell.x;
   let e0 = textureLoad(blockLookup, vec2i(index * 2, 0), 0);
   let e1 = textureLoad(blockLookup, vec2i(index * 2 + 1, 0), 0);
-  if (e0.x == 0u) { return vec4f(vec3f(e1.rgb) / 255.0, 1.0); } // nothing cached: plain paper
+  if (e0.x == 0u) { return vec4f(e1) / 255.0; } // nothing cached: plain paper (premultiplied)
   let texel = vec2f(e0.yz) + (s - vec2f(cell) * t.z) * exp2(-f32(e0.w));
   let tileOrigin = vec2f(e1.xy);
   let uv = clamp(texel, tileOrigin + 0.5, tileOrigin + ${C.TILE_SIZE}.0 - 0.5) / ${PAGE};
@@ -263,7 +263,7 @@ fn fs(in: VOut) -> @location(0) vec4f {
   let info = u.v[2];
   let count = i32(info.x);
   let strokeSource = i32(info.y);
-  var acc = vec4f(u.v[0].rgb, 1.0);
+  var acc = u.v[0]; // paper (transparent when hidden)
 
   // The inherited block, below every layer.
   let block = u.v[${C.BLOCK_UNIFORM_BASE} + 3];
@@ -316,7 +316,7 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) dst: vec4f, @location(1) src:
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-  if (in.src.z < 0.5) { return vec4f(in.paper.rgb, 1.0); }
+  if (in.src.z < 0.5) { return in.paper; }
   let n = 1 << u32(in.dst.w);
   let o = vec2i(in.position.xy) - vec2i(in.dst.xy);
   let base = vec2i(in.src.xy) + o * i32(n);
@@ -330,9 +330,23 @@ fn fs(in: VOut) -> @location(0) vec4f {
 }
 `;
 
+/**
+ * Light/dark checkerboard behind `color` (premultiplied), in squares of
+ * `size` device px; size 0 = no checkerboard. Shows transparent canvases.
+ */
+const CHECKER_WGSL = /* wgsl */ `
+fn overChecker(color: vec4f, pixel: vec2f, size: f32) -> vec4f {
+  if (size <= 0.0) { return color; }
+  let cell = vec2i(floor(pixel / size));
+  let shade = select(0.82, 1.0, ((cell.x + cell.y) & 1) == 0);
+  return color + vec4f(vec3f(shade), 1.0) * (1.0 - color.a);
+}
+`;
+
 /** Draws part of a composite tile as a parallelogram on screen (positions are already in clip space). */
 export const DISPLAY_WGSL = /* wgsl */ `
 ${QUAD}
+${CHECKER_WGSL}
 @group(0) @binding(0) var linearSampler: sampler;
 @group(0) @binding(1) var tiles: texture_2d<f32>;
 
@@ -340,6 +354,7 @@ struct VOut {
   @builtin(position) position: vec4f,
   @location(0) texel: vec2f,
   @location(1) @interpolate(flat) clampRect: vec4f,
+  @location(2) @interpolate(flat) checker: f32,
 };
 
 @vertex
@@ -350,6 +365,7 @@ fn vs(@builtin(vertex_index) vi: u32,
   out.position = vec4f(a.xy + q.x * a.zw + q.y * b.xy, 0.0, 1.0);
   out.texel = mix(b.zw, c.xy, q);
   out.clampRect = vec4f(c.zw, d.xy);
+  out.checker = d.z;
   return out;
 }
 
@@ -357,14 +373,19 @@ fn vs(@builtin(vertex_index) vi: u32,
 fn fs(in: VOut) -> @location(0) vec4f {
   // Stay inside the tile so bilinear filtering never reads a neighbouring atlas tile.
   let t = clamp(in.texel, in.clampRect.xy, in.clampRect.zw);
-  return textureSampleLevel(tiles, linearSampler, t / ${PAGE}, 0.0);
+  return overChecker(textureSampleLevel(tiles, linearSampler, t / ${PAGE}, 0.0), in.position.xy, in.checker);
 }
 `;
 
 /** Flat-coloured parallelogram (premultiplied colour): shadows, paper placeholders, overlays. */
 export const SOLID_WGSL = /* wgsl */ `
 ${QUAD}
-struct VOut { @builtin(position) position: vec4f, @location(0) @interpolate(flat) color: vec4f };
+${CHECKER_WGSL}
+struct VOut {
+  @builtin(position) position: vec4f,
+  @location(0) @interpolate(flat) color: vec4f,
+  @location(1) @interpolate(flat) checker: f32,
+};
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VOut {
@@ -372,12 +393,13 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec
   var out: VOut;
   out.position = vec4f(a.xy + q.x * a.zw + q.y * b.xy, 0.0, 1.0);
   out.color = vec4f(b.zw, c.xy);
+  out.checker = c.z;
   return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-  return in.color;
+  return overChecker(in.color, in.position.xy, in.checker);
 }
 `;
 

@@ -297,6 +297,29 @@ export class ClearLayerCommand implements Command {
 
 // --- canvas ------------------------------------------------------------------
 
+/** Show or hide the paper (background). */
+export class SetPaperVisibleCommand implements Command {
+  readonly label: string;
+  constructor(
+    readonly canvasId: CanvasId,
+    private readonly visible: boolean,
+  ) {
+    this.label = visible ? 'Show background' : 'Hide background';
+  }
+
+  apply(ctx: CommandContext): Change {
+    ctx.canvas(this.canvasId).paperVisible = this.visible;
+    return { canvasId: this.canvasId, tiles: 'all', layers: [], structure: true };
+  }
+
+  revert(ctx: CommandContext): Change {
+    ctx.canvas(this.canvasId).paperVisible = !this.visible;
+    return { canvasId: this.canvasId, tiles: 'all', layers: [], structure: true };
+  }
+
+  dispose(): void {}
+}
+
 export class SetPaperCommand implements Command {
   readonly label = 'Paper colour';
   constructor(

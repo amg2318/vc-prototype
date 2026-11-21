@@ -175,7 +175,7 @@ vec4 blockColor(vec2 p) {
   int index = cell.y * ${C.TILES_X} + cell.x;
   uvec4 e0 = texelFetch(u_blockLookup, ivec2(index * 2, 0), 0);
   uvec4 e1 = texelFetch(u_blockLookup, ivec2(index * 2 + 1, 0), 0);
-  if (e0.x == 0u) return vec4(vec3(e1.rgb) / 255.0, 1.0);
+  if (e0.x == 0u) return vec4(e1) / 255.0; // plain paper (premultiplied)
   vec2 texel = vec2(e0.yz) + (s - vec2(cell) * t.z) * exp2(-float(e0.w));
   vec2 tileOrigin = vec2(e1.xy);
   vec2 uv = clamp(texel, tileOrigin + 0.5, tileOrigin + ${C.TILE_SIZE}.0 - 0.5) / ${PAGE};
@@ -205,7 +205,7 @@ void main() {
   vec4 info = u_v[2];
   int count = int(info.x);
   int strokeSource = int(info.y);
-  vec4 acc = vec4(u_v[0].rgb, 1.0);
+  vec4 acc = u_v[0]; // paper (transparent when hidden)
 
   vec4 block = u_v[${B} + 3];
   if (u_v[${B} + 1].w > 0.5) acc = blendOnto(acc, applyEffects(blockColor(vec2(p) + 0.5)) * block.x, int(block.y));
@@ -248,7 +248,7 @@ flat in vec4 v_src;
 flat in vec4 v_paper;
 out vec4 o_color;
 void main() {
-  if (v_src.z < 0.5) { o_color = vec4(v_paper.rgb, 1.0); return; }
+  if (v_src.z < 0.5) { o_color = v_paper; return; }
   int n = 1 << int(v_dst.w);
   ivec2 o = ivec2(gl_FragCoord.xy) - ivec2(v_dst.xy);
   ivec2 base = ivec2(v_src.xy) + o * n;
@@ -265,46 +265,62 @@ void main() {
 
 // --- display (composite tiles and flat quads, already in clip space) -------------------
 
+/** Light/dark checkerboard behind a premultiplied colour, squares of `size` device px (0 = none). */
+const CHECKER_GLSL = `
+vec4 overChecker(vec4 color, vec2 pixel, float size) {
+  if (size <= 0.0) return color;
+  ivec2 cell = ivec2(floor(pixel / size));
+  float shade = ((cell.x + cell.y) & 1) == 0 ? 1.0 : 0.82;
+  return color + vec4(vec3(shade), 1.0) * (1.0 - color.a);
+}
+`;
+
 export const DISPLAY_VS = `${HEADER}${TO_CLIP}
 layout(location = 0) in vec4 a_a;   // clip origin, x axis
 layout(location = 1) in vec4 a_b;   // y axis, texel rect start
 layout(location = 2) in vec4 a_c;   // texel rect end, clamp min
-layout(location = 3) in vec4 a_d;   // clamp max, 0, 0
+layout(location = 3) in vec4 a_d;   // clamp max, checker size, 0
 out vec2 v_texel;
 flat out vec4 v_clamp;
+flat out float v_checker;
 void main() {
   vec2 q = quadCorner();
   v_texel = mix(a_b.zw, a_c.xy, q);
   v_clamp = vec4(a_c.zw, a_d.xy);
+  v_checker = a_d.z;
   gl_Position = vec4(a_a.xy + q.x * a_a.zw + q.y * a_b.xy, 0.0, 1.0);
 }`;
 
-export const DISPLAY_FS = `${HEADER}
+export const DISPLAY_FS = `${HEADER}${CHECKER_GLSL}
 uniform sampler2D u_tiles;
 in vec2 v_texel;
 flat in vec4 v_clamp;
+flat in float v_checker;
 out vec4 o_color;
 void main() {
   // Stay inside the tile so bilinear filtering never reads a neighbouring atlas tile.
   vec2 t = clamp(v_texel, v_clamp.xy, v_clamp.zw);
-  o_color = texture(u_tiles, t / ${PAGE});
+  o_color = overChecker(texture(u_tiles, t / ${PAGE}), gl_FragCoord.xy, v_checker);
 }`;
 
 export const SOLID_VS = `${HEADER}${TO_CLIP}
 layout(location = 0) in vec4 a_a;   // clip origin, x axis
 layout(location = 1) in vec4 a_b;   // y axis, rgba.rg
-layout(location = 2) in vec4 a_c;   // rgba.ba, 0, 0
+layout(location = 2) in vec4 a_c;   // rgba.ba, checker size, 0
 flat out vec4 v_color;
+flat out float v_checker;
 void main() {
   vec2 q = quadCorner();
   v_color = vec4(a_b.zw, a_c.xy);
+  v_checker = a_c.z;
   gl_Position = vec4(a_a.xy + q.x * a_a.zw + q.y * a_b.xy, 0.0, 1.0);
 }`;
 
-export const SOLID_FS = `${HEADER}
+export const SOLID_FS = `${HEADER}${CHECKER_GLSL}
 flat in vec4 v_color;
+flat in float v_checker;
 out vec4 o_color;
-void main() { o_color = v_color; }`;
+void main() { o_color = overChecker(v_color, gl_FragCoord.xy, v_checker); }`;
 
 // --- readback helpers -----------------------------------------------------------
 

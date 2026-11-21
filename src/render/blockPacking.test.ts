@@ -56,12 +56,12 @@ describe('packBlockLookup', () => {
         { kind: 'tile', canvasRect: { x: 0, y: 0, width: 512, height: 512 }, pool: 'preview', page: 1, x: 256, y: 512, texels: { x: 0, y: 0, width: 256, height: 256 } },
         // Cell (1, 0) drawn from a coarser (level-2) tile: its right half.
         { kind: 'tile', canvasRect: { x: 512, y: 0, width: 512, height: 512 }, pool: 'preview', page: 0, x: 0, y: 0, texels: { x: 128, y: 0, width: 128, height: 128 } },
-        { kind: 'paper', canvasRect: { x: 0, y: 512, width: 512, height: 512 }, color: [1, 0.5, 0] },
+        { kind: 'paper', canvasRect: { x: 0, y: 512, width: 512, height: 512 }, color: [1, 0.5, 0, 1] },
       ],
       1,
     );
     expect([...lookup.slice(0, 8)]).toEqual([3, 256, 512, 1, 256, 512, 0, 0]); // 1 level-0 page, so preview page 1 is texture 2 (+1)
     expect([...lookup.slice(8, 16)]).toEqual([2, 128, 0, 2, 0, 0, 0, 0]);
-    expect([...lookup.slice(16 * 8, 16 * 8 + 8)]).toEqual([0, 0, 0, 0, 255, 128, 0, 0]); // row 1 starts at cell 16
+    expect([...lookup.slice(16 * 8, 16 * 8 + 8)]).toEqual([0, 0, 0, 0, 255, 128, 0, 255]); // row 1 starts at cell 16
   });
 });

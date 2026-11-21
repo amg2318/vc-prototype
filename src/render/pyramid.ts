@@ -6,7 +6,7 @@ import {
   SLOTS_PER_PAGE,
   TILE_SIZE,
 } from '../config';
-import type { RGB } from '../document/blend';
+import type { Rgba } from './renderer';
 import type { CanvasId } from '../document/paintDocument';
 import { tileCoords, tileKey, type TileKey, type TileSlot } from '../document/tiles';
 import { TileStore } from '../document/tileStore';
@@ -81,7 +81,8 @@ function ancestorKey(key0: TileKey, level: number): TileKey {
 export interface PlannerCanvas {
   id: CanvasId;
   placement: Placement;
-  paper: RGB;
+  /** Premultiplied paper colour (transparent when the paper is hidden). */
+  paper: Rgba;
   /** True if no layer has a tile at this level-0 key, so the composite there is plain paper. */
   isPaperOnly(key: TileKey): boolean;
   /** False while a layer tile at this key isn't on the GPU yet; compositing it waits. */
@@ -106,7 +107,7 @@ export interface DownsampleJob {
   /** The preview tile being written (its key at `level`). */
   key: TileKey;
   src: TileSlot | null;
-  paper: RGB;
+  paper: Rgba;
   dst: TileSlot;
   level: number;
   x: number;
@@ -120,7 +121,7 @@ export interface DownsampleJob {
  */
 export type DisplayQuad =
   | { canvasId: CanvasId; canvasRect: Rect; kind: 'tile'; pool: 'level0' | 'preview'; slot: TileSlot; texels: Rect }
-  | { canvasId: CanvasId; canvasRect: Rect; kind: 'paper'; color: RGB };
+  | { canvasId: CanvasId; canvasRect: Rect; kind: 'paper'; color: Rgba };
 
 export interface FramePlan {
   composites: CompositeJob[];
@@ -143,7 +144,7 @@ class CanvasCache {
   /** Level-0 keys whose content changed and hasn't reached the cached tiles yet. */
   readonly pending = new Set<TileKey>();
   /** The canvas's paper colour, for regions drawn as plain paper. */
-  paper: RGB = [1, 1, 1];
+  paper: Rgba = [1, 1, 1, 1];
   constructor(readonly width: number, readonly height: number) {}
 }
 

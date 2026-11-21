@@ -69,6 +69,8 @@ export class PaintDocument {
   layers: RasterLayer[] = [];
   /** Non-erasable background, below every layer. sRGB 0..1. */
   paper: RGB = [1, 1, 1];
+  /** Hidden paper makes the canvas transparent (shown over a checkerboard); inheritors then see only the strokes. */
+  paperVisible = true;
   /** Another canvas's composite shown below every layer (Phase 3), or null. Changed only through commands. */
   inherited: InheritedBlock | null = null;
   private layerCounter = 0;

@@ -86,7 +86,7 @@ export function packBlockUniforms(block: InheritedBlock, sourceSize: Size, level
  *       page texel x, y of the cell's origin, pyramid level of that tile
  *       (a coarser cached tile stands in until the cell's own is built)
  *   [1] the tile's top-left texel x, y (bilinear filtering stays inside it),
- *       or the paper colour as 0–255 rgb
+ *       or the paper colour as premultiplied 0–255 rgba
  * `tiles` comes from `compositeTiles(source, level, whole source)`, which
  * already falls back to coarser cached tiles. All values are whole numbers.
  */
@@ -96,7 +96,7 @@ export function packBlockLookup(tiles: readonly CompositeTile[], level: number, 
   for (const t of tiles) {
     const at = (Math.floor(t.canvasRect.y / span) * TILES_X + Math.floor(t.canvasRect.x / span)) * 8;
     if (t.kind === 'paper') {
-      target.set([0, 0, 0, 0, ...t.color.map((c) => Math.round(c * 255)), 0], at);
+      target.set([0, 0, 0, 0, ...t.color.map((c) => Math.round(c * 255))], at);
       continue;
     }
     const texture = t.pool === 'level0' ? t.page : COMPOSITE_LEVEL0_PAGES + t.page;
