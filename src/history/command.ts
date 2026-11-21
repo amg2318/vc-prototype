@@ -17,6 +17,8 @@ export interface CommandContext {
   forgetCanvas(id: CanvasId): void;
   /** Z-index of a canvas in the workspace (0 = back). */
   canvasIndex(id: CanvasId): number;
+  /** Canvases in the workspace (not deleted), in z-order. */
+  canvases(): readonly PaintDocument[];
 }
 
 /** What changed, so the app knows what to recomposite and refresh. */
