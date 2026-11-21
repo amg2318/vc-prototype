@@ -11,6 +11,8 @@ import type { Workspace } from '../workspace/workspace';
 export class Thumbnails {
   private readonly canvases = new Map<LayerId, HTMLCanvasElement>();
   private readonly timers = new Map<LayerId, number>();
+  /** Called after a thumbnail was redrawn. */
+  onUpdated: (() => void) | null = null;
 
   constructor(
     private readonly workspace: Workspace,
@@ -55,6 +57,7 @@ export class Thumbnails {
         image.data[i + 3] = a;
       }
       canvas.getContext('2d')!.putImageData(image, 0, 0);
+      this.onUpdated?.();
     });
     this.requestFrame(); // readbacks run during the next frame
   }

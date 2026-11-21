@@ -2,6 +2,7 @@ import type { BlendMode } from '../document/blend';
 import type { Editor } from '../document/editor';
 import type { LayerId, RasterLayer } from '../document/paintDocument';
 import { hexToRgb, rgbToHex } from './color';
+import { BlockSection, type BlockSectionActions } from './blockSection';
 import type { Thumbnails } from './thumbnails';
 
 const BLEND_MODES: BlendMode[] = ['normal', 'multiply'];
@@ -25,6 +26,8 @@ export class LayersPanel {
   private opacityOutput: HTMLOutputElement | null = null;
   private blendSelect: HTMLSelectElement | null = null;
   private opacityDrag = 0;
+  /** The inherited block's row, always last in the list (the block is drawn below every layer). */
+  private readonly block: BlockSection;
 
   /** The canvas being edited; set by `update()`. */
   private editor: Editor | null = null;
@@ -33,7 +36,9 @@ export class LayersPanel {
   constructor(
     private readonly activeEditor: () => Editor | null,
     private readonly thumbnails: Thumbnails,
+    blockActions: BlockSectionActions,
   ) {
+    this.block = new BlockSection(thumbnails, blockActions);
     this.element = document.createElement('aside');
     this.element.className = 'layers panel';
 
@@ -90,6 +95,8 @@ export class LayersPanel {
       this.signature = signature;
       this.rebuild();
     }
+    if (this.list.lastElementChild !== this.block.element) this.list.append(this.block.element);
+    this.block.update(editor);
     const active = editor.activeLayer;
     if (this.opacitySlider && document.activeElement !== this.opacitySlider) {
       this.opacitySlider.value = String(active.opacity);

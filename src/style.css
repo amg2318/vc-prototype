@@ -616,3 +616,56 @@ body {
   padding: 8px 8px 8px 16px;
   cursor: default;
 }
+
+/* --- Inherited block (layers panel) ------------------------------------------ */
+
+.block-row {
+  border: 1px dashed rgba(255, 255, 255, 0.25);
+}
+
+.block-summary,
+.block-mode {
+  font-size: 12px;
+  color: var(--panel-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.block-inherit {
+  padding: 6px 10px;
+}
+
+.block-details h3 {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--panel-muted);
+}
+
+.block-grid {
+  display: grid;
+  grid-template-columns: 6.5em 1fr 1fr;
+  align-items: center;
+  gap: 6px;
+}
+
+.block-grid input[type='number'] {
+  min-width: 0;
+  min-height: 36px;
+  font: inherit;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 8px;
+  background: #3a3a3c;
+  color: var(--panel-fg);
+}
+
+.block-details select {
+  min-width: 0;
+}
+
+.panel button.danger {
+  background: #6b2a24;
+}

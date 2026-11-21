@@ -437,7 +437,13 @@ async function main(): Promise<void> {
   const selectTool = (tool: Tool): void => tools.setTool(tool);
   const picker = new ColorPicker((color) => tools.setColor(color));
   picker.setColor(tools.brush.color);
-  const layersPanel = new LayersPanel(active, thumbnails);
+  const layersPanel = new LayersPanel(active, thumbnails, {
+    goToCanvas: (id) => {
+      workspace.setActiveCanvas(id);
+      zoomToCanvas(id);
+    },
+  });
+  thumbnails.onUpdated = () => layersPanel.update(); // the block row's thumbnail is built from layer thumbnails
   const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
     create: createCanvas,
     show: (id) => {
