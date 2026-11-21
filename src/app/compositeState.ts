@@ -3,7 +3,7 @@ import type { CanvasRenderState, StrokeStyle } from '../render/renderer';
 
 /**
  * Builds the compositor input for one canvas: its placement, paper, then
- * visible layers bottom to top. Hidden layers are left out entirely (they
+ * inherited block (if linked and visible), then visible layers bottom to top. Hidden layers are left out entirely (they
  * cost nothing). If a stroke is in progress on a visible layer of this
  * canvas, it is shown on that layer.
  */
@@ -19,5 +19,6 @@ export function buildCanvasState(
     paper: [...doc.paper],
     sources: visible.map((l) => ({ kind: 'raster', opacity: l.opacity, blendMode: l.blendMode, tiles: l.tiles })),
     liveStroke: liveStroke && sourceIndex >= 0 ? { sourceIndex, style: liveStroke.style } : null,
+    inherited: doc.inherited?.visible && doc.inherited.source.kind === 'linked' ? doc.inherited : null,
   };
 }

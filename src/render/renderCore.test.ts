@@ -3,6 +3,7 @@ import { TILE_BYTES } from '../config';
 import { TileStore } from '../document/tileStore';
 import { tileKey } from '../document/tiles';
 import { buildCanvasState } from '../app/compositeState';
+import { createBlock } from '../document/inheritedBlock';
 import { singleCanvasEditor } from '../workspace/workspace';
 import { TileResidency } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
@@ -251,5 +252,43 @@ describe('dirtyRect', () => {
   it('is the whole canvas for "all", and null for nothing', () => {
     expect(dirtyRect('all', size)).toEqual({ x: 0, y: 0, width: 300, height: 600 });
     expect(dirtyRect([], size)).toBeNull();
+  });
+});
+
+describe('RenderCore: composite change events', () => {
+  /** a → b → c, all 512 × 512 with identity blocks. */
+  function chain(): { core: RenderCore; events: [string, unknown][] } {
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64));
+    const block = (source: string) => createBlock(source, { width: 512, height: 512 }, { width: 512, height: 512 });
+    core.setCanvases([canvas('a', 0), { ...canvas('b', 600), inherited: block('a') }, { ...canvas('c', 1200), inherited: block('b') }]);
+    core.buildFrame(view, px);
+    const events: [string, unknown][] = [];
+    core.onCompositeChanged = (id, rect) => events.push([id, rect]);
+    return { core, events };
+  }
+
+  it('sends one merged event per canvas per frame, sources first, down the chain', () => {
+    const { core, events } = chain();
+    core.invalidate('a', [tileKey(0, 0)]);
+    core.invalidate('a', [tileKey(1, 0)]);
+    expect(events).toEqual([]); // nothing until the frame
+    core.buildFrame(view, px);
+    expect(events.map(([id]) => id)).toEqual(['a', 'b', 'c']);
+    expect(events[0]![1]).toEqual({ x: 0, y: 0, width: 512, height: 256 });
+    expect(core.inheritorsUpdated).toBe(2);
+    core.buildFrame(view, px);
+    expect(events).toHaveLength(3); // nothing new
+    expect(core.inheritorsUpdated).toBe(0);
+  });
+
+  it('recomposites a whole inheritor when its block changes', () => {
+    const { core, events } = chain();
+    const b = core.canvas('b')!;
+    core.setCanvases([core.canvas('a')!, { ...b, inherited: { ...b.inherited!, opacity: 0.5 } }, core.canvas('c')!]);
+    core.buildFrame(view, px);
+    expect(events).toEqual([
+      ['b', { x: 0, y: 0, width: 512, height: 512 }],
+      ['c', { x: 0, y: 0, width: 512, height: 512 }],
+    ]);
   });
 });

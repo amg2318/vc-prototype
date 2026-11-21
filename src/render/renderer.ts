@@ -1,5 +1,6 @@
 import type { Dab } from '../brush/dabs';
 import type { BlendMode, RGB } from '../document/blend';
+import type { InheritedBlock } from '../document/inheritedBlock';
 import type { MergeJob, StrokeMode } from '../document/editor';
 import type { CanvasId } from '../document/paintDocument';
 import type { RetileJob } from '../document/retile';
@@ -42,6 +43,12 @@ export interface CanvasRenderState {
   sources: CompositeSource[];
   /** The stroke being drawn on this canvas, shown on `sources[sourceIndex]` until merged. */
   liveStroke: { sourceIndex: number; style: StrokeStyle } | null;
+  /**
+   * The inherited block, drawn below every source: only when it is linked
+   * and visible (null or absent otherwise). Blocks are immutable values, so
+   * a different object means the block changed.
+   */
+  inherited?: InheritedBlock | null;
 }
 
 /** A flat-coloured rectangle in workspace coordinates (premultiplied RGBA), drawn above all canvases. */
@@ -136,10 +143,10 @@ export interface Renderer {
   /** Called when work becomes ready without any app change (e.g. a tile finished reloading). */
   onNeedsFrame: (() => void) | null;
   /**
-   * Phase 3 hook: a canvas's composite changed (or will on the next frame)
-   * inside `dirty`, in canvas pixels. Covers strokes in progress, merges,
-   * undo, layer changes and resizes; it can fire many times per frame while
-   * drawing, so listeners should coalesce.
+   * A canvas's composite changes on this frame inside `dirty`, in canvas
+   * pixels. Covers strokes in progress, merges, undo, layer changes, resizes
+   * and changes inherited through arrows. Fires at most once per canvas per
+   * frame (changes are merged), sources before their inheritors.
    */
   onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null;
   memory(): RendererMemory;

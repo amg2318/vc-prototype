@@ -2,7 +2,8 @@ import { LAYER_GPU_SLOTS, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '.
 import type { TileStore } from '../document/tileStore';
 import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type TileSlot } from '../document/tiles';
 import type { CanvasId } from '../document/paintDocument';
-import { intersect, type Rect } from '../workspace/coords';
+import { canvasTilesInRect, intersect, union, type Rect } from '../workspace/coords';
+import { Propagation } from './propagation';
 import { packCompositeUniforms, packLookup } from './compositePacking';
 import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
 import { levelForZoom, PyramidPlanner, type DisplayQuad, type PlannerCanvas } from './pyramid';
@@ -94,6 +95,12 @@ export class RenderCore {
   private isLive: (id: TileId) => boolean = () => true;
   private removed: CanvasId[] = [];
   private overlay: readonly OverlayRect[] = [];
+  /** Arrows between canvases, and how changes flow down them. */
+  private readonly propagation = new Propagation();
+  /** Composite changes since the last frame, merged per canvas (sent once per frame). */
+  private pendingChanges = new Map<CanvasId, Rect>();
+  /** Inheritors that changed through an arrow in the last frame (for the HUD). */
+  inheritorsUpdated = 0;
   private strokeCanvas: CanvasId | null = null;
   /** Tiles the current stroke has touched: not plain paper even before the stroke is merged. */
   private readonly strokeTiles = new Set<TileKey>();
@@ -134,9 +141,18 @@ export class RenderCore {
   setCanvases(canvases: readonly CanvasRenderState[]): void {
     const next = new Map(canvases.map((c) => [c.id, c]));
     for (const id of this.byId.keys()) if (!next.has(id)) this.removed.push(id);
+    const previous = new Map(this.byId);
     this.canvases = [...canvases];
     this.byId.clear();
     for (const c of canvases) this.byId.set(c.id, c);
+    this.propagation.setCanvases(
+      canvases.map((c) => ({ id: c.id, size: { width: c.placement.width, height: c.placement.height }, inherited: c.inherited ?? null })),
+    );
+    // A new, changed or removed block changes the whole composite.
+    for (const c of canvases) {
+      const before = previous.get(c.id);
+      if (before && (before.inherited ?? null) !== (c.inherited ?? null)) this.invalidate(c.id, 'all');
+    }
   }
 
   canvas(id: CanvasId): CanvasRenderState | undefined {
@@ -148,7 +164,29 @@ export class RenderCore {
     this.planner.invalidate(canvasId, inside);
     const c = this.byId.get(canvasId);
     const dirty = c ? dirtyRect(inside, c.placement) : null;
-    if (dirty) this.onCompositeChanged?.(canvasId, dirty);
+    if (!dirty) return;
+    const pending = this.pendingChanges.get(canvasId);
+    this.pendingChanges.set(canvasId, pending ? union([pending, dirty])! : dirty);
+  }
+
+  /**
+   * Send this frame's composite changes down the arrows: each inheritor
+   * recomposites only the area its sources changed, and every changed canvas
+   * reports one merged event, sources first.
+   */
+  private flushChanges(): void {
+    this.inheritorsUpdated = 0;
+    if (this.pendingChanges.size === 0) return;
+    const changes = this.propagation.propagate(this.pendingChanges);
+    this.pendingChanges = new Map();
+    for (const change of changes) {
+      if (change.inherited) {
+        const c = this.byId.get(change.canvasId)!;
+        this.planner.invalidate(change.canvasId, canvasTilesInRect(c.placement, change.rect));
+        this.inheritorsUpdated++;
+      }
+      this.onCompositeChanged?.(change.canvasId, change.rect);
+    }
   }
 
   setOverlay(rects: readonly OverlayRect[]): void {
@@ -224,6 +262,7 @@ export class RenderCore {
   // --- one frame ----------------------------------------------------------------
 
   buildFrame(view: ViewState, clipPerDevicePx: [number, number]): Frame {
+    this.flushChanges();
     const drained = this.queue.drain();
     const r = this.residency;
     r.beginFrame();
