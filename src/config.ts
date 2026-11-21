@@ -56,6 +56,8 @@ export const PINNED_PREVIEW_LEVEL = 3;
 /** Level-0 composites the planner may add per frame beyond the visible, already-cached tiles. */
 export const COMPOSITES_PER_FRAME = 48;
 
+/** Inheritance chains deeper than this show a warning (they are still allowed). */
+export const INHERITANCE_DEPTH_WARNING = 8;
 /** Undo history may hold this many bytes of tiles that the document no longer uses. */
 export const HISTORY_BUDGET_BYTES = 256 * 1024 * 1024;
 
