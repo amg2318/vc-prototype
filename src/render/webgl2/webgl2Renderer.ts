@@ -30,7 +30,7 @@ import type {
   Dab,
   FrameInfo,
   MergeJob,
-  OverlayRect,
+  OverlayShape,
   CompositeTile,
   Renderer,
   RendererMemory,
@@ -183,8 +183,8 @@ export class WebGL2Renderer implements Renderer {
     this.core.invalidate(canvasId, keys);
   }
 
-  setOverlay(rects: readonly OverlayRect[]): void {
-    this.core.setOverlay(rects);
+  setOverlay(shapes: readonly OverlayShape[]): void {
+    this.core.setOverlay(shapes);
   }
 
   requestComposite(canvasId: CanvasId, level: number, rect: Rect): void {

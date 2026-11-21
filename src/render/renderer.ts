@@ -73,6 +73,17 @@ export interface OverlayRect {
   color: [number, number, number, number];
 }
 
+/** A parallelogram in workspace coordinates (e.g. a rotated stroke of an arrow); premultiplied colour. */
+export interface OverlayQuad {
+  origin: { x: number; y: number };
+  xAxis: { x: number; y: number };
+  yAxis: { x: number; y: number };
+  color: Rgba;
+}
+
+/** What the overlay pass draws, above every canvas. */
+export type OverlayShape = OverlayRect | OverlayQuad;
+
 /** What to draw: the camera as a workspace → clip matrix (double precision) and the zoom level. */
 export interface ViewState {
   /** Column-major 3×3 matrix from workspace coordinates to clip space. */
@@ -168,7 +179,7 @@ export interface Renderer {
   setCanvases(canvases: readonly CanvasRenderState[]): void;
   invalidateTiles(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void;
   /** Rectangles drawn above the canvases (selection, highlights; Phase 3 arrows). */
-  setOverlay(rects: readonly OverlayRect[]): void;
+  setOverlay(shapes: readonly OverlayShape[]): void;
   /**
    * Phase 3: build a canvas's composite over `rect` (canvas px) at pyramid
    * `level` (0 = full resolution, each level halves it) in the next frame,

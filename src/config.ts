@@ -58,6 +58,21 @@ export const COMPOSITES_PER_FRAME = 48;
 
 /** Inheritance chains deeper than this show a warning (they are still allowed). */
 export const INHERITANCE_DEPTH_WARNING = 8;
+
+/**
+ * How arrows between canvases are drawn (sizes in device pixels). The three
+ * opacities follow the spec: low by default, full for the selected arrow and
+ * arrows touching the selected canvas, medium for the rest of its lineage.
+ */
+export const ARROW_STYLE = {
+  opacity: { low: 0.3, medium: 0.6, full: 1 },
+  color: [0.04, 0.52, 1] as const, // accent blue, like the selection outline
+  missingColor: [0.95, 0.35, 0.2] as const, // source deleted: broken stub
+  widthDevicePx: 3,
+  headDevicePx: 14,
+  gapDevicePx: 8,
+  stubDevicePx: 64,
+};
 /** Undo history may hold this many bytes of tiles that the document no longer uses. */
 export const HISTORY_BUDGET_BYTES = 256 * 1024 * 1024;
 

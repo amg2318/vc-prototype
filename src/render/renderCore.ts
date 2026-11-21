@@ -11,7 +11,7 @@ import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUni
 import type { InheritedBlock } from '../document/inheritedBlock';
 import { TileResidency, type Eviction } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
-import type { CanvasRenderState, CompositeTile, Dab, MergeJob, OverlayRect, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
+import type { CanvasRenderState, CompositeTile, Dab, MergeJob, OverlayQuad, OverlayRect, OverlayShape, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
 
 export interface Size {
   width: number;
@@ -139,7 +139,7 @@ export class RenderCore {
   /** Whether a tile id still has references (from the document's TileStore). */
   private isLive: (id: TileId) => boolean = () => true;
   private removed: CanvasId[] = [];
-  private overlay: readonly OverlayRect[] = [];
+  private overlay: readonly OverlayShape[] = [];
   /** Arrows between canvases, and how changes flow down them. */
   private readonly propagation = new Propagation();
   /** Composite changes since the last frame, merged per canvas (sent once per frame). */
@@ -234,8 +234,8 @@ export class RenderCore {
     }
   }
 
-  setOverlay(rects: readonly OverlayRect[]): void {
-    this.overlay = rects;
+  setOverlay(shapes: readonly OverlayShape[]): void {
+    this.overlay = shapes;
   }
 
   requestComposite(canvasId: CanvasId, level: number, rect: Rect): void {
@@ -644,7 +644,7 @@ export class RenderCore {
         checker, 0,
       );
     }
-    for (const o of this.overlay) addSolid(clipQuad(m, o.rect), o.color);
+    for (const o of this.overlay) addSolid('rect' in o ? clipQuad(m, o.rect) : clipParallelogram(m, o), o.color);
     return { tiles: new Float32Array(tiles), solids: new Float32Array(solids), runs };
   }
 }
@@ -715,6 +715,14 @@ export function clipQuad(m: Float64Array, r: Rect): ClipQuad {
   const ox = m[0]! * r.x + m[3]! * r.y + m[6]!;
   const oy = m[1]! * r.x + m[4]! * r.y + m[7]!;
   return [ox, oy, m[0]! * r.width, m[1]! * r.width, m[3]! * r.height, m[4]! * r.height];
+}
+
+/** A workspace parallelogram (origin and two edge vectors) in clip space. */
+export function clipParallelogram(m: Float64Array, q: OverlayQuad): ClipQuad {
+  const ox = m[0]! * q.origin.x + m[3]! * q.origin.y + m[6]!;
+  const oy = m[1]! * q.origin.x + m[4]! * q.origin.y + m[7]!;
+  const axis = (v: { x: number; y: number }) => [m[0]! * v.x + m[3]! * v.y, m[1]! * v.x + m[4]! * v.y];
+  return [ox, oy, ...axis(q.xAxis), ...axis(q.yAxis)] as ClipQuad;
 }
 
 /** Consecutive runs of slots on the same page (slots must be sorted). */

@@ -10,6 +10,7 @@ export interface ToolbarActions {
   toggleLayers(): void;
   toggleCanvases(): void;
   toggleFingerDrawing(): void;
+  toggleArrows(): void;
 }
 
 const TOOLS: { tool: Tool; label: string; key: string }[] = [
@@ -26,6 +27,7 @@ export class Toolbar {
   private readonly undoButton: HTMLButtonElement;
   private readonly redoButton: HTMLButtonElement;
   private readonly fingerButton: HTMLButtonElement;
+  private readonly arrowsButton: HTMLButtonElement;
 
   constructor(actions: ToolbarActions) {
     this.element = document.createElement('nav');
@@ -41,6 +43,7 @@ export class Toolbar {
     this.undoButton = button('↶', actions.undo, 'Undo (two-finger tap, ⌘Z)');
     this.redoButton = button('↷', actions.redo, 'Redo (three-finger tap, ⇧⌘Z)');
     this.fingerButton = button('Finger', actions.toggleFingerDrawing, 'Finger drawing on/off');
+    this.arrowsButton = button('Arrows', actions.toggleArrows, 'Show arrows between canvases');
     this.element.append(
       this.swatch,
       separator(),
@@ -48,12 +51,15 @@ export class Toolbar {
       this.redoButton,
       this.fingerButton,
       separator(),
+      this.arrowsButton,
       button('Canvases', actions.toggleCanvases, 'Canvases'),
       button('Layers', actions.toggleLayers, 'Layers'),
     );
   }
 
-  update(state: { tool: Tool; color: RGB; canUndo: boolean; canRedo: boolean; fingerDraws: boolean }): void {
+  update(state: { tool: Tool; color: RGB; canUndo: boolean; canRedo: boolean; fingerDraws: boolean; showArrows: boolean }): void {
+    this.arrowsButton.classList.toggle('active', state.showArrows);
+    this.arrowsButton.title = state.showArrows ? 'Hide arrows between canvases' : 'Show arrows between canvases';
     // Lit while one finger draws; dim while one finger pans.
     this.fingerButton.classList.toggle('active', state.fingerDraws);
     this.fingerButton.title = state.fingerDraws ? 'One finger draws (tap: finger pans)' : 'One finger pans (tap: finger draws)';

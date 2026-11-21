@@ -24,6 +24,9 @@ import { installShortcuts } from './ui/shortcuts';
 import { CanvasLabels } from './ui/canvasLabels';
 import { CanvasPanel } from './ui/canvasPanel';
 import { HIGHLIGHT, selectionOutline } from './ui/selectionOutline';
+import { arrowEmphasis, arrowLines, arrowQuads } from './ui/arrows';
+import type { CanvasId } from './document/paintDocument';
+import type { OverlayShape } from './render/renderer';
 import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicator';
 import type { Change } from './history/command';
 import { snapPosition } from './workspace/snap';
@@ -59,6 +62,15 @@ async function main(): Promise<void> {
 
   // --- render loop: only runs when something changed ----------------------
 
+  /** Global "show arrows" toggle (toolbar). */
+  let showArrows = true;
+  function arrowOverlay(selectedCanvas: CanvasId | null, canvasPxPerDevicePx: number): OverlayShape[] {
+    const canvases = workspace.canvases.map((c) => ({ id: c.id, placement: c.placement, inherited: c.inherited }));
+    const lines = arrowLines(canvases, canvasPxPerDevicePx);
+    const emphasis = arrowEmphasis(lines, workspace.graph(), selectedCanvas, null);
+    return arrowQuads(lines, emphasis, canvasPxPerDevicePx);
+  }
+
   const MEMORY_SAMPLE_MS = 250;
   let lastMemorySample = -Infinity;
   let framePending = false;
@@ -72,7 +84,8 @@ async function main(): Promise<void> {
     const start = performance.now();
     const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
     const selected = active()?.doc;
-    const overlay = selected ? selectionOutline(selected.placement, canvasPxPerDevicePx) : [];
+    const overlay: OverlayShape[] = showArrows ? arrowOverlay(selected?.id ?? null, canvasPxPerDevicePx) : [];
+    if (selected) overlay.push(...selectionOutline(selected.placement, canvasPxPerDevicePx));
     if (highlighted && workspace.hasCanvas(highlighted)) {
       overlay.push(...selectionOutline(workspace.canvas(highlighted).placement, canvasPxPerDevicePx, HIGHLIGHT));
     }
@@ -455,6 +468,11 @@ async function main(): Promise<void> {
     toggleFingerDrawing: () => {
       input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
     },
+    toggleArrows: () => {
+      showArrows = !showArrows;
+      refreshUi();
+      requestFrame();
+    },
     toggleCanvases: () => {
       canvasPanel.setVisible(!canvasPanel.visible);
       if (canvasPanel.visible) layersPanel.setVisible(false);
@@ -468,6 +486,7 @@ async function main(): Promise<void> {
       canUndo: workspace.history.canUndo,
       canRedo: workspace.history.canRedo,
       fingerDraws: input.fingers.enabled,
+      showArrows,
     });
     layersPanel.update();
     canvasPanel.update();
