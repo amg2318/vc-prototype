@@ -326,13 +326,37 @@ body {
   bottom: calc(env(safe-area-inset-bottom) + 10px);
   left: calc(env(safe-area-inset-left) + 10px);
   margin: 0;
-  padding: 10px 12px;
+  padding: 0 12px 10px;
   font-family: var(--mono);
   font-size: 11px;
   line-height: 1.45;
-  white-space: pre;
-  /* Let pen strokes pass through the HUD onto the canvas. */
+  /* Let pen strokes pass through the HUD onto the canvas (except its toggle). */
   pointer-events: none;
+}
+
+.hud pre {
+  margin: 0;
+  font: inherit;
+  white-space: pre;
+}
+
+.hud.collapsed {
+  padding-bottom: 0;
+}
+
+/* Expand / collapse: a 44 px target. */
+.hud-toggle {
+  display: block;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--panel-fg);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .loupe {
