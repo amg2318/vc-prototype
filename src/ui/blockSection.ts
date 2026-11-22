@@ -11,6 +11,8 @@ const DEFAULT_POSTERIZE_LEVELS = 4;
 export interface BlockSectionActions {
   /** Select a canvas and bring it into view ("Go to source"). */
   goToCanvas(id: CanvasId): void;
+  /** Enter block-transform mode for this canvas's block. */
+  transformBlock(id: CanvasId): void;
 }
 
 /**
@@ -154,7 +156,8 @@ export class BlockSection {
       [span('Scale %'), scale, span('')],
       [span('Rotate °'), rotation, span('')],
     ]);
-    const placementButtons = buttons(flipX, flipY, refit);
+    const transform = button('Transform', () => this.actions.transformBlock(id), 'Move, scale and rotate the block on the canvas');
+    const placementButtons = buttons(transform, flipX, flipY, refit);
     const mode = span(block.placement.mode === 'fit' ? 'Placement: fit inside' : 'Placement: custom');
     mode.className = 'block-mode';
 

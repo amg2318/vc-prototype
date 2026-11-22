@@ -669,3 +669,66 @@ body {
 .panel button.danger {
   background: #6b2a24;
 }
+
+/* --- Block-transform mode ---------------------------------------------------- */
+
+.block-transform {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The block itself: drag to move. */
+.block-transform-body {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: move;
+}
+
+.block-transform-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.block-transform-handle::after {
+  content: '';
+  position: absolute;
+  inset: 15px;
+  border: 2px solid #0a84ff;
+  background: #fff;
+}
+
+.block-transform-handle.corner {
+  cursor: nwse-resize;
+}
+
+.block-transform-handle.rotate {
+  cursor: grab;
+}
+
+.block-transform-handle.rotate::after {
+  border-radius: 50%;
+}
+
+.block-transform-bar {
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 24px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 16px;
+  pointer-events: auto;
+  white-space: nowrap;
+}

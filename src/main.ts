@@ -25,6 +25,7 @@ import { CanvasLabels } from './ui/canvasLabels';
 import { CanvasPanel } from './ui/canvasPanel';
 import { HIGHLIGHT, selectionOutline } from './ui/selectionOutline';
 import { ArrowControls } from './ui/arrowControls';
+import { BlockTransformMode } from './ui/blockTransformMode';
 import type { OverlayShape } from './render/renderer';
 import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicator';
 import type { Change } from './history/command';
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
     const selected = active()?.doc;
     const overlay: OverlayShape[] = arrowControls.overlay(selected?.id ?? null, canvasPxPerDevicePx);
     if (selected) overlay.push(...selectionOutline(selected.placement, canvasPxPerDevicePx));
+    overlay.push(...blockTransform.overlay(canvasPxPerDevicePx));
     if (highlighted && workspace.hasCanvas(highlighted)) {
       overlay.push(...selectionOutline(workspace.canvas(highlighted).placement, canvasPxPerDevicePx, HIGHLIGHT));
     }
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
     }
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
     arrowControls.update(view, cssWidth, cssHeight);
+    blockTransform.update(view);
     if (info.moreWork) requestFrame();
   }
 
@@ -234,6 +237,7 @@ async function main(): Promise<void> {
   const labels = new CanvasLabels(() => view, {
     select: (id) => {
       arrowControls.select(null);
+      if (id !== blockTransform.canvasId) blockTransform.stop();
       workspace.setActiveCanvas(id);
     },
     zoomTo: (id) => {
@@ -242,6 +246,7 @@ async function main(): Promise<void> {
     },
     drag: dragCanvas,
   });
+  const blockTransform = new BlockTransformMode({ workspace, getView: () => view, requestFrame: () => requestFrame() });
   const arrowControls = new ArrowControls({ workspace, getView: () => view, requestFrame: () => requestFrame() });
   workspace.onChange((change) => {
     updateCompositeState();
@@ -333,7 +338,8 @@ async function main(): Promise<void> {
       sampleColor(phase, screen);
       if (phase === 'end') tools.returnFromEyedropper();
     },
-    canDrawAt: (p) => hitTest(workspace.canvases, p) !== null,
+    // Strokes are off in block-transform mode: presses then pan, as on empty space.
+    canDrawAt: (p) => !blockTransform.active && hitTest(workspace.canvases, p) !== null,
     emptySpacePress: (p) => arrowControls.pressAt(p),
     tap(fingers) {
       if (fingers === 2) undo();
@@ -439,9 +445,11 @@ async function main(): Promise<void> {
   picker.setColor(tools.brush.color);
   const layersPanel = new LayersPanel(active, thumbnails, {
     goToCanvas: (id) => {
+      blockTransform.stop();
       workspace.setActiveCanvas(id);
       zoomToCanvas(id);
     },
+    transformBlock: (id) => blockTransform.start(id),
   });
   thumbnails.onUpdated = () => layersPanel.update(); // the block row's thumbnail is built from layer thumbnails
   const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
@@ -532,7 +540,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
   refreshUi();
 
   installShortcuts({
