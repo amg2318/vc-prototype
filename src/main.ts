@@ -1,5 +1,5 @@
 import './style.css';
-import { GESTURES, TILE_BYTES } from './config';
+import { GESTURES, INHERITANCE_DEPTH_WARNING, TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
 import { Controls } from './debug/controls';
@@ -25,6 +25,7 @@ import { CanvasLabels } from './ui/canvasLabels';
 import { CanvasPanel } from './ui/canvasPanel';
 import { HIGHLIGHT, selectionOutline } from './ui/selectionOutline';
 import { ArrowControls } from './ui/arrowControls';
+import { depthWarning } from './ui/arrows';
 import { BlockTransformMode } from './ui/blockTransformMode';
 import type { OverlayShape } from './render/renderer';
 import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicator';
@@ -536,6 +537,16 @@ async function main(): Promise<void> {
     if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
   }
   renderer.onLost = (message) => showBanner(message, true);
+
+  // Soft depth warning: whenever the deepest chain grows past the limit (by an arrow, the source
+  // picker, or undo/redo), say so once. It never blocks.
+  let deepestChain = workspace.graph().maxDepth();
+  workspace.onChange(() => {
+    const deepest = workspace.graph().maxDepth();
+    const warning = depthWarning(deepestChain, deepest, INHERITANCE_DEPTH_WARNING);
+    deepestChain = deepest;
+    if (warning) showBanner(warning);
+  });
   renderer.onNeedsFrame = requestFrame;
 
   // Development builds only: the workspace in the console, for trying things the UI can't do yet.

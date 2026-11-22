@@ -73,6 +73,13 @@ export class InheritanceGraph {
     return this.upstream(id).length;
   }
 
+  /** The deepest chain in the graph: the largest depth of any canvas (0 if there are no arrows). */
+  maxDepth(): number {
+    let deepest = 0;
+    for (const id of this.sources.keys()) deepest = Math.max(deepest, this.depth(id));
+    return deepest;
+  }
+
   /**
    * Would making `target` inherit `source` create a cycle? Walk up from the
    * source through its sources: if the target is reached, the new arrow

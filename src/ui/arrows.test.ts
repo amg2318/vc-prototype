@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createBlock, markSourceMissing } from '../document/inheritedBlock';
 import { InheritanceGraph } from '../workspace/inheritanceGraph';
-import { arrowEmphasis, arrowLines, arrowQuads, edgeToEdge, hitArrow, lineage, type ArrowCanvas } from './arrows';
+import { arrowEmphasis, arrowLines, arrowQuads, depthWarning, edgeToEdge, hitArrow, lineage, type ArrowCanvas } from './arrows';
 
 const SIZE = { width: 100, height: 100 };
 
@@ -92,5 +92,20 @@ describe('lineage', () => {
     expect([...downstream].sort()).toEqual(['c', 'd']);
     expect(lineage(graph, 'a').downstream).toHaveLength(3); // the badge: 3 dependents
     expect(lineage(graph, null)).toEqual({ upstream: [], downstream: [] });
+  });
+});
+
+describe('depthWarning', () => {
+  it('warns once when the deepest chain grows past the limit, never otherwise', () => {
+    expect(depthWarning(7, 8, 8)).toBeNull(); // at the limit
+    expect(depthWarning(8, 9, 8)).toContain('9 levels deep');
+    expect(depthWarning(9, 9, 8)).toBeNull(); // no growth: no repeat
+    expect(depthWarning(10, 9, 8)).toBeNull(); // shrinking
+  });
+
+  it('measures the deepest chain in the graph', () => {
+    const chain = [canvas('a', 0, 0), canvas('b', 200, 0, 'a'), canvas('c', 400, 0, 'b'), canvas('x', 0, 300)];
+    expect(new InheritanceGraph(chain).maxDepth()).toBe(2);
+    expect(new InheritanceGraph([canvas('x', 0, 0)]).maxDepth()).toBe(0);
   });
 });

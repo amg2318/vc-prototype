@@ -83,6 +83,16 @@ export function arrowEmphasis(
 }
 
 /**
+ * The soft depth warning: a message when the deepest chain has just grown
+ * past `limit` (from `before` to `after` levels), otherwise null. It never
+ * blocks anything; long chains just take more frames to update.
+ */
+export function depthWarning(before: number, after: number, limit: number): string | null {
+  if (after <= limit || after <= before) return null;
+  return `A chain of canvases is now ${after} levels deep (the warning is at ${limit}). It still works, but changes take longer to reach the end of long chains.`;
+}
+
+/**
  * The selected canvas's lineage: every canvas it inherits from, directly or
  * through a chain (upstream), and every canvas that inherits from it
  * (downstream: its dependents).
