@@ -246,7 +246,12 @@ async function main(): Promise<void> {
     },
     drag: dragCanvas,
   });
-  const blockTransform = new BlockTransformMode({ workspace, getView: () => view, requestFrame: () => requestFrame() });
+  const blockTransform = new BlockTransformMode({
+    workspace,
+    getView: () => view,
+    requestFrame: () => requestFrame(),
+    modeChanged: () => refreshUi(),
+  });
   const arrowControls = new ArrowControls({ workspace, getView: () => view, requestFrame: () => requestFrame() });
   workspace.onChange((change) => {
     updateCompositeState();
@@ -440,7 +445,10 @@ async function main(): Promise<void> {
     },
   );
 
-  const selectTool = (tool: Tool): void => tools.setTool(tool);
+  const selectTool = (tool: Tool): void => {
+    blockTransform.stop(); // choosing a tool means "I want to draw again"
+    tools.setTool(tool);
+  };
   const picker = new ColorPicker((color) => tools.setColor(color));
   picker.setColor(tools.brush.color);
   const layersPanel = new LayersPanel(active, thumbnails, {
@@ -449,7 +457,8 @@ async function main(): Promise<void> {
       workspace.setActiveCanvas(id);
       zoomToCanvas(id);
     },
-    transformBlock: (id) => blockTransform.start(id),
+    transformBlock: (id) => blockTransform.toggle(id),
+    isTransforming: (id) => blockTransform.canvasId === id,
   });
   thumbnails.onUpdated = () => layersPanel.update(); // the block row's thumbnail is built from layer thumbnails
   const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
@@ -540,7 +549,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({

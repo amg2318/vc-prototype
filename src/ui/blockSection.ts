@@ -11,8 +11,9 @@ const DEFAULT_POSTERIZE_LEVELS = 4;
 export interface BlockSectionActions {
   /** Select a canvas and bring it into view ("Go to source"). */
   goToCanvas(id: CanvasId): void;
-  /** Enter block-transform mode for this canvas's block. */
+  /** Enter block-transform mode for this canvas's block (or leave it). */
   transformBlock(id: CanvasId): void;
+  isTransforming(id: CanvasId): boolean;
 }
 
 /**
@@ -156,7 +157,8 @@ export class BlockSection {
       [span('Scale %'), scale, span('')],
       [span('Rotate °'), rotation, span('')],
     ]);
-    const transform = button('Transform', () => this.actions.transformBlock(id), 'Move, scale and rotate the block on the canvas');
+    const transform = button('Transform', () => this.actions.transformBlock(id), 'Move, scale and rotate the block on the canvas (tap again to finish)');
+    transform.dataset.field = 'transform';
     const placementButtons = buttons(transform, flipX, flipY, refit);
     const mode = span(block.placement.mode === 'fit' ? 'Placement: fit inside' : 'Placement: custom');
     mode.className = 'block-mode';
@@ -274,6 +276,12 @@ export class BlockSection {
     };
     for (const [key, field] of this.fields) {
       if (document.activeElement !== field && values[key] !== undefined) field.value = values[key];
+    }
+    const transform = this.element.querySelector<HTMLButtonElement>('button[data-field="transform"]');
+    if (transform && this.editor) {
+      const on = this.actions.isTransforming(this.editor.doc.id);
+      transform.textContent = on ? 'Done transforming' : 'Transform';
+      transform.classList.toggle('active', on);
     }
     const out = this.element.querySelector<HTMLOutputElement>('output[data-field="opacityText"]');
     if (out) out.textContent = `${Math.round(block.opacity * 100)}%`;

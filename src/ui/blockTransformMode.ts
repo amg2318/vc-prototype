@@ -9,6 +9,8 @@ export interface BlockTransformHost {
   workspace: Workspace;
   getView(): ViewTransform;
   requestFrame(): void;
+  /** The mode turned on or off (e.g. to relabel the panel's Transform button). */
+  modeChanged(): void;
 }
 
 /** Handle targets: 44 pt. The rotate handle sits this far (CSS px) above the top edge. */
@@ -29,13 +31,18 @@ const OUTLINE: Rgba = [0.04, 0.52, 1, 1];
  * Each drag is one undo step. Done (or Escape / Enter) leaves the mode.
  */
 export class BlockTransformMode {
+  /** The handles, drawn over the canvases (below the panels). */
   readonly element = document.createElement('div');
+  /**
+   * The Flip / Done bar. A separate element so the app can put it above
+   * every panel and the HUD: leaving the mode must always be reachable.
+   */
+  readonly bar = document.createElement('div');
   /** The canvas whose block is being transformed (null: mode off). */
   private target: CanvasId | null = null;
   private readonly body = document.createElement('div');
   private readonly corners = [0, 1, 2, 3].map(() => handle('corner', 'Drag to scale'));
   private readonly rotator = handle('rotate', 'Drag to rotate');
-  private readonly bar = document.createElement('div');
   private drag: (TransformDrag & { pointerId: number }) | null = null;
   /** Distinguishes successive drags, so each one merges into its own undo step. */
   private dragCount = 0;
@@ -52,7 +59,8 @@ export class BlockTransformMode {
       button('Flip V', () => this.flip('flipY')),
       button('Done', () => this.stop()),
     );
-    this.element.append(this.body, ...this.corners, this.rotator, this.bar);
+    this.bar.hidden = true;
+    this.element.append(this.body, ...this.corners, this.rotator);
     this.listen(this.body, 'move');
     for (const c of this.corners) this.listen(c, 'scale');
     this.listen(this.rotator, 'rotate');
@@ -69,10 +77,17 @@ export class BlockTransformMode {
     return this.target;
   }
 
+  /** Turn the mode on for `canvasId`, or off if it is already on for it. */
+  toggle(canvasId: CanvasId): void {
+    if (this.target === canvasId) this.stop();
+    else this.start(canvasId);
+  }
+
   start(canvasId: CanvasId): void {
     if (!this.host.workspace.canvas(canvasId).inherited) return;
     this.target = canvasId;
     this.host.requestFrame();
+    this.host.modeChanged();
   }
 
   stop(): void {
@@ -80,6 +95,7 @@ export class BlockTransformMode {
     this.target = null;
     this.drag = null;
     this.host.requestFrame();
+    this.host.modeChanged();
   }
 
   /** The block's outline and the line to the rotate handle, drawn in the overlay pass. */
@@ -102,6 +118,7 @@ export class BlockTransformMode {
     const state = this.state();
     if (this.target !== null && !state) this.stop();
     this.element.hidden = !state;
+    this.bar.hidden = !state;
     if (!state) return;
     const { frame, origin } = state;
     const screen = (p: Point): Point => docToScreen(view, { x: p.x + origin.x, y: p.y + origin.y });
