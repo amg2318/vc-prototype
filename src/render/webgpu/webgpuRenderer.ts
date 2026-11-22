@@ -44,6 +44,7 @@ import type {
 import {
   COMPOSITE_INSTANCE_FLOATS,
   DOWNSAMPLE_INSTANCE_FLOATS,
+  inheritanceInfo,
   RenderCore,
   SOLID_QUAD_FLOATS,
   TILE_QUAD_FLOATS,
@@ -440,7 +441,7 @@ export class WebGPURenderer implements Renderer {
   }
 
   render(view: ViewState): FrameInfo {
-    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false };
+    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false, inheritorsUpdated: 0, staleInheritors: 0, propagation: [] };
     if (this.lost) return idle;
     const device = this.device;
     const canvas = this.context.canvas as HTMLCanvasElement;
@@ -490,6 +491,7 @@ export class WebGPURenderer implements Renderer {
     const gpuDone = device.queue.onSubmittedWorkDone().then(() => performance.now());
     return {
       submittedAt,
+      ...inheritanceInfo(frame.stats, submittedAt),
       gpuDone,
       compositedTiles: frame.stats.composited,
       downsampledTiles: frame.stats.downsampled,

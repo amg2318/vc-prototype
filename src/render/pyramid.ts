@@ -163,6 +163,13 @@ export class PyramidPlanner {
   /** Regions asked for through `request()` since the last plan. */
   private requests: { canvasId: CanvasId; level: number; rect: Rect }[] = [];
   private frame = 0;
+  /**
+   * Canvases that were refused work because the frame's budget ran out, and
+   * the frame that first happened. They go first among canvases of the same
+   * depth next frame, so with many inheritors (a large fan-out) none of them
+   * waits for the end of the stroke while others update every frame.
+   */
+  private starvedSince = new Map<CanvasId, number>();
 
   constructor(
     level0Capacity = COMPOSITE_LEVEL0_PAGES * SLOTS_PER_PAGE,
@@ -269,6 +276,8 @@ export class PyramidPlanner {
     const out: FramePlan = { composites: [], downsamples: [], display: [], overBudget: false };
     let budget = this.budgetPerFrame;
     let scratchUsed = 0;
+    /** Canvases refused work this frame because the budget ran out. */
+    const starved = new Set<CanvasId>();
     this.syncCaches(canvases);
 
     const localVisible = (c: PlannerCanvas): Rect | null => {
@@ -276,9 +285,11 @@ export class PyramidPlanner {
       return r && { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height };
     };
     const onScreen = canvases.filter((c) => localVisible(c) !== null);
-    // On-screen canvases front to back, then the rest; sources before the canvases that inherit them.
+    // On-screen canvases front to back, then the rest; sources before the canvases that inherit them,
+    // and among the same depth, canvases the budget has made wait longest first.
+    const waited = (c: PlannerCanvas): number => this.starvedSince.get(c.id) ?? Infinity;
     const priority = [...[...onScreen].reverse(), ...canvases.filter((c) => !onScreen.includes(c))].sort(
-      (a, b) => (a.depth ?? 0) - (b.depth ?? 0),
+      (a, b) => (a.depth ?? 0) - (b.depth ?? 0) || waited(a) - waited(b),
     );
 
     // 1. The tiles each canvas needs: the display level while on screen, and the pinned levels always.
@@ -318,6 +329,7 @@ export class PyramidPlanner {
       if (c.isPaperOnly(key)) return null;
       if (budget <= 0 || scratchUsed >= this.scratch.length) {
         out.overBudget = true;
+        starved.add(c.id);
         return undefined;
       }
       budget--;
@@ -368,6 +380,7 @@ export class PyramidPlanner {
         if (!c.isReady(key0)) continue;
         if (budget <= 0) {
           out.overBudget = true;
+          starved.add(c.id);
           continue;
         }
         budget--;
@@ -383,6 +396,11 @@ export class PyramidPlanner {
         tile.todo.shift();
       }
       if (tile.todo.length === 0) tile.todo = null;
+    }
+
+    for (const c of canvases) {
+      if (!starved.has(c.id)) this.starvedSince.delete(c.id);
+      else if (!this.starvedSince.has(c.id)) this.starvedSince.set(c.id, this.frame);
     }
 
     // 4. Display, back to front: the wanted tile, else a coarser cached one, else paper.

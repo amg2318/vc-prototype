@@ -41,6 +41,11 @@ export interface FrameRecord {
   /** Running totals of layer tiles moved off and back onto the GPU. */
   evictions: number;
   reloads: number;
+  /** Phase 3: inheritors changed through an arrow, and inheritors with changes not yet shown. */
+  inheritorsUpdated: number;
+  staleInheritors: number;
+  /** Phase 3: inheritors caught up this frame: chain depth and source change → submit (ms). */
+  propagation: { depth: number; ms: number }[];
 }
 
 /** Tile residency over the last second: how busy eviction is, and how long reloads take. */
@@ -75,6 +80,11 @@ export interface MetricsSummary {
   compositeGpu: Stats;
   /** Tiles recomposited per frame that recomposited anything. */
   compositedTiles: Stats;
+  /**
+   * Phase 3: source change → end of chain, per frame that caught inheritors
+   * up: the time of the deepest inheritor caught up in that frame.
+   */
+  chainEnd: Stats;
 }
 
 /** Memory use at one moment (logged a few times a second while frames render). */
@@ -140,6 +150,11 @@ export class Metrics {
   /** Every reload latency (ms) since the last reset, in order. */
   readonly reloadTimes: number[] = [];
   readonly memory: MemorySample[] = [];
+  /**
+   * Results of scripted stress runs (Phase 3 chains and fan-outs). Kept
+   * across reset(), since each run resets the stats before it starts.
+   */
+  readonly stressRuns: object[] = [];
 
   noteMemory(sample: MemorySample): void {
     if (this.memory.length < MAX_RECORDS) this.memory.push(sample);
@@ -210,6 +225,9 @@ export class Metrics {
       visibleCanvases: info.visibleCanvases,
       evictions: residency.evictions,
       reloads: residency.reloads,
+      inheritorsUpdated: info.inheritorsUpdated,
+      staleInheritors: info.staleInheritors,
+      propagation: info.propagation,
     };
     if (this.frames.length < MAX_RECORDS) this.frames.push(record);
 
@@ -253,6 +271,7 @@ export class Metrics {
       compositeCpu: computeStats(compositeFrames.map((f) => f.compositeCpuMs)),
       compositeGpu: computeStats(compositeFrames.map((f) => f.compositeGpuMs)),
       compositedTiles: computeStats(compositeFrames.map((f) => f.compositedTiles)),
+      chainEnd: computeStats(frames.filter((f) => f.propagation.length > 0).map((f) => deepest(f.propagation).ms)),
     };
   }
 
@@ -269,6 +288,16 @@ export class Metrics {
     };
   }
 
+  /** Propagation time (source change → submit) by chain depth, over frames with t >= since. */
+  propagationByDepth(since = -Infinity): Map<number, Stats> {
+    const byDepth = new Map<number, number[]>();
+    for (const f of this.frames) {
+      if (f.t < since) continue;
+      for (const p of f.propagation) byDepth.set(p.depth, [...(byDepth.get(p.depth) ?? []), p.ms]);
+    }
+    return new Map([...byDepth].sort((a, b) => a[0] - b[0]).map(([depth, ms]) => [depth, computeStats(ms)]));
+  }
+
   reset(): void {
     this.frames.length = 0;
     this.reloadTimes.length = 0;
@@ -278,4 +307,9 @@ export class Metrics {
     this.recentEventTimes = [];
     this.lastFrameTime = null;
   }
+}
+
+/** The deepest entry (ties: the slowest). */
+function deepest(entries: readonly { depth: number; ms: number }[]): { depth: number; ms: number } {
+  return entries.reduce((a, b) => (b.depth > a.depth || (b.depth === a.depth && b.ms > a.ms) ? b : a));
 }

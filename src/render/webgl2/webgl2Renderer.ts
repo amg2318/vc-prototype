@@ -39,7 +39,7 @@ import type {
   StrokeStyle,
   ViewState,
 } from '../renderer';
-import { RenderCore, type Frame } from '../renderCore';
+import { inheritanceInfo, RenderCore, type Frame } from '../renderCore';
 import { WORKSPACE_BACKGROUND } from '../workspace';
 import * as S from './shaders';
 
@@ -230,7 +230,7 @@ export class WebGL2Renderer implements Renderer {
 
   render(view: ViewState): FrameInfo {
     const gl = this.gl;
-    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false };
+    const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false, inheritorsUpdated: 0, staleInheritors: 0, propagation: [] };
     if (this.lost) return idle;
     const compositeStart = performance.now();
     const frame = this.core.buildFrame(view, [2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight]);
@@ -245,8 +245,10 @@ export class WebGL2Renderer implements Renderer {
     // Readbacks run after the display pass, so a screen pixel shows this frame.
     for (const r of frame.readbacks) this.runReadback(r);
     gl.flush();
+    const submittedAt = performance.now();
     return {
-      submittedAt: performance.now(),
+      submittedAt,
+      ...inheritanceInfo(frame.stats, submittedAt),
       gpuDone: null,
       compositedTiles: frame.stats.composited,
       downsampledTiles: frame.stats.downsampled,

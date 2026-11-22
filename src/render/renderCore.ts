@@ -11,7 +11,7 @@ import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUni
 import type { InheritedBlock } from '../document/inheritedBlock';
 import { TileResidency, type Eviction } from './residency';
 import { CompressedTileStore } from './tileBackingStore';
-import type { CanvasRenderState, CompositeTile, Dab, MergeJob, OverlayQuad, OverlayRect, OverlayShape, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
+import type { CanvasRenderState, FrameInfo, CompositeTile, Dab, MergeJob, OverlayQuad, OverlayRect, OverlayShape, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
 
 export interface Size {
   width: number;
@@ -109,6 +109,8 @@ export interface Frame {
     staleInheritors: number;
     /** Deepest inheritance chain in the workspace. */
     maxDepth: number;
+    /** Inheritors this frame brings fully up to date with their sources. */
+    caughtUp: CaughtUp[];
   };
   moreWork: boolean;
 }
@@ -144,6 +146,14 @@ export class RenderCore {
   private readonly propagation = new Propagation();
   /** Composite changes since the last frame, merged per canvas (sent once per frame). */
   private pendingChanges = new Map<CanvasId, Rect>();
+  /** When the oldest of this frame's pending changes arrived (performance.now()). */
+  private pendingSince: number | null = null;
+  /**
+   * Inheritors with changes from upstream not yet fully composited: when the
+   * change that reached them first arrived. For the "change → end of chain"
+   * measurement.
+   */
+  private chainPending = new Map<CanvasId, number>();
   /** Inheritors that changed through an arrow in the last frame (for the HUD). */
   inheritorsUpdated = 0;
   private strokeCanvas: CanvasId | null = null;
@@ -212,6 +222,7 @@ export class RenderCore {
     if (!dirty) return;
     const pending = this.pendingChanges.get(canvasId);
     this.pendingChanges.set(canvasId, pending ? union([pending, dirty])! : dirty);
+    this.pendingSince ??= performance.now();
   }
 
   /**
@@ -223,15 +234,33 @@ export class RenderCore {
     this.inheritorsUpdated = 0;
     if (this.pendingChanges.size === 0) return;
     const changes = this.propagation.propagate(this.pendingChanges);
+    const since = this.pendingSince ?? performance.now();
     this.pendingChanges = new Map();
+    this.pendingSince = null;
     for (const change of changes) {
       if (change.inherited) {
         const c = this.byId.get(change.canvasId)!;
         this.planner.invalidate(change.canvasId, canvasTilesInRect(c.placement, change.rect));
         this.inheritorsUpdated++;
+        this.chainPending.set(change.canvasId, Math.min(this.chainPending.get(change.canvasId) ?? Infinity, since));
       }
       this.onCompositeChanged?.(change.canvasId, change.rect);
     }
+  }
+
+  /**
+   * Inheritors whose upstream changes are all composited by this frame's
+   * work, with their chain depth and when the change arrived.
+   */
+  private takeCaughtUp(arrows: { depth(id: CanvasId): number }): CaughtUp[] {
+    const done: CaughtUp[] = [];
+    for (const [id, since] of this.chainPending) {
+      const c = this.byId.get(id);
+      if (c && this.planner.hasPendingChanges(id, wholeCanvas(c))) continue;
+      this.chainPending.delete(id);
+      if (c) done.push({ canvasId: id, depth: arrows.depth(id), since });
+    }
+    return done;
   }
 
   setOverlay(shapes: readonly OverlayShape[]): void {
@@ -389,6 +418,7 @@ export class RenderCore {
         inheritorsUpdated: this.inheritorsUpdated,
         staleInheritors: [...blocks.keys()].filter((id) => this.planner.hasPendingChanges(id, wholeCanvas(this.byId.get(id)!))).length,
         maxDepth: Math.max(0, ...[...blocks.keys()].map((id) => arrows.depth(id))),
+        caughtUp: this.takeCaughtUp(arrows),
       },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
@@ -668,6 +698,25 @@ function coarserBy(need: BlockNeed | undefined): number {
 /** The source level an inheritor samples this frame. */
 function sampleLevel(b: ActiveBlock, need: BlockNeed | undefined): number {
   return blockLevel(b.block.placement.scale, coarserBy(need));
+}
+
+/** An inheritor brought up to date: its chain depth and when the change it shows first arrived. */
+export interface CaughtUp {
+  canvasId: CanvasId;
+  depth: number;
+  since: number;
+}
+
+/**
+ * Inheritance numbers for a frame's FrameInfo. `submittedAt` is when the
+ * frame's GPU work was submitted, which ends each propagation time.
+ */
+export function inheritanceInfo(stats: Frame['stats'], submittedAt: number): Pick<FrameInfo, 'inheritorsUpdated' | 'staleInheritors' | 'propagation'> {
+  return {
+    inheritorsUpdated: stats.inheritorsUpdated,
+    staleInheritors: stats.staleInheritors,
+    propagation: stats.caughtUp.map((c) => ({ depth: c.depth, ms: submittedAt - c.since })),
+  };
 }
 
 /** A canvas's own pixels, as a rect. */

@@ -64,6 +64,7 @@ export class Hud {
       `in→gpu done ms ${ms(s.inputToGpuDone)}`,
       `composite      ${ms(s.compositedTiles).replace(/\.0/g, '')} tiles · cpu ${ms(s.compositeCpu)} · gpu ${ms(s.compositeGpu)} ms`,
       `strokes ${c.strokes}  cancelled ${c.cancelledStrokes}  palm-rejected ${c.palmRejections}`,
+      `chain ms       ${ms(s.chainEnd)}   (source change → end of chain submitted)`,
       ...this.extraLines(),
       `Estimated software latency only — not on-glass latency.`,
     ];

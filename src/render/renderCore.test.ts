@@ -386,6 +386,21 @@ describe('RenderCore: inherited blocks', () => {
     expect(after.stats.staleInheritors).toBe(0);
   });
 
+  it('reports each inheritor once it has caught up with a change, with its depth', () => {
+    const core = new RenderCore(new PyramidPlanner(256, 256, 16));
+    core.setCanvases([
+      canvas('a', 0),
+      { ...canvas('b', 520), inherited: createBlock('a', size, size) },
+      { ...canvas('c', 0), placement: { x: 0, y: 520, width: 512, height: 512 }, inherited: createBlock('b', size, size) },
+    ]);
+    for (let i = 0; i < 4; i++) core.buildFrame(view, px);
+    core.invalidate('a', [0]);
+    const caught = [];
+    for (let i = 0; i < 6; i++) caught.push(...core.buildFrame(view, px).stats.caughtUp);
+    expect(caught.map((c) => [c.canvasId, c.depth])).toEqual([['b', 1], ['c', 2]]);
+    expect(caught.every((c) => c.since <= performance.now())).toBe(true);
+  });
+
   it('does not defer an off-screen source that a visible inheritor shows', () => {
     const core = offscreenChain();
     for (let i = 0; i < 3; i++) core.buildFrame(view, px);

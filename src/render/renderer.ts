@@ -111,6 +111,16 @@ export interface FrameInfo {
   compositeGpuMs?: Promise<number>;
   /** True if more work is ready for the next frame (draw another one). */
   moreWork: boolean;
+  /** Phase 3: inheritors that changed through an arrow this frame. */
+  inheritorsUpdated: number;
+  /** Phase 3: inheritors with changes not yet shown (off screen during a stroke, or over budget). */
+  staleInheritors: number;
+  /**
+   * Phase 3: inheritors this frame brought fully up to date, with their
+   * chain depth and the time from the source change reaching the renderer
+   * to this frame's GPU work being submitted.
+   */
+  propagation: { depth: number; ms: number }[];
 }
 
 /** 0..255 per channel. */

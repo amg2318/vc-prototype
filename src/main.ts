@@ -398,6 +398,14 @@ async function main(): Promise<void> {
   const mb = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MB`;
   const perSecond = (v: number | null): string => (v === null ? '—' : v.toFixed(0));
   const ms = (v: number | null): string => (v === null ? '—' : v.toFixed(1));
+  /** Phase 3: the active canvas's chain depth, and inheritors updated and stale in the last frame. */
+  function inheritanceLine(): string {
+    const id = workspace.activeCanvasId;
+    const depth = id === null ? '—' : String(workspace.graph().depth(id));
+    const last = metrics.frames.at(-1);
+    return `inheritance    depth ${depth} · updated ${last?.inheritorsUpdated ?? '—'} · stale ${last?.staleInheritors ?? '—'}  (last frame)`;
+  }
+
   const hud = new Hud(metrics, rendererLabel, () => {
     const s = workspace.stats();
     const a = active()?.stats();
@@ -407,6 +415,7 @@ async function main(): Promise<void> {
       `canvases ${s.canvases} · active: ${a ? `${a.tileEntries} tiles in ${a.layers} layers` : 'none'}`,
       `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} (${mb(m.residentTiles * TILE_BYTES)}) · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
       `visible canvases ${metrics.frames.at(-1)?.visibleCanvases ?? '—'}`,
+      inheritanceLine(),
       `evictions ${perSecond(r.evictionsPerSecond)}/s · reloads ${perSecond(r.reloadsPerSecond)}/s (total ${m.evictions} / ${m.reloads})${m.loadingTiles ? ` · ${m.loadingTiles} loading` : ''}`,
       `reload ms ${ms(r.reloadMs.p50)} / ${ms(r.reloadMs.p95)}  (p50 / p95, last ${r.reloadMs.count})`,
       `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
@@ -530,7 +539,7 @@ async function main(): Promise<void> {
   renderer.onNeedsFrame = requestFrame;
 
   // Development builds only: the workspace in the console, for trying things the UI can't do yet.
-  if (import.meta.env.DEV) Object.assign(window, { workspace });
+  if (import.meta.env.DEV) Object.assign(window, { workspace, metrics });
 
   if (new URLSearchParams(location.search).has('stress')) {
     controls.debugBody.append(
@@ -545,6 +554,7 @@ async function main(): Promise<void> {
         fitRect: (rect) => fitRectToView(rect, cssWidth, cssHeight),
         setView,
         report: (m) => showBanner(m, true),
+        gpuBytes: () => renderer.memory().bytes,
       }),
     );
   }
