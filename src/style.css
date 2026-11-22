@@ -584,6 +584,21 @@ body {
   background: #0a84ff;
 }
 
+.dependents-badge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  translate: -100% 0; /* right edge at the given point */
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #0a84ff;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .arrow-bar {
   position: absolute;
   left: 0;

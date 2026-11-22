@@ -83,6 +83,16 @@ export function arrowEmphasis(
 }
 
 /**
+ * The selected canvas's lineage: every canvas it inherits from, directly or
+ * through a chain (upstream), and every canvas that inherits from it
+ * (downstream: its dependents).
+ */
+export function lineage(graph: InheritanceGraph, selected: CanvasId | null): { upstream: CanvasId[]; downstream: CanvasId[] } {
+  if (selected === null) return { upstream: [], downstream: [] };
+  return { upstream: graph.upstream(selected), downstream: graph.downstream(selected) };
+}
+
+/**
  * Overlay quads for the arrows: a shaft and a two-stroke head each. A
  * missing-source stub is drawn as a dashed shaft in the warning colour.
  * Widths are in device pixels, so arrows look the same at any zoom.

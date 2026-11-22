@@ -3,7 +3,7 @@ import type { OverlayShape } from '../render/renderer';
 import { containsPoint, hitTest, type Rect } from '../workspace/coords';
 import type { Workspace } from '../workspace/workspace';
 import { docToScreen, screenToDoc, type Vec2, type ViewTransform } from '../viewport/viewport';
-import { arrowEmphasis, arrowLines, arrowQuads, edgeToEdge, hitArrow, type ArrowLine } from './arrows';
+import { arrowEmphasis, arrowLines, arrowQuads, edgeToEdge, hitArrow, lineage, type ArrowLine } from './arrows';
 import { selectionOutline } from './selectionOutline';
 
 /**
@@ -57,6 +57,8 @@ const DRAG_THRESHOLD_PX = 4;
 const DIM: [number, number, number, number] = [0, 0, 0, 0.55]; // premultiplied black
 const VALID = { devicePx: 2, color: [0.3, 0.85, 0.45, 1] as [number, number, number, number] };
 const HOVERED = { devicePx: 6, color: VALID.color };
+/** Lineage of the selected canvas: a faint accent outline. */
+const LINEAGE = { devicePx: 3, color: [0.04 * 0.45, 0.52 * 0.45, 0.45, 0.45] as [number, number, number, number] };
 
 /**
  * Creating, selecting, retargeting and deleting arrows, with pen, finger or
@@ -85,6 +87,8 @@ export class ArrowControls {
   selected: CanvasId | null = null;
 
   private readonly handles = new Map<CanvasId, HTMLButtonElement>();
+  /** "N dependents" on the selected canvas, beside its connection handle. */
+  private readonly badge = document.createElement('div');
   private readonly tailGrip = grip('Drag to another canvas to change the source');
   private readonly headGrip = grip('Drag to another canvas to move the arrow');
   private readonly bar = document.createElement('div');
@@ -104,7 +108,9 @@ export class ArrowControls {
     this.pickerHint.className = 'arrow-picker-hint panel';
     this.picker.append(this.pickerHint);
     this.picker.hidden = true;
-    this.element.append(this.tailGrip, this.headGrip, this.bar, this.picker);
+    this.badge.className = 'dependents-badge';
+    this.badge.hidden = true;
+    this.element.append(this.badge, this.tailGrip, this.headGrip, this.bar, this.picker);
 
     this.listenForConnection(this.tailGrip, () => (this.selected === null ? null : { kind: 'source', inheritorId: this.selected }));
     this.listenForConnection(this.headGrip, () => (this.selected === null ? null : { kind: 'head', inheritorId: this.selected }));
@@ -124,7 +130,14 @@ export class ArrowControls {
     this.lines = arrowLines(this.ws.canvases, canvasPxPerDevicePx);
     const emphasis = arrowEmphasis(this.lines, this.ws.graph(), selectedCanvas, this.selected);
     const shapes: OverlayShape[] = arrowQuads(this.lines, emphasis, canvasPxPerDevicePx);
-    if (!this.active) return shapes;
+    if (!this.active) {
+      // Highlight the selected canvas's upstream path and downstream subtree.
+      const { upstream, downstream } = lineage(this.ws.graph(), selectedCanvas);
+      for (const id of [...upstream, ...downstream]) {
+        shapes.push(...selectionOutline(this.ws.canvas(id).placement, canvasPxPerDevicePx, LINEAGE));
+      }
+      return shapes;
+    }
 
     const c = this.active.connection;
     const hovered = this.pointer ? hitTest(this.ws.canvases, this.pointer) : null;
@@ -157,6 +170,7 @@ export class ArrowControls {
     this.element.hidden = !this.shown;
     if (this.selected !== null && !this.lines.some((l) => l.inheritorId === this.selected)) this.selected = null;
     this.updateHandles(view, cssWidth, cssHeight);
+    this.updateBadge(view);
     this.updateSelection(view);
     this.updatePicker();
   }
@@ -180,6 +194,21 @@ export class ArrowControls {
       handle.remove();
       this.handles.delete(id);
     }
+  }
+
+  /** How many canvases depend on the selected one (directly or through a chain). */
+  private updateBadge(view: ViewTransform): void {
+    const id = this.ws.activeCanvasId;
+    const count = id === null ? 0 : this.ws.graph().downstream(id).length;
+    this.badge.hidden = count === 0 || this.active !== null;
+    if (this.badge.hidden) return;
+    const doc = this.ws.canvas(id!);
+    const text = `${count} dependent${count === 1 ? '' : 's'}`;
+    if (this.badge.textContent !== text) this.badge.textContent = text;
+    this.badge.title = `${count} canvas${count === 1 ? '' : 'es'} inherit from this one, directly or through a chain`;
+    // Right-aligned just left of the connection handle, above the canvas.
+    const p = docToScreen(view, { x: doc.x + doc.width, y: doc.y });
+    place(this.badge, { x: p.x - TARGET_PX, y: p.y - 30 });
   }
 
   private createHandle(canvasId: CanvasId): HTMLButtonElement {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createBlock, markSourceMissing } from '../document/inheritedBlock';
 import { InheritanceGraph } from '../workspace/inheritanceGraph';
-import { arrowEmphasis, arrowLines, arrowQuads, edgeToEdge, hitArrow, type ArrowCanvas } from './arrows';
+import { arrowEmphasis, arrowLines, arrowQuads, edgeToEdge, hitArrow, lineage, type ArrowCanvas } from './arrows';
 
 const SIZE = { width: 100, height: 100 };
 
@@ -79,5 +79,18 @@ describe('hitArrow', () => {
     const lines = arrowLines([canvas('a', 0, 0), canvas('b', 300, 0, 'a')], 1);
     expect(hitArrow(lines, { x: 200, y: 60 }, 15)?.inheritorId).toBe('b');
     expect(hitArrow(lines, { x: 200, y: 90 }, 15)).toBeNull();
+  });
+});
+
+describe('lineage', () => {
+  it('lists every canvas upstream and downstream of the selected one', () => {
+    // a → b → c, b → d, plus x unrelated
+    const canvases = [canvas('a', 0, 0), canvas('b', 200, 0, 'a'), canvas('c', 400, 0, 'b'), canvas('d', 400, 200, 'b'), canvas('x', 0, 400)];
+    const graph = new InheritanceGraph(canvases);
+    const { upstream, downstream } = lineage(graph, 'b');
+    expect(upstream).toEqual(['a']);
+    expect([...downstream].sort()).toEqual(['c', 'd']);
+    expect(lineage(graph, 'a').downstream).toHaveLength(3); // the badge: 3 dependents
+    expect(lineage(graph, null)).toEqual({ upstream: [], downstream: [] });
   });
 });
