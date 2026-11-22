@@ -2,6 +2,7 @@ import type { BlendMode } from '../document/blend';
 import type { Editor } from '../document/editor';
 import type { LayerId, RasterLayer } from '../document/paintDocument';
 import { hexToRgb, rgbToHex } from './color';
+import { BlockSection, type BlockSectionActions } from './blockSection';
 import type { Thumbnails } from './thumbnails';
 
 const BLEND_MODES: BlendMode[] = ['normal', 'multiply'];
@@ -19,11 +20,14 @@ export class LayersPanel {
   private readonly list: HTMLOListElement;
   private readonly addButton: HTMLButtonElement;
   private readonly paperInput: HTMLInputElement;
+  private readonly paperEye: HTMLButtonElement;
   private signature = '';
   private opacitySlider: HTMLInputElement | null = null;
   private opacityOutput: HTMLOutputElement | null = null;
   private blendSelect: HTMLSelectElement | null = null;
   private opacityDrag = 0;
+  /** The inherited block's row, always last in the list (the block is drawn below every layer). */
+  private readonly block: BlockSection;
 
   /** The canvas being edited; set by `update()`. */
   private editor: Editor | null = null;
@@ -32,7 +36,9 @@ export class LayersPanel {
   constructor(
     private readonly activeEditor: () => Editor | null,
     private readonly thumbnails: Thumbnails,
+    blockActions: BlockSectionActions,
   ) {
+    this.block = new BlockSection(thumbnails, blockActions);
     this.element = document.createElement('aside');
     this.element.className = 'layers panel';
 
@@ -44,12 +50,18 @@ export class LayersPanel {
 
     this.list = document.createElement('ol');
 
-    const paperRow = document.createElement('label');
+    const paperRow = document.createElement('div');
     paperRow.className = 'paper-row';
     this.paperInput = document.createElement('input');
     this.paperInput.type = 'color';
+    this.paperInput.setAttribute('aria-label', 'Background colour');
     this.paperInput.addEventListener('change', () => this.editor?.setPaper(hexToRgb(this.paperInput.value)));
-    paperRow.append(Object.assign(document.createElement('span'), { textContent: 'Background' }), this.paperInput);
+    // Hidden background: the canvas is transparent, and canvases inheriting it see only the strokes.
+    this.paperEye = button('●', () => {
+      if (this.editor) this.editor.setPaperVisible(!this.editor.doc.paperVisible);
+    }, 'Hide background');
+    this.paperEye.classList.add('eye');
+    paperRow.append(Object.assign(document.createElement('span'), { textContent: 'Background' }), this.paperInput, this.paperEye);
 
     this.element.append(header, this.list, paperRow);
     this.update();
@@ -83,6 +95,8 @@ export class LayersPanel {
       this.signature = signature;
       this.rebuild();
     }
+    if (this.list.lastElementChild !== this.block.element) this.list.append(this.block.element);
+    this.block.update(editor);
     const active = editor.activeLayer;
     if (this.opacitySlider && document.activeElement !== this.opacitySlider) {
       this.opacitySlider.value = String(active.opacity);
@@ -91,6 +105,10 @@ export class LayersPanel {
     if (this.blendSelect) this.blendSelect.value = active.blendMode;
     this.addButton.disabled = !editor.canAddLayer;
     this.paperInput.value = rgbToHex(doc.paper);
+    this.paperEye.textContent = doc.paperVisible ? '●' : '○';
+    this.paperEye.title = doc.paperVisible ? 'Hide background' : 'Show background';
+    this.paperEye.setAttribute('aria-label', this.paperEye.title);
+    this.paperInput.disabled = !doc.paperVisible;
   }
 
   private rebuild(): void {

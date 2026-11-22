@@ -33,12 +33,14 @@ describe('statistics helpers', () => {
   });
 });
 
+const NO_INHERITANCE = { inheritorsUpdated: 0, staleInheritors: 0, propagation: [] };
+
 describe('Metrics', () => {
   it('attributes pending input to the next frame and measures latency to submit', () => {
     const m = new Metrics();
     m.noteInput([sample(100), sample(104)], 104);
     m.noteDabs(10, 3);
-    m.frameRendered(110, 1.5, { submittedAt: 112, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false });
+    m.frameRendered(110, 1.5, { submittedAt: 112, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false, ...NO_INHERITANCE });
     const f = m.frames[0]!;
     expect(f.samples).toBe(2);
     expect(f.events).toBe(1);
@@ -49,7 +51,7 @@ describe('Metrics', () => {
 
   it('only counts frame intervals between consecutive frames', () => {
     const m = new Metrics();
-    const info = { submittedAt: 0, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false };
+    const info = { submittedAt: 0, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false, ...NO_INHERITANCE };
     m.frameRendered(0, 1, info);
     m.frameRendered(16, 1, info);
     m.frameRendered(2000, 1, info); // after idle
@@ -60,7 +62,7 @@ describe('Metrics', () => {
   it('fills GPU-done latency when the promise resolves', async () => {
     const m = new Metrics();
     m.noteInput([sample(100)], 100);
-    m.frameRendered(105, 1, { submittedAt: 106, gpuDone: Promise.resolve(120), compositedTiles: 1, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false });
+    m.frameRendered(105, 1, { submittedAt: 106, gpuDone: Promise.resolve(120), compositedTiles: 1, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false, ...NO_INHERITANCE });
     await Promise.resolve();
     await Promise.resolve();
     expect(m.frames[0]!.inputToGpuDoneMs).toBe(20);
@@ -69,7 +71,7 @@ describe('Metrics', () => {
   it('counts implausible timestamps instead of recording them', () => {
     const m = new Metrics();
     m.noteInput([sample(5000)], 5000);
-    m.frameRendered(10, 1, { submittedAt: 11, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false });
+    m.frameRendered(10, 1, { submittedAt: 11, gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false, ...NO_INHERITANCE });
     expect(m.frames[0]!.inputToSubmitMs).toBeNull();
     expect(m.counters.implausibleTimestamps).toBe(1);
   });
@@ -89,5 +91,20 @@ describe('rateOfTotal', () => {
   it('is null without two points in the window', () => {
     expect(rateOfTotal([{ t: 0, total: 5 }], 0)).toBeNull();
     expect(rateOfTotal([{ t: 0, total: 0 }, { t: 100, total: 9 }], 5000)).toBeNull();
+  });
+
+  it('records propagation times and summarises the end of each chain by depth', () => {
+    const m = new Metrics();
+    const frame = (t: number, propagation: { depth: number; ms: number }[]) =>
+      m.frameRendered(t, 1, { submittedAt: t, gpuDone: null, compositedTiles: 1, downsampledTiles: 0, visibleCanvases: 1, compositeCpuMs: 0, moreWork: false, inheritorsUpdated: propagation.length, staleInheritors: 0, propagation });
+    frame(0, [{ depth: 1, ms: 4 }, { depth: 2, ms: 6 }]);
+    frame(16, [{ depth: 1, ms: 5 }]);
+    frame(32, []);
+    // End of chain = the deepest inheritor each frame caught up.
+    expect(m.summary(-Infinity, 32).chainEnd.p50).toBe(5);
+    expect(m.summary(-Infinity, 32).chainEnd.count).toBe(2);
+    const byDepth = m.propagationByDepth();
+    expect(byDepth.get(1)!.count).toBe(2);
+    expect(byDepth.get(2)!.max).toBe(6);
   });
 });

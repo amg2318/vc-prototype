@@ -30,6 +30,11 @@ export interface InputCallbacks {
   tap(fingers: 2 | 3): void;
   /** True if a stroke starting at this workspace point would draw (it is over a canvas). */
   canDrawAt(p: Vec2): boolean;
+  /**
+   * A pen, mouse or single finger pressed on empty space (workspace point),
+   * e.g. on an arrow between canvases. The press still pans if it moves.
+   */
+  emptySpacePress(p: Vec2): void;
 }
 
 const supportsCoalesced = typeof PointerEvent !== 'undefined' && 'getCoalescedEvents' in PointerEvent.prototype;
@@ -168,6 +173,7 @@ export class PointerInput {
     const pick = !eraser && e.button === 0 && (e.altKey || this.callbacks.eyedropperActive());
     const onEmptySpace =
       e.button === 0 && !pick && !this.callbacks.canDrawAt(screenToDoc(this.callbacks.getView(), this.screenPoint(e)));
+    if (onEmptySpace && !this.spaceHeld) this.callbacks.emptySpacePress(screenToDoc(this.callbacks.getView(), this.screenPoint(e)));
     if (e.button === 1 || (e.button === 0 && this.spaceHeld) || onEmptySpace) {
       this.startPan(e);
       this.canvas.style.cursor = 'grabbing';
@@ -228,7 +234,9 @@ export class PointerInput {
     if (Math.max(e.width, e.height) > GESTURES.palmContactPx) {
       this.callbacks.palmRejected();
     } else {
-      const overCanvas = this.callbacks.canDrawAt(screenToDoc(this.callbacks.getView(), p));
+      const at = screenToDoc(this.callbacks.getView(), p);
+      const overCanvas = this.callbacks.canDrawAt(at);
+      if (!overCanvas) this.callbacks.emptySpacePress(at);
       if (this.fingers.enabled && overCanvas) this.startStroke(e, false);
       else this.startPan(e);
     }

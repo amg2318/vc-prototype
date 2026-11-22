@@ -8,6 +8,7 @@ import { union, type Rect } from '../workspace/coords';
 import { CANVAS_PRESETS } from '../workspace/presets';
 import type { Workspace } from '../workspace/workspace';
 import { buttons } from './controls';
+import { buildGroup, describeRun, strokeRoot, type Shape } from './inheritanceStress';
 import type { Metrics } from './metrics';
 
 export interface StressDeps {
@@ -21,6 +22,8 @@ export interface StressDeps {
   fitRect(rect: Rect): ViewTransform;
   setView(view: ViewTransform): void;
   report(message: string): void;
+  /** Bytes the renderer holds on the GPU right now. */
+  gpuBytes(): number;
 }
 
 /**
@@ -59,6 +62,14 @@ export function createStressPanel(deps: StressDeps): HTMLElement {
   presetRow.className = 'row';
   presetRow.append(Object.assign(document.createElement('span'), { textContent: 'Preset' }), preset);
 
+  const depth = numberField('Chain depth', 5, 1, 10);
+  const fanOut = numberField('Fan-out', 10, 1, 20);
+  const rootStrokes = numberField('Root strokes', 10, 1, 100);
+  const inheritanceRun = async (shape: Shape, size: number): Promise<string> => {
+    const ids = buildGroup(deps, shape, size);
+    return describeRun(await strokeRoot(deps, shape, size, ids[0]!, rootStrokes.value()));
+  };
+
   const wrap = document.createElement('div');
   wrap.className = 'controls-body';
   const title = document.createElement('strong');
@@ -82,6 +93,14 @@ export function createStressPanel(deps: StressDeps): HTMLElement {
       ['Fill 32 layers', run('Fill layers', () => fillLayers(deps))],
     ]),
     buttons([['Undo / redo all', run('Undo/redo all', () => undoRedoAll(deps))]]),
+    document.createTextNode('Inheritance (Phase 3): build, then stroke the root:'),
+    depth.row,
+    fanOut.row,
+    rootStrokes.row,
+    buttons([
+      ['Chain', run('Chain', () => inheritanceRun('chain', depth.value()))],
+      ['Fan-out', run('Fan-out', () => inheritanceRun('fan-out', fanOut.value()))],
+    ]),
   );
   return wrap;
 }

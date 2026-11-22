@@ -1,5 +1,6 @@
 import type { Dab } from '../brush/dabs';
 import type { BlendMode, RGB } from '../document/blend';
+import type { InheritedBlock } from '../document/inheritedBlock';
 import type { MergeJob, StrokeMode } from '../document/editor';
 import type { CanvasId } from '../document/paintDocument';
 import type { RetileJob } from '../document/retile';
@@ -38,10 +39,18 @@ export interface CanvasRenderState {
   placement: Placement;
   /** Non-erasable background colour, below every source. */
   paper: RGB;
+  /** False: no paper, the canvas is transparent (absent = shown). */
+  paperVisible?: boolean;
   /** Visible sources, bottom to top. */
   sources: CompositeSource[];
   /** The stroke being drawn on this canvas, shown on `sources[sourceIndex]` until merged. */
   liveStroke: { sourceIndex: number; style: StrokeStyle } | null;
+  /**
+   * The inherited block, drawn below every source: only when it is linked
+   * and visible (null or absent otherwise). Blocks are immutable values, so
+   * a different object means the block changed.
+   */
+  inherited?: InheritedBlock | null;
 }
 
 /** A flat-coloured rectangle in workspace coordinates (premultiplied RGBA), drawn above all canvases. */
@@ -54,12 +63,26 @@ export interface CanvasRenderState {
  */
 export type CompositeTile =
   | { kind: 'tile'; canvasRect: Rect; pool: 'level0' | 'preview'; page: number; x: number; y: number; texels: Rect }
-  | { kind: 'paper'; canvasRect: Rect; color: [number, number, number] };
+  | { kind: 'paper'; canvasRect: Rect; color: Rgba };
+
+/** A premultiplied colour, 0..1 (paper is [r, g, b, 1], or all zero when hidden). */
+export type Rgba = [number, number, number, number];
 
 export interface OverlayRect {
   rect: Rect;
   color: [number, number, number, number];
 }
+
+/** A parallelogram in workspace coordinates (e.g. a rotated stroke of an arrow); premultiplied colour. */
+export interface OverlayQuad {
+  origin: { x: number; y: number };
+  xAxis: { x: number; y: number };
+  yAxis: { x: number; y: number };
+  color: Rgba;
+}
+
+/** What the overlay pass draws, above every canvas. */
+export type OverlayShape = OverlayRect | OverlayQuad;
 
 /** What to draw: the camera as a workspace → clip matrix (double precision) and the zoom level. */
 export interface ViewState {
@@ -88,6 +111,16 @@ export interface FrameInfo {
   compositeGpuMs?: Promise<number>;
   /** True if more work is ready for the next frame (draw another one). */
   moreWork: boolean;
+  /** Phase 3: inheritors that changed through an arrow this frame. */
+  inheritorsUpdated: number;
+  /** Phase 3: inheritors with changes not yet shown (off screen during a stroke, or over budget). */
+  staleInheritors: number;
+  /**
+   * Phase 3: inheritors this frame brought fully up to date, with their
+   * chain depth and the time from the source change reaching the renderer
+   * to this frame's GPU work being submitted.
+   */
+  propagation: { depth: number; ms: number }[];
 }
 
 /** 0..255 per channel. */
@@ -136,10 +169,10 @@ export interface Renderer {
   /** Called when work becomes ready without any app change (e.g. a tile finished reloading). */
   onNeedsFrame: (() => void) | null;
   /**
-   * Phase 3 hook: a canvas's composite changed (or will on the next frame)
-   * inside `dirty`, in canvas pixels. Covers strokes in progress, merges,
-   * undo, layer changes and resizes; it can fire many times per frame while
-   * drawing, so listeners should coalesce.
+   * A canvas's composite changes on this frame inside `dirty`, in canvas
+   * pixels. Covers strokes in progress, merges, undo, layer changes, resizes
+   * and changes inherited through arrows. Fires at most once per canvas per
+   * frame (changes are merged), sources before their inheritors.
    */
   onCompositeChanged: ((canvasId: CanvasId, dirty: Rect) => void) | null;
   memory(): RendererMemory;
@@ -156,7 +189,7 @@ export interface Renderer {
   setCanvases(canvases: readonly CanvasRenderState[]): void;
   invalidateTiles(canvasId: CanvasId, keys: readonly TileKey[] | 'all'): void;
   /** Rectangles drawn above the canvases (selection, highlights; Phase 3 arrows). */
-  setOverlay(rects: readonly OverlayRect[]): void;
+  setOverlay(shapes: readonly OverlayShape[]): void;
   /**
    * Phase 3: build a canvas's composite over `rect` (canvas px) at pyramid
    * `level` (0 = full resolution, each level halves it) in the next frame,

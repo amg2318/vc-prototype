@@ -8,7 +8,7 @@ function canvas(id: string, x: number, width: number, height: number, painted: T
   return {
     id,
     placement: { x, y: 0, width, height },
-    paper: [1, 1, 1],
+    paper: [1, 1, 1, 1],
     isPaperOnly: (k) => !set.has(k),
     isReady: ready,
   };
@@ -98,6 +98,23 @@ describe('PyramidPlanner', () => {
     p.invalidate('a', [0, 1, 2]);
     const plan = p.plan([c], everywhere, 0);
     expect(plan.composites.map((j) => j.key).sort()).toEqual([0, 1, 2]);
+  });
+
+  it('shares an exhausted budget fairly: a canvas left waiting goes first next frame', () => {
+    const p = new PyramidPlanner(64, 64, 1); // one scratch composite per frame
+    const a = canvas('a', 0, 1024, 1024, [0]);
+    const b = canvas('b', 2000, 1024, 1024, [0]);
+    const all = { x: 0, y: 0, width: 4000, height: 4000 };
+    settle(p, [a, b], all, 2); // zoomed out: tiles are composited to scratch and downsampled
+    const served: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      p.invalidate('a', [0]);
+      p.invalidate('b', [0]);
+      served.push(...p.plan([a, b], all, 2).composites.map((j) => j.canvasId));
+    }
+    // Both keep changing every frame; without fairness the front canvas (b) would win every time.
+    expect(served.filter((id) => id === 'a').length).toBeGreaterThanOrEqual(1);
+    expect(served.filter((id) => id === 'b').length).toBeGreaterThanOrEqual(1);
   });
 
   it('updates the pinned preview of an off-screen canvas', () => {

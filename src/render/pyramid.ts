@@ -6,7 +6,7 @@ import {
   SLOTS_PER_PAGE,
   TILE_SIZE,
 } from '../config';
-import type { RGB } from '../document/blend';
+import type { Rgba } from './renderer';
 import type { CanvasId } from '../document/paintDocument';
 import { tileCoords, tileKey, type TileKey, type TileSlot } from '../document/tiles';
 import { TileStore } from '../document/tileStore';
@@ -81,11 +81,20 @@ function ancestorKey(key0: TileKey, level: number): TileKey {
 export interface PlannerCanvas {
   id: CanvasId;
   placement: Placement;
-  paper: RGB;
+  /** Premultiplied paper colour (transparent when the paper is hidden). */
+  paper: Rgba;
   /** True if no layer has a tile at this level-0 key, so the composite there is plain paper. */
   isPaperOnly(key: TileKey): boolean;
   /** False while a layer tile at this key isn't on the GPU yet; compositing it waits. */
   isReady(key: TileKey): boolean;
+  /** Depth in the inheritance graph (0 if absent): sources get the per-frame budget before their inheritors. */
+  depth?: number;
+  /**
+   * Leave this canvas's changes pending for now (an off-screen inheritor
+   * during a stroke): its cached tiles keep their old content, and are
+   * updated once it is no longer deferred.
+   */
+  deferUpdates?: boolean;
 }
 
 /** Composite level-0 tile `key` of a canvas into `dst` (a level-0 pool slot). */
@@ -100,8 +109,11 @@ export interface CompositeJob {
  * square region (x, y, size) of preview tile `dst` at `level`.
  */
 export interface DownsampleJob {
+  canvasId: CanvasId;
+  /** The preview tile being written (its key at `level`). */
+  key: TileKey;
   src: TileSlot | null;
-  paper: RGB;
+  paper: Rgba;
   dst: TileSlot;
   level: number;
   x: number;
@@ -115,7 +127,7 @@ export interface DownsampleJob {
  */
 export type DisplayQuad =
   | { canvasId: CanvasId; canvasRect: Rect; kind: 'tile'; pool: 'level0' | 'preview'; slot: TileSlot; texels: Rect }
-  | { canvasId: CanvasId; canvasRect: Rect; kind: 'paper'; color: RGB };
+  | { canvasId: CanvasId; canvasRect: Rect; kind: 'paper'; color: Rgba };
 
 export interface FramePlan {
   composites: CompositeJob[];
@@ -138,7 +150,7 @@ class CanvasCache {
   /** Level-0 keys whose content changed and hasn't reached the cached tiles yet. */
   readonly pending = new Set<TileKey>();
   /** The canvas's paper colour, for regions drawn as plain paper. */
-  paper: RGB = [1, 1, 1];
+  paper: Rgba = [1, 1, 1, 1];
   constructor(readonly width: number, readonly height: number) {}
 }
 
@@ -146,10 +158,18 @@ export class PyramidPlanner {
   readonly level0Pool: TileStore;
   readonly previewPool: TileStore;
   private readonly scratch: TileSlot[] = [];
+  private readonly scratchSlots = new Set<TileSlot>();
   private readonly caches = new Map<CanvasId, CanvasCache>();
   /** Regions asked for through `request()` since the last plan. */
   private requests: { canvasId: CanvasId; level: number; rect: Rect }[] = [];
   private frame = 0;
+  /**
+   * Canvases that were refused work because the frame's budget ran out, and
+   * the frame that first happened. They go first among canvases of the same
+   * depth next frame, so with many inheritors (a large fan-out) none of them
+   * waits for the end of the stroke while others update every frame.
+   */
+  private starvedSince = new Map<CanvasId, number>();
 
   constructor(
     level0Capacity = COMPOSITE_LEVEL0_PAGES * SLOTS_PER_PAGE,
@@ -159,6 +179,48 @@ export class PyramidPlanner {
     this.level0Pool = new TileStore(level0Capacity);
     this.previewPool = new TileStore(previewCapacity);
     for (let i = 0; i < budgetPerFrame; i++) this.scratch.push(this.level0Pool.allocate()!);
+    for (const slot of this.scratch) this.scratchSlots.add(slot);
+  }
+
+  /** True for the per-frame scratch tiles (level-0 composites that are only downsampled, not kept). */
+  isScratch(slot: TileSlot): boolean {
+    return this.scratchSlots.has(slot);
+  }
+
+  /**
+   * True if a tile of `level` over `rect` is out of date but needed this
+   * frame, so a later frame will bring it up to date. Inheritors that
+   * sampled it are composited again then. Tiles that aren't cached, or that
+   * nothing needs, return false: waiting for them could take forever.
+   */
+  willUpdate(canvasId: CanvasId, level: number, rect: Rect): boolean {
+    const cache = this.caches.get(canvasId);
+    if (!cache) return false;
+    const changed = new Set([...cache.pending].map((key0) => ancestorKey(key0, level)));
+    return levelTilesInRect(cache, rect, level).some((key) => {
+      const tile = cache.levels[level]!.get(key);
+      return tile !== undefined && tile.lastUsed === this.frame && (tile.todo !== null || changed.has(key));
+    });
+  }
+
+  /** True if content changed inside `rect` (canvas px) and hasn't reached the cached tiles yet. */
+  hasPendingChanges(canvasId: CanvasId, rect: Rect): boolean {
+    const cache = this.caches.get(canvasId);
+    if (!cache || cache.pending.size === 0) return false;
+    return levelTilesInRect(cache, rect, 0).some((key) => cache.pending.has(key));
+  }
+
+  /**
+   * Drop one cached tile (it was built at lower quality than its level
+   * promises). The GPU may still read it this frame; its slot is only reused
+   * from the next plan on.
+   */
+  forgetTile(canvasId: CanvasId, level: number, key: TileKey): void {
+    const cache = this.caches.get(canvasId);
+    const tile = cache?.levels[level]!.get(key);
+    if (!cache || !tile || this.isScratch(tile.slot)) return;
+    cache.levels[level]!.delete(key);
+    this.poolFor(level).release(tile.slot);
   }
 
   /** Content changed at these level-0 keys (or everywhere). */
@@ -214,6 +276,8 @@ export class PyramidPlanner {
     const out: FramePlan = { composites: [], downsamples: [], display: [], overBudget: false };
     let budget = this.budgetPerFrame;
     let scratchUsed = 0;
+    /** Canvases refused work this frame because the budget ran out. */
+    const starved = new Set<CanvasId>();
     this.syncCaches(canvases);
 
     const localVisible = (c: PlannerCanvas): Rect | null => {
@@ -221,7 +285,12 @@ export class PyramidPlanner {
       return r && { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height };
     };
     const onScreen = canvases.filter((c) => localVisible(c) !== null);
-    const priority = [...[...onScreen].reverse(), ...canvases.filter((c) => !onScreen.includes(c))];
+    // On-screen canvases front to back, then the rest; sources before the canvases that inherit them,
+    // and among the same depth, canvases the budget has made wait longest first.
+    const waited = (c: PlannerCanvas): number => this.starvedSince.get(c.id) ?? Infinity;
+    const priority = [...[...onScreen].reverse(), ...canvases.filter((c) => !onScreen.includes(c))].sort(
+      (a, b) => (a.depth ?? 0) - (b.depth ?? 0) || waited(a) - waited(b),
+    );
 
     // 1. The tiles each canvas needs: the display level while on screen, and the pinned levels always.
     const needed: { c: PlannerCanvas; level: number; tile: CachedTile }[] = [];
@@ -260,6 +329,7 @@ export class PyramidPlanner {
       if (c.isPaperOnly(key)) return null;
       if (budget <= 0 || scratchUsed >= this.scratch.length) {
         out.overBudget = true;
+        starved.add(c.id);
         return undefined;
       }
       budget--;
@@ -272,13 +342,14 @@ export class PyramidPlanner {
       const size = TILE_SIZE >> l;
       const parent = tileCoords(ancestorKey(key0, l));
       out.downsamples.push({
-        src, paper: c.paper, dst: tile.slot, level: l,
+        canvasId: c.id, key: ancestorKey(key0, l), src, paper: c.paper, dst: tile.slot, level: l,
         x: (tx - (parent.tx << l)) * size, y: (ty - (parent.ty << l)) * size, size,
       });
     };
 
     // 2. Changed content reaches every cached tile that shows it.
     for (const c of priority) {
+      if (c.deferUpdates) continue;
       const cache = this.caches.get(c.id)!;
       for (const key0 of [...cache.pending]) {
         const coarser: { tile: CachedTile; l: number }[] = [];
@@ -302,13 +373,14 @@ export class PyramidPlanner {
 
     // 3. Build tiles that aren't complete yet (on-screen ones first).
     for (const { c, level: l, tile } of needed) {
-      if (tile.todo === null) continue;
+      if (tile.todo === null || c.deferUpdates) continue;
       const cache = this.caches.get(c.id)!;
       if (l === 0) {
         const key0 = tile.todo[0]!;
         if (!c.isReady(key0)) continue;
         if (budget <= 0) {
           out.overBudget = true;
+          starved.add(c.id);
           continue;
         }
         budget--;
@@ -324,6 +396,11 @@ export class PyramidPlanner {
         tile.todo.shift();
       }
       if (tile.todo.length === 0) tile.todo = null;
+    }
+
+    for (const c of canvases) {
+      if (!starved.has(c.id)) this.starvedSince.delete(c.id);
+      else if (!this.starvedSince.has(c.id)) this.starvedSince.set(c.id, this.frame);
     }
 
     // 4. Display, back to front: the wanted tile, else a coarser cached one, else paper.

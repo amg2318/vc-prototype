@@ -11,10 +11,24 @@ import {
   RenameCanvasCommand,
   ReorderCanvasCommand,
   ResizeCanvasCommand,
+  SetBlockCommand,
+  SetBlocksCommand,
 } from '../history/canvasCommands';
+import {
+  createBlock,
+  emptyBlock,
+  fitPlacement,
+  linkBlock,
+  linkedSource,
+  refitBlock,
+  type BlockPlacement,
+  type InheritedBlock,
+} from '../document/inheritedBlock';
+import { InheritanceGraph } from './inheritanceGraph';
 import { History } from '../history/history';
 import { planResize, retileLayer, type Anchor, type RetileJob } from '../document/retile';
 import type { LayerId } from '../document/paintDocument';
+import type { Placement } from './coords';
 import type { TileKey } from '../document/tiles';
 
 export interface WorkspaceStats {
@@ -57,6 +71,7 @@ export class Workspace {
       detachCanvas: (id) => this.detachCanvas(id),
       forgetCanvas: (id) => this.forgetCanvas(id),
       canvasIndex: (id) => this.canvases.findIndex((c) => c.id === id),
+      canvases: () => this.canvases,
     };
     this.history = new History(this.ctx, historyBudgetBytes, () => this.historyBytes());
   }
@@ -142,6 +157,8 @@ export class Workspace {
     copy.x = source.x + source.width + 100;
     copy.y = source.y;
     copy.paper = [...source.paper];
+    copy.paperVisible = source.paperVisible;
+    copy.inherited = source.inherited; // still linked to the same source (blocks are never edited in place)
     for (const layer of source.layers) {
       const l = copy.createLayer(layer.name);
       Object.assign(l, layer.props());
@@ -211,8 +228,143 @@ export class Workspace {
       }
       tiles.set(layer.id, next);
     }
-    this.execute(new ResizeCanvasCommand(id, { placement: plan.placement, tiles }));
+    this.execute(new ResizeCanvasCommand(id, { placement: plan.placement, tiles, blocks: this.blocksAfterResize(doc, plan.placement) }));
     return jobs;
+  }
+
+  /**
+   * Inherited blocks after `doc` takes `placement`. Its own block stays put in
+   * the workspace (or refits, if fitted). Blocks inheriting it refit if fitted;
+   * custom ones keep their scale, so the content doesn't jump.
+   */
+  private blocksAfterResize(doc: PaintDocument, placement: Placement): Map<CanvasId, InheritedBlock | null> {
+    const blocks = new Map<CanvasId, InheritedBlock | null>();
+    const size = { width: placement.width, height: placement.height };
+    const own = doc.inherited;
+    if (own) {
+      const source = linkedSourceDoc(this, own);
+      if (own.placement.mode === 'fit') {
+        blocks.set(doc.id, { ...own, placement: fitPlacement(own.crop, source ? sizeOf(source) : own.lastSourceSize, size) });
+      } else {
+        const dx = doc.x - placement.x;
+        const dy = doc.y - placement.y;
+        blocks.set(doc.id, { ...own, placement: { ...own.placement, x: own.placement.x + dx, y: own.placement.y + dy } });
+      }
+    }
+    for (const id of this.graph().inheritorsOf(doc.id)) {
+      const target = this.canvas(id);
+      const block = target.inherited!;
+      const placementAfter = block.placement.mode === 'fit' ? fitPlacement(block.crop, size, sizeOf(target)) : block.placement;
+      blocks.set(id, { ...block, placement: placementAfter, lastSourceSize: size });
+    }
+    return blocks;
+  }
+
+  // --- inheritance (each operation undoable) ------------------------------------
+
+  /** The arrows between the canvases in the workspace, as they are now. */
+  graph(): InheritanceGraph {
+    return new InheritanceGraph(this.canvases);
+  }
+
+  /** Could `targetId` inherit `sourceId` (both exist, and no cycle)? */
+  canConnect(targetId: CanvasId, sourceId: CanvasId): boolean {
+    return this.hasCanvas(targetId) && this.hasCanvas(sourceId) && !this.graph().wouldCycle(targetId, sourceId);
+  }
+
+  /**
+   * Make `targetId` inherit `sourceId`: creates the arrow (and the block, if
+   * the canvas has none), retargets an existing arrow, or relinks an empty
+   * or missing block. Refused (returns false) if it would create a cycle.
+   */
+  connect(targetId: CanvasId, sourceId: CanvasId): boolean {
+    if (!this.canConnect(targetId, sourceId)) return false;
+    const target = this.canvas(targetId);
+    const before = target.inherited;
+    if (before?.source.kind === 'linked' && before.source.canvasId === sourceId) return true;
+    const sourceSize = sizeOf(this.canvas(sourceId));
+    const after = before ? linkBlock(before, sourceId, sourceSize, sizeOf(target)) : createBlock(sourceId, sourceSize, sizeOf(target));
+    const label = before?.source.kind === 'linked' ? 'Retarget arrow' : before?.source.kind === 'missing' ? 'Relink source' : 'Create arrow';
+    this.execute(new SetBlockCommand(targetId, before, after, label));
+    return true;
+  }
+
+  /**
+   * Move the head of the arrow into `fromId` to `toId`: `toId` inherits the
+   * same source (keeping its own block settings, if it had a block), and
+   * `fromId`'s block is left empty. One undo step.
+   */
+  moveArrowHead(fromId: CanvasId, toId: CanvasId): boolean {
+    const from = this.canvas(fromId);
+    const sourceId = from.inherited ? linkedSource(from.inherited) : null;
+    if (sourceId === null || fromId === toId || !this.canConnect(toId, sourceId)) return false;
+    const to = this.canvas(toId);
+    const sourceSize = sizeOf(this.canvas(sourceId));
+    const linked = to.inherited ? linkBlock(to.inherited, sourceId, sourceSize, sizeOf(to)) : createBlock(sourceId, sourceSize, sizeOf(to));
+    this.execute(
+      new SetBlocksCommand(
+        [
+          { canvasId: fromId, before: from.inherited, after: emptyBlock(from.inherited!) },
+          { canvasId: toId, before: to.inherited, after: linked },
+        ],
+        'Move arrow',
+      ),
+    );
+    return true;
+  }
+
+  /**
+   * Delete the arrow into `targetId` (or its broken stub, if the source was
+   * deleted): the block stays, empty, with its settings.
+   */
+  deleteArrow(targetId: CanvasId): void {
+    const before = this.canvas(targetId).inherited;
+    if (before?.source.kind !== 'linked' && before?.source.kind !== 'missing') return;
+    this.execute(new SetBlockCommand(targetId, before, emptyBlock(before), 'Delete arrow'));
+  }
+
+  /** Delete the inherited block and all its settings. */
+  removeBlock(targetId: CanvasId): void {
+    const before = this.canvas(targetId).inherited;
+    if (before) this.execute(new SetBlockCommand(targetId, before, null, 'Remove inherited block'));
+  }
+
+  /** "Refit": centre the block inside the canvas again. */
+  refitBlock(targetId: CanvasId): void {
+    const target = this.canvas(targetId);
+    const before = target.inherited;
+    if (!before) return;
+    const source = linkedSourceDoc(this, before);
+    const after = refitBlock(before, source ? sizeOf(source) : before.lastSourceSize, sizeOf(target));
+    this.execute(new SetBlockCommand(targetId, before, after, 'Refit inherited block'));
+  }
+
+  /** Move, scale, rotate or flip the block. Its placement becomes custom. */
+  placeBlock(targetId: CanvasId, changes: Partial<Omit<BlockPlacement, 'mode'>>, mergeKey: string | null = null): void {
+    const before = this.canvas(targetId).inherited;
+    if (!before) return;
+    this.setBlock(targetId, { placement: { ...before.placement, ...changes, mode: 'custom' } }, 'Transform inherited block', mergeKey);
+  }
+
+  /**
+   * Change other block settings (crop, effects, opacity, blend mode,
+   * visibility). A fitted block refits when its crop changes.
+   */
+  setBlock(
+    targetId: CanvasId,
+    changes: Partial<Omit<InheritedBlock, 'source' | 'lastSourceSize'>>,
+    label = 'Inherited block settings',
+    mergeKey: string | null = null,
+  ): void {
+    const target = this.canvas(targetId);
+    const before = target.inherited;
+    if (!before) return;
+    let after: InheritedBlock = { ...before, ...changes };
+    if ('crop' in changes && after.placement.mode === 'fit') {
+      const source = linkedSourceDoc(this, after);
+      after = refitBlock(after, source ? sizeOf(source) : after.lastSourceSize, sizeOf(target));
+    }
+    this.execute(new SetBlockCommand(targetId, before, after, label, mergeKey));
   }
 
   setActiveCanvas(id: CanvasId | null): void {
@@ -292,6 +444,15 @@ export class Workspace {
       this.history.forEachCommand((c) => c.forgetEmptySlot?.(this.ctx, slot));
     }
   }
+}
+
+function sizeOf(doc: PaintDocument): { width: number; height: number } {
+  return { width: doc.width, height: doc.height };
+}
+
+/** The canvas a block is linked to, if it is linked to one in the workspace. */
+function linkedSourceDoc(ws: Workspace, block: InheritedBlock): PaintDocument | null {
+  return block.source.kind === 'linked' && ws.hasCanvas(block.source.canvasId) ? ws.canvas(block.source.canvasId) : null;
 }
 
 function clampSize(size: { width: number; height: number }): { width: number; height: number } {

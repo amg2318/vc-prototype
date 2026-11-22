@@ -1,5 +1,5 @@
 import './style.css';
-import { GESTURES, TILE_BYTES } from './config';
+import { GESTURES, INHERITANCE_DEPTH_WARNING, TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
 import { Controls } from './debug/controls';
@@ -24,6 +24,10 @@ import { installShortcuts } from './ui/shortcuts';
 import { CanvasLabels } from './ui/canvasLabels';
 import { CanvasPanel } from './ui/canvasPanel';
 import { HIGHLIGHT, selectionOutline } from './ui/selectionOutline';
+import { ArrowControls } from './ui/arrowControls';
+import { depthWarning } from './ui/arrows';
+import { BlockTransformMode } from './ui/blockTransformMode';
+import type { OverlayShape } from './render/renderer';
 import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicator';
 import type { Change } from './history/command';
 import { snapPosition } from './workspace/snap';
@@ -72,7 +76,9 @@ async function main(): Promise<void> {
     const start = performance.now();
     const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
     const selected = active()?.doc;
-    const overlay = selected ? selectionOutline(selected.placement, canvasPxPerDevicePx) : [];
+    const overlay: OverlayShape[] = arrowControls.overlay(selected?.id ?? null, canvasPxPerDevicePx);
+    if (selected) overlay.push(...selectionOutline(selected.placement, canvasPxPerDevicePx));
+    overlay.push(...blockTransform.overlay(canvasPxPerDevicePx));
     if (highlighted && workspace.hasCanvas(highlighted)) {
       overlay.push(...selectionOutline(workspace.canvas(highlighted).placement, canvasPxPerDevicePx, HIGHLIGHT));
     }
@@ -100,6 +106,8 @@ async function main(): Promise<void> {
       });
     }
     labels.update(workspace.canvases, workspace.activeCanvasId, view, cssWidth, cssHeight);
+    arrowControls.update(view, cssWidth, cssHeight);
+    blockTransform.update(view);
     if (info.moreWork) requestFrame();
   }
 
@@ -228,13 +236,24 @@ async function main(): Promise<void> {
   }
   const thumbnails = new Thumbnails(workspace, renderer, requestFrame);
   const labels = new CanvasLabels(() => view, {
-    select: (id) => workspace.setActiveCanvas(id),
+    select: (id) => {
+      arrowControls.select(null);
+      if (id !== blockTransform.canvasId) blockTransform.stop();
+      workspace.setActiveCanvas(id);
+    },
     zoomTo: (id) => {
       workspace.setActiveCanvas(id);
       zoomToCanvas(id);
     },
     drag: dragCanvas,
   });
+  const blockTransform = new BlockTransformMode({
+    workspace,
+    getView: () => view,
+    requestFrame: () => requestFrame(),
+    modeChanged: () => refreshUi(),
+  });
+  const arrowControls = new ArrowControls({ workspace, getView: () => view, requestFrame: () => requestFrame() });
   workspace.onChange((change) => {
     updateCompositeState();
     renderer.invalidateTiles(change.canvasId, change.tiles);
@@ -325,7 +344,9 @@ async function main(): Promise<void> {
       sampleColor(phase, screen);
       if (phase === 'end') tools.returnFromEyedropper();
     },
-    canDrawAt: (p) => hitTest(workspace.canvases, p) !== null,
+    // Strokes are off in block-transform mode: presses then pan, as on empty space.
+    canDrawAt: (p) => !blockTransform.active && hitTest(workspace.canvases, p) !== null,
+    emptySpacePress: (p) => arrowControls.pressAt(p),
     tap(fingers) {
       if (fingers === 2) undo();
       else redo();
@@ -378,6 +399,14 @@ async function main(): Promise<void> {
   const mb = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MB`;
   const perSecond = (v: number | null): string => (v === null ? '—' : v.toFixed(0));
   const ms = (v: number | null): string => (v === null ? '—' : v.toFixed(1));
+  /** Phase 3: the active canvas's chain depth, and inheritors updated and stale in the last frame. */
+  function inheritanceLine(): string {
+    const id = workspace.activeCanvasId;
+    const depth = id === null ? '—' : String(workspace.graph().depth(id));
+    const last = metrics.frames.at(-1);
+    return `inheritance    depth ${depth} · updated ${last?.inheritorsUpdated ?? '—'} · stale ${last?.staleInheritors ?? '—'}  (last frame)`;
+  }
+
   const hud = new Hud(metrics, rendererLabel, () => {
     const s = workspace.stats();
     const a = active()?.stats();
@@ -387,6 +416,7 @@ async function main(): Promise<void> {
       `canvases ${s.canvases} · active: ${a ? `${a.tileEntries} tiles in ${a.layers} layers` : 'none'}`,
       `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} (${mb(m.residentTiles * TILE_BYTES)}) · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
       `visible canvases ${metrics.frames.at(-1)?.visibleCanvases ?? '—'}`,
+      inheritanceLine(),
       `evictions ${perSecond(r.evictionsPerSecond)}/s · reloads ${perSecond(r.reloadsPerSecond)}/s (total ${m.evictions} / ${m.reloads})${m.loadingTiles ? ` · ${m.loadingTiles} loading` : ''}`,
       `reload ms ${ms(r.reloadMs.p50)} / ${ms(r.reloadMs.p95)}  (p50 / p95, last ${r.reloadMs.count})`,
       `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
@@ -425,10 +455,22 @@ async function main(): Promise<void> {
     },
   );
 
-  const selectTool = (tool: Tool): void => tools.setTool(tool);
+  const selectTool = (tool: Tool): void => {
+    blockTransform.stop(); // choosing a tool means "I want to draw again"
+    tools.setTool(tool);
+  };
   const picker = new ColorPicker((color) => tools.setColor(color));
   picker.setColor(tools.brush.color);
-  const layersPanel = new LayersPanel(active, thumbnails);
+  const layersPanel = new LayersPanel(active, thumbnails, {
+    goToCanvas: (id) => {
+      blockTransform.stop();
+      workspace.setActiveCanvas(id);
+      zoomToCanvas(id);
+    },
+    transformBlock: (id) => blockTransform.toggle(id),
+    isTransforming: (id) => blockTransform.canvasId === id,
+  });
+  thumbnails.onUpdated = () => layersPanel.update(); // the block row's thumbnail is built from layer thumbnails
   const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
     create: createCanvas,
     show: (id) => {
@@ -455,6 +497,12 @@ async function main(): Promise<void> {
     toggleFingerDrawing: () => {
       input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
     },
+    toggleArrows: () => {
+      arrowControls.shown = !arrowControls.shown;
+      if (!arrowControls.shown) arrowControls.select(null);
+      refreshUi();
+      requestFrame();
+    },
     toggleCanvases: () => {
       canvasPanel.setVisible(!canvasPanel.visible);
       if (canvasPanel.visible) layersPanel.setVisible(false);
@@ -468,6 +516,7 @@ async function main(): Promise<void> {
       canUndo: workspace.history.canUndo,
       canRedo: workspace.history.canRedo,
       fingerDraws: input.fingers.enabled,
+      showArrows: arrowControls.shown,
     });
     layersPanel.update();
     canvasPanel.update();
@@ -488,7 +537,20 @@ async function main(): Promise<void> {
     if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
   }
   renderer.onLost = (message) => showBanner(message, true);
+
+  // Soft depth warning: whenever the deepest chain grows past the limit (by an arrow, the source
+  // picker, or undo/redo), say so once. It never blocks.
+  let deepestChain = workspace.graph().maxDepth();
+  workspace.onChange(() => {
+    const deepest = workspace.graph().maxDepth();
+    const warning = depthWarning(deepestChain, deepest, INHERITANCE_DEPTH_WARNING);
+    deepestChain = deepest;
+    if (warning) showBanner(warning);
+  });
   renderer.onNeedsFrame = requestFrame;
+
+  // Development builds only: the workspace in the console, for trying things the UI can't do yet.
+  if (import.meta.env.DEV) Object.assign(window, { workspace, metrics });
 
   if (new URLSearchParams(location.search).has('stress')) {
     controls.debugBody.append(
@@ -503,11 +565,12 @@ async function main(): Promise<void> {
         fitRect: (rect) => fitRectToView(rect, cssWidth, cssHeight),
         setView,
         report: (m) => showBanner(m, true),
+        gpuBytes: () => renderer.memory().bytes,
       }),
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({

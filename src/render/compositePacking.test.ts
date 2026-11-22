@@ -6,6 +6,7 @@ import {
   emptyTilesFromReadback,
   groupByDstPage,
   packCompositeUniforms,
+  paperRgba,
   packLookup,
   packMergeInstance,
 } from './compositePacking';
@@ -35,7 +36,7 @@ describe('packCompositeUniforms', () => {
     const u = [...packCompositeUniforms(state)];
     expect(u.slice(0, 4).map((v) => +v.toFixed(3))).toEqual([0.9, 0.9, 0.8, 1]);
     expect(u.slice(4, 8).map((v) => +v.toFixed(3))).toEqual([1, 0, 0, 0.8]);
-    expect(u.slice(8, 12)).toEqual([2, 1, 1, 0]);
+    expect(u.slice(8, 12)).toEqual([2, 1, 1, 4096]);
     expect(u.slice(12, 16)).toEqual([1, 0, 0, 0]);
     expect(u.slice(16, 20)).toEqual([0.5, 1, 0, 0]);
   });
@@ -74,5 +75,14 @@ describe('emptyTilesFromReadback', () => {
     // A single faint pixel in tile 1's block.
     pixels[(5 * width + EMPTY_CHECK_BLOCK + 9) * 4 + 3] = 1;
     expect(emptyTilesFromReadback(pixels, width, 3)).toEqual([true, false, true]);
+  });
+});
+
+describe('paper visibility', () => {
+  it('is opaque paper when shown and fully transparent when hidden', () => {
+    expect(paperRgba({ paper: [0.5, 0.6, 0.7] })).toEqual([0.5, 0.6, 0.7, 1]);
+    expect(paperRgba({ paper: [0.5, 0.6, 0.7], paperVisible: false })).toEqual([0, 0, 0, 0]);
+    const u = packCompositeUniforms({ paper: [1, 1, 1], paperVisible: false, sources: [], liveStroke: null });
+    expect([...u.slice(0, 4)]).toEqual([0, 0, 0, 0]); // the compositor starts from transparent
   });
 });

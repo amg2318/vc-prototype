@@ -1,3 +1,4 @@
+import { markSourceMissing, type InheritedBlock } from '../document/inheritedBlock';
 import { releaseAllTiles, type CanvasId, type LayerId, type PaintDocument } from '../document/paintDocument';
 import type { TileKey, TileSlot } from '../document/tiles';
 import type { Placement } from '../workspace/coords';
@@ -44,21 +45,35 @@ export class AddCanvasCommand implements Command {
   }
 }
 
+/**
+ * Deletes a canvas. Canvases that inherit it keep their blocks, marked
+ * "missing source"; undo links them again.
+ */
 export class DeleteCanvasCommand implements Command {
   readonly label = 'Delete canvas';
   private index = 0;
   private doc: PaintDocument | null = null;
+  /** Inheritors' blocks as they were before the delete. */
+  private inheritors = new Map<CanvasId, InheritedBlock>();
 
   constructor(readonly canvasId: CanvasId) {}
 
   apply(ctx: CommandContext): Change {
     this.doc = ctx.canvas(this.canvasId);
+    this.inheritors.clear();
+    for (const c of ctx.canvases()) {
+      if (c.inherited?.source.kind === 'linked' && c.inherited.source.canvasId === this.canvasId) {
+        this.inheritors.set(c.id, c.inherited);
+        c.inherited = markSourceMissing(c.inherited);
+      }
+    }
     this.index = ctx.detachCanvas(this.canvasId);
     return canvasChange(this.canvasId);
   }
 
   revert(ctx: CommandContext): Change {
     ctx.attachCanvas(this.doc!, this.index);
+    for (const [id, block] of this.inheritors) ctx.canvas(id).inherited = block;
     return canvasChange(this.canvasId, { selectCanvas: this.canvasId });
   }
 
@@ -156,9 +171,13 @@ export class ReorderCanvasCommand implements Command {
  */
 export class ResizeCanvasCommand implements Command {
   readonly label = 'Resize canvas';
+  /**
+   * `blocks`: inherited blocks that follow the resize (the canvas's own, and
+   * those of canvases inheriting it), swapped in and out like the tiles.
+   */
   constructor(
     readonly canvasId: CanvasId,
-    private stored: { placement: Placement; tiles: Map<LayerId, Map<TileKey, TileSlot>> },
+    private stored: { placement: Placement; tiles: Map<LayerId, Map<TileKey, TileSlot>>; blocks?: Map<CanvasId, InheritedBlock | null> },
   ) {}
 
   private swap(ctx: CommandContext): Change {
@@ -166,6 +185,11 @@ export class ResizeCanvasCommand implements Command {
     const current = doc.placement;
     Object.assign(doc, this.stored.placement);
     this.stored.placement = current;
+    for (const [id, block] of this.stored.blocks ?? []) {
+      const c = ctx.canvas(id);
+      this.stored.blocks!.set(id, c.inherited);
+      c.inherited = block;
+    }
     for (const [layerId, tiles] of this.stored.tiles) {
       const layerTiles = doc.layer(layerId).tiles;
       const previous = new Map(layerTiles);
@@ -200,5 +224,71 @@ export class ResizeCanvasCommand implements Command {
         }
       }
     }
+  }
+}
+
+/**
+ * Any change to a canvas's inherited block: create, delete or retarget an
+ * arrow, relink, remove the block, or change one of its settings. The
+ * workspace works out the new block; this just swaps whole blocks, so every
+ * case undoes the same way. Blocks are plain values and never edited in place.
+ *
+ * Commands with the same `mergeKey` in a row (one slider or handle drag)
+ * become one undo step.
+ */
+/**
+ * Changes several canvases' blocks as one undo step (moving an arrow's head
+ * to another canvas empties one block and links another).
+ */
+export class SetBlocksCommand implements Command {
+  constructor(
+    private readonly entries: readonly { canvasId: CanvasId; before: InheritedBlock | null; after: InheritedBlock | null }[],
+    readonly label: string,
+  ) {}
+
+  /** The last canvas changed (which ends up selected). */
+  get canvasId(): CanvasId {
+    return this.entries[this.entries.length - 1]!.canvasId;
+  }
+
+  apply(ctx: CommandContext): Change {
+    for (const e of this.entries) ctx.canvas(e.canvasId).inherited = e.after;
+    return canvasChange(this.canvasId);
+  }
+
+  revert(ctx: CommandContext): Change {
+    for (const e of this.entries) ctx.canvas(e.canvasId).inherited = e.before;
+    return canvasChange(this.canvasId);
+  }
+
+  dispose(): void {}
+}
+
+export class SetBlockCommand implements Command {
+  constructor(
+    readonly canvasId: CanvasId,
+    private readonly before: InheritedBlock | null,
+    private after: InheritedBlock | null,
+    readonly label: string,
+    readonly mergeKey: string | null = null,
+  ) {}
+
+  apply(ctx: CommandContext): Change {
+    ctx.canvas(this.canvasId).inherited = this.after;
+    return canvasChange(this.canvasId);
+  }
+
+  revert(ctx: CommandContext): Change {
+    ctx.canvas(this.canvasId).inherited = this.before;
+    return canvasChange(this.canvasId);
+  }
+
+  dispose(): void {}
+
+  mergeWith(next: Command): boolean {
+    if (!(next instanceof SetBlockCommand) || this.mergeKey === null || next.mergeKey !== this.mergeKey) return false;
+    if (next.canvasId !== this.canvasId) return false;
+    this.after = next.after;
+    return true;
   }
 }
