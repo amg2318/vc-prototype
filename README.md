@@ -1,10 +1,23 @@
-# VC Prototype: Phase 2 (multi-canvas workspace)
+# VC Prototype: Phase 3 (canvas inheritance)
 
 A tablet-first web drawing tool, combining Procreate-style raster painting with Figma-style multi-canvas
-layout. **Phase 2 gate:** a 20-canvas project at print size stays within iPad memory limits, with smooth
-panning and no crashes.
+layout. **Phase 3 gate:** a 5-level chain updates visibly within one or two frames during a stroke on the
+iPad.
 
-Phase 2 replaces the single canvas with an infinite workspace of independent canvases (each up to
+Phase 3 adds the thesis contribution: **any canvas can inherit another canvas's content as a live,
+read-only block, connected by arrows, with chains allowed.**
+- The block shows the source's full visible composite (its layers and its own inherited block), so
+  chains work. It sits below the canvas's own layers, and the canvas draws on its own layers only.
+- Placement (fit inside, or moved, scaled, rotated and flipped), crop, effects (grayscale, invert,
+  posterize), opacity, blend mode and visibility are applied on the GPU at render time. Inheritors share
+  the source's cached composite: no pixels are copied.
+- Arrows are created, retargeted and deleted with pen, finger or mouse. Cycles are refused, and chains
+  deeper than 8 get a warning.
+- A stroke reaches every inheritor down the chain within the same frame when the budget allows. Off-screen
+  inheritors wait until the stroke ends.
+- The HUD and stress mode measure the time from a change to the end of the chain.
+
+Phase 2 (below) carries over unchanged: an infinite workspace of independent canvases (each up to
 4096 × 4096, with its own layers):
 - pan and zoom anywhere; canvases are created from print presets, moved, resized, renamed, duplicated,
   deleted and reordered, all undoable in one workspace-wide history;
@@ -16,6 +29,8 @@ Phase 2 replaces the single canvas with an infinite workspace of independent can
 Phase 1 (layers, eraser, undo, layers panel, colour picker) carries over unchanged inside each canvas.
 Saving is a later phase.
 
+- [Phase 3 on-device checklist](docs/phase3-ipad-checklist.md): what to try on the iPad
+- [Phase 3 findings](docs/phase3-findings.md): desktop measurements, known issues, concerns about the gate
 - [Phase 2 on-device checklist](docs/phase2-ipad-checklist.md): what to try on the iPad
 - [Phase 2 findings](docs/phase2-findings.md): desktop measurements, recommended iPad memory budget, known issues
 - [Phase 1 on-device checklist](docs/phase1-ipad-checklist.md)
@@ -125,13 +140,16 @@ push to `main`.
 | [ / ]                     | Smaller / larger tool size   |
 | ⇧N                        | New layer                    |
 | H                         | Toggle HUD                   |
+| Delete / Backspace        | Delete the selected arrow    |
+| Escape                    | Deselect the arrow; cancel choosing a canvas; leave block-transform mode |
+| Enter                     | Leave block-transform mode   |
 
 **Finger drawing** (brush panel, "Finger draws"): *Auto* (default) lets one finger draw until a pen is
 used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it either way. The
 **Finger** button in the toolbar switches it on or off at any time.
 
 **Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
-Finger (finger drawing on/off), Canvases, Layers.
+Finger (finger drawing on/off), Arrows (show or hide arrows), Canvases, Layers.
 
 ### The workspace
 
@@ -155,12 +173,57 @@ Finger (finger drawing on/off), Canvases, Layers.
 
 **Layers panel:** the top layer is listed first. Tap a row to select it. Use ● to show or hide a layer, and
 drag ≡ to reorder. The selected layer shows its opacity (one undo step per slider drag), blend mode, rename,
-duplicate, clear and delete. **Background** sets the paper colour, which the eraser never removes.
+duplicate, clear and delete. **Background** sets the paper colour, which the eraser never removes; its ●
+hides the paper, making the canvas transparent (shown over a checkerboard), so canvases inheriting it see
+only its strokes. The inherited block has its own row at the bottom (see below).
 
 **Palm rejection:** while the pen is down, all touch input is ignored. If a palm had already started a
 pinch when the pen lands, the view snaps back. Touches with a large contact area
 (`GESTURES.palmContactPx` in `src/config.ts`) never count as taps or holds. All gesture thresholds live in
 that one object.
+
+### Inheritance: arrows and inherited blocks
+
+**Arrows** go from a source to the canvas that inherits it. A canvas has at most one incoming arrow and any
+number of outgoing ones.
+- **Create:** each canvas has a connection handle (a ring at its top-right corner, on the row of its name).
+  Drag it onto another canvas to make that canvas inherit this one, or tap it and then tap the canvas.
+  While choosing, canvases that would make a loop are dimmed and valid ones are outlined in green.
+- **Select:** tap an arrow (in the space between canvases; a press on a canvas always draws). Grips appear
+  at both ends and a bar offers **Change source…** and **Delete arrow** (or the Delete key). Tap empty
+  space or press Escape to deselect.
+- **Retarget:** drag the selected arrow's **tail** onto another canvas to change the source (the block keeps
+  its settings), or its **head** to move the arrow to another canvas (the canvas it leaves keeps an empty
+  block). **Change source…** does the same by tapping, and so does the source picker in the block's properties.
+- **Deleted source:** the inheritor's block is marked "source deleted" and shows a short red dashed stub
+  on its left edge. Tap the stub, then tap the canvas to inherit from instead.
+- **Opacity:** arrows are faint by default; full for the selected arrow and the arrows touching the
+  selected canvas; medium for the rest of the selected canvas's chain (`ARROW_STYLE` in `src/config.ts`).
+  **Arrows** in the toolbar hides or shows them all.
+- **Lineage:** the selected canvas's chain upstream and every canvas depending on it downstream get a faint
+  outline, and a badge above it says how many canvases depend on it.
+- **Depth warning:** when a chain grows past 8 levels (`INHERITANCE_DEPTH_WARNING`), a banner says so. It
+  never blocks.
+
+Every arrow action is one undo step. Undoing a canvas deletion links its inheritors again.
+
+**The inherited block** (layers panel, bottom row, dashed): a thumbnail, its state (*from <source>*,
+*empty*, *source deleted*), opacity and blend mode, and ● to hide it. A canvas without a block offers
+**Inherit from…** instead. Tap the row for its properties:
+- **Source** picker (canvases that would make a loop are disabled) and **Go to** the source;
+- **Opacity** (one undo step per drag) and **Blend**: normal, multiply, screen or overlay;
+- **Placement**: *fit inside* (the default, refitted when the source changes) or *custom* (as soon as it is
+  moved, scaled, rotated or flipped). Fields for position, scale % and rotation °, **Flip H** / **Flip V**,
+  **Refit** (fit inside again), and **Transform** (below);
+- **Crop** as % of the source (kept in normalized 0–1 coordinates, so it survives source resizes);
+- **Effects**: grayscale, invert, posterize (with levels), applied in that order;
+- **Remove inherited block** (deletes the block and its settings; undoable).
+
+**Block-transform mode** (Transform in the block's properties): drag inside the block to move it, a corner
+to scale it about its centre, or the round handle above it to rotate (snapping to 15° steps within 2°).
+**Flip H**, **Flip V** and **Done** are in a bar at the bottom. While the mode is on, strokes are off and
+presses elsewhere pan. Leave it with Done, the Transform button again ("Done transforming"), any tool in the
+toolbar, or Escape / Enter. Each drag is one undo step.
 
 ### Memory settings
 
@@ -186,7 +249,13 @@ canvas shows its last composite or a coarser preview, so it never goes blank.
   - **Auto-pan**: resets the stats, flies the view from canvas to canvas and back, then reports frame
     times, evictions and reloads during the pan, reload latency and peak GPU memory. Press
     **Export JSON** straight after to keep the details;
-  - on the selected canvas: 200 strokes, fill 32 layers, and undo/redo all.
+  - on the selected canvas: 200 strokes, fill 32 layers, and undo/redo all;
+  - **Inheritance (Phase 3):** **Chain** (depth 1–10, default 5) builds a root and that many canvases, each
+    inheriting the one before; **Fan-out** (1–20, default 10) builds a root and that many canvases all
+    inheriting it. Inheritors get a mix of placements, effects, opacity and blend modes, and all stay on
+    screen (1024 × 1024 canvases, right of the existing ones). Then **Root strokes** (default 10) scripted
+    strokes are drawn on the root, each spread over about 12 frames like real input. The banner reports the
+    change → end of chain time, frame times and p95 by depth. Each run is added to the JSON export.
 
 **Brush panel:** size and opacity of the current tool (the brush and eraser have separate settings), and
 finger drawing (Auto / On / Off). Under **Brush details & debug** are spacing, smoothing, the pressure
@@ -196,6 +265,9 @@ they draw at full pressure), two-finger rotate, fit view, toggle HUD, export JSO
 ## Measurement HUD
 
 The HUD shows the last 2 seconds and refreshes 4 times per second. Timing values are shown as `p50 / p95`.
+Tap **▾ HUD** to collapse it to one line (fps, and the chain time while inheritors update), and tap again
+to expand it; the choice is remembered on that device. Only that header takes taps: pen strokes pass
+through the rest of the HUD.
 
 | Line              | Meaning                                                                                                   |
 | ----------------- | --------------------------------------------------------------------------------------------------------- |
@@ -217,6 +289,8 @@ The HUD shows the last 2 seconds and refreshes 4 times per second. Timing values
 | `reload ms`       | Time from asking for an evicted tile to its pixels being ready to upload (p50 / p95 of the last 200)    |
 | `gpu memory`      | Estimate of the textures the app allocated (layer pages, composite pages, masks)                         |
 | `undo memory`     | Undo/redo steps and the tiles only history keeps alive, counted at raw size                              |
+| `chain ms`        | Phase 3: a source change reaching the renderer → the frame that brings the deepest inheritor fully up to date (its GPU work submitted). One value per frame that caught inheritors up |
+| `inheritance`     | Phase 3: the selected canvas's chain depth; in the last frame, inheritors updated through an arrow and inheritors still stale (off screen during a stroke, or waiting for the budget) |
 
 > **These latencies are estimates of software latency, not on-glass latency.** They start at the event's
 > timestamp (when the browser received the input) and stop when our GPU work was submitted or completed.
@@ -237,6 +311,9 @@ sheet (choose "Save to Files"). On desktop it downloads `measurements-<label>-<t
   latency estimates, visible canvases and running eviction/reload totals
 - `residency`, `reloadTimes`: eviction/reload rates and every reload latency (ms)
 - `memory`: four samples a second of tiles on the GPU, GPU bytes, compressed tiles and bytes, and undo memory
+- `frames[].propagation`, `inheritorsUpdated`, `staleInheritors` (Phase 3): per frame, each inheritor
+  caught up with its chain depth and time (ms); `inheritance` sums them up: `chainEnd`, `byDepth`, and
+  `stressRuns` (one summary per Chain / Fan-out run: times by depth, frame times, peak GPU memory)
 
 Press **Reset stats** before each test run so every file covers exactly one configuration.
 
@@ -254,7 +331,8 @@ src/
   brush/      pressure (real or from speed), stabilizer, dab interpolation, StrokeEngine (pure logic)
   render/     Renderer interface, RenderCore (shared by both backends), pyramid planner, tile
               residency + compressed store, packing helpers, webgpu/ and webgl2/ backends
-  ui/         toolbar, canvas labels, canvases panel, layers panel, colour picker, undo indicator, …
+  ui/         toolbar, canvas labels, canvases panel, layers panel (+ block section), colour picker,
+              arrows and arrow controls, block-transform mode, undo indicator, …
   viewport/   workspace ↔ screen transform
   debug/      metrics, HUD, controls, JSON export, stress mode
 ```
@@ -287,7 +365,8 @@ exact far from the origin.
   tile is drawn from the nearest coarser one. `PyramidPlanner` makes these decisions (pure, unit-tested)
   and both backends just execute its plan, a limited amount per frame.
 - **Display and overlay.** One pass draws each visible canvas (a shadow, then its tiles) and then the
-  overlay: selection outline, undo highlight, and later Phase 3's arrows.
+  overlay: arrows, lineage outlines, selection outline, undo highlight, block-transform outline. Overlay
+  shapes are rects or rotated quads, sized in device pixels.
 - **Batching.** Input handlers only queue work. `RenderCore` turns it into one frame's ops once per
   animation frame, and only when something changed.
 
@@ -295,13 +374,41 @@ exact far from the origin.
 (mask). On pen-up, `Editor.commitStroke` (new tiles + undo step) → `renderer.mergeStroke`. Workspace
 change events tell the renderer which tiles to recomposite and which thumbnails to refresh.
 
-**Phase 3 hooks:**
-- `renderer.onCompositeChanged(canvasId, dirtyRect)` fires whenever a canvas's composite changes;
-- `renderer.requestComposite(canvasId, level, rect)` builds part of a canvas's composite at a pyramid level,
-  even off screen, and `renderer.compositeTiles(canvasId, level, rect)` says which composite page texels to
-  draw it from (falling back to coarser tiles or paper);
-- the overlay pass above the canvases;
-- the compositor takes generic *sources*, not layers, so inherited content can be added as a source.
+### Inheritance (Phase 3)
+
+- **Model.** `PaintDocument.inherited` holds at most one `InheritedBlock` (`src/document/inheritedBlock.ts`):
+  its source (`linked`, `empty` or `missing`), placement (`fit` / `custom`: centre, scale, rotation, flips),
+  normalized crop, effects, opacity, blend mode and visibility. Blocks are immutable values; every change
+  makes a new one, so the renderer and undo just compare references. The pure maths (placement → affine
+  matrix, dirty-rect transforms, fitting, crop) lives in the same file and is unit-tested.
+- **Graph.** `InheritanceGraph` (`src/workspace/`) is built from the linked blocks. Before an arrow is made
+  (create, retarget, relink), `wouldCycle` walks up from the new source; reaching the target refuses it.
+  The graph is a forest, so order by depth is a valid topological order.
+- **Undo.** `SetBlockCommand` covers every block change (create arrow, delete, retarget, relink, settings,
+  remove), merging slider and handle drags into one step; `SetBlocksCommand` moves an arrow head (two
+  blocks, one step). Deleting a canvas marks its inheritors' blocks *missing*, and undo restores them.
+- **Propagation.** Composite changes are collected during a frame. At the start of the next frame
+  `Propagation` maps each changed rect through every inheritor's crop and placement (grown one pixel for
+  filtering), sources first, so each canvas gets one merged change and one `onCompositeChanged` event per
+  frame. Inheritors are invalidated only in that rect.
+- **Compositing.** The block is a source at the bottom of the compositor's stack: the shader maps each
+  inheritor pixel back into the source, looks the source's cached composite tile up in a small lookup
+  texture, samples it, applies effects, opacity and blend mode, then composites the canvas's own layers on
+  top. The source level matches the block's size on screen (a small inheritor samples a preview level).
+  An inheritor's cached composite includes its block, which is what its own inheritors sample. Canvases
+  render in stages by depth, so a whole chain updates within one frame. Inheritors render into a staging
+  texture and are copied to their cache slots, because a pass can't sample the page it renders into.
+- **Budget and residency.** The planner spends its per-frame budget (a tile count) on sources before
+  inheritors; among the same depth, canvases the budget skipped last frame go first. A visible inheritor
+  asks for the parts of its source it shows, through the whole chain, so off-screen sources stay built;
+  until a level is built, a coarser cached one is drawn, never a blank. During a stroke, inheritors that
+  are off screen (and not needed by a visible one) are left *stale* and catch up when the stroke ends or
+  they come into view.
+- **Measurement.** The render core notes when a change arrived and which frame brings each inheritor up to
+  date; `FrameInfo.propagation` carries those times with chain depths to the HUD and the export.
+
+The Phase 2 hooks Phase 3 builds on (`onCompositeChanged`, `requestComposite`, `compositeTiles`, the overlay
+pass, generic compositor sources) remain in the `Renderer` interface.
 
 ## Licence
 
