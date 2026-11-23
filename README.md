@@ -1,10 +1,24 @@
-# VC Prototype: Phase 3 (canvas inheritance)
+# VC Prototype: Phase 4 (persistence and version history)
 
 A tablet-first web drawing tool, combining Procreate-style raster painting with Figma-style multi-canvas
-layout. **Phase 3 gate:** a 5-level chain updates visibly within one or two frames during a stroke on the
-iPad.
+layout. **Phase 4 gate:** force-closing Safari mid-session on the iPad loses at most the last stroke.
 
-Phase 3 adds the thesis contribution: **any canvas can inherit another canvas's content as a live,
+Phase 4 makes work survive: **projects are saved on the device as you draw, with a version history.**
+- Each project is saved in the browser's private file system (OPFS) by a storage worker. Tiles are stored
+  once by their content hash (SHA-256, compressed), so layers, canvases and versions share them.
+- Autosave: a short pause after a change, at once when a second stroke ends unsaved, and at once when the
+  page is hidden or closed. A save never leaves a half-written project: the head only moves once every
+  file it needs is on disk.
+- Versions: **Save version** (⌘S), plus automatic ones when a session ended with changes no version
+  holds, and after 30 minutes of active editing. Restore keeps the current state as a "Before restore"
+  version. Retention keeps manual and pinned versions and thins out automatic ones.
+- Projects: create, open, rename, duplicate, delete; sizes and the storage quota; the last project opens on
+  launch; a second tab opens a project read-only.
+- Export and import of a project file (with or without history), and PNG export of a canvas at full
+  resolution, inherited content included.
+- Opening a project shows every canvas at once from saved previews, before any layer tile is loaded.
+
+Phase 3 (below) carries over unchanged: **any canvas can inherit another canvas's content as a live,
 read-only block, connected by arrows, with chains allowed.**
 - The block shows the source's full visible composite (its layers and its own inherited block), so
   chains work. It sits below the canvas's own layers, and the canvas draws on its own layers only.
@@ -22,13 +36,15 @@ Phase 2 (below) carries over unchanged: an infinite workspace of independent can
 - pan and zoom anywhere; canvases are created from print presets, moved, resized, renamed, duplicated,
   deleted and reordered, all undoable in one workspace-wide history;
 - each canvas's composite is a cached tile pyramid, so a zoomed-out view of many canvases stays cheap;
-- layer tiles stay on the GPU within a budget; the rest are compressed in memory and reloaded on demand;
+- layer tiles stay on the GPU within a budget; the rest are reloaded on demand (since Phase 4 from the
+  project store on disk, before that compressed in memory);
 - a finger or a mouse can draw, erase and pick colours, not only a pen;
 - the HUD and stress mode measure memory, evictions and reload times.
 
 Phase 1 (layers, eraser, undo, layers panel, colour picker) carries over unchanged inside each canvas.
-Saving is a later phase.
 
+- [Phase 4 on-device checklist](docs/phase4-ipad-checklist.md): what to try on the iPad, starting with the gate
+- [Phase 4 findings](docs/phase4-findings.md): desktop measurements, known issues, risks for the gate
 - [Phase 3 on-device checklist](docs/phase3-ipad-checklist.md): what to try on the iPad
 - [Phase 3 findings](docs/phase3-findings.md): desktop measurements, known issues, concerns about the gate
 - [Phase 2 on-device checklist](docs/phase2-ipad-checklist.md): what to try on the iPad
@@ -140,6 +156,7 @@ push to `main`.
 | [ / ]                     | Smaller / larger tool size   |
 | ⇧N                        | New layer                    |
 | H                         | Toggle HUD                   |
+| ⌘S / Ctrl+S               | Save a version               |
 | Delete / Backspace        | Delete the selected arrow    |
 | Escape                    | Deselect the arrow; cancel choosing a canvas; leave block-transform mode |
 | Enter                     | Leave block-transform mode   |
@@ -149,7 +166,38 @@ used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it e
 **Finger** button in the toolbar switches it on or off at any time.
 
 **Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
-Finger (finger drawing on/off), Arrows (show or hide arrows), Canvases, Layers.
+Finger (finger drawing on/off), Arrows (show or hide arrows), Canvases, Layers, History, Projects, and the
+save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for details).
+
+### Saving, versions and projects (Phase 4)
+
+- **Saving is automatic.** The save status in the toolbar shows where things are. There is no "save"
+  command for the working copy; ⌘S and **Save version** make a *version*.
+- **History** panel: the open project's versions, newest first, with a thumbnail of the workspace, a name
+  and whether it was saved by hand or automatically. Select one to **Restore** it, rename it, **Pin** it
+  (pinned versions are never removed by retention) or delete it (asks again). Restoring first keeps the
+  current state as a "Before restore" version (unless a version already holds it) and clears undo history.
+- **Automatic versions:** "Session ended …" when a project opens whose last session left changes no
+  version holds, and "Autosave …" after 30 minutes of active editing. **Retention** keeps every manual and
+  pinned version; of the automatic ones, the newest 10, then the newest of each day for 30 days, then the
+  newest of each week. Both numbers can be changed in **Projects → Storage on this device**.
+- **Projects** panel: every project on this device with its size, and the total against the browser's
+  storage estimate. **New project**, **Import…**, and per project: open, rename, duplicate, delete (asks
+  again), and **Export…** (with or without version history). The app opens the last opened project.
+- **Storage on this device** (in the Projects panel): whether the browser may clear stored projects, with
+  a button to ask it not to; the retention settings; **Delete automatic versions…** and **Clean up**
+  (removes data nothing uses; this also happens on its own).
+- **PNG export:** Canvases panel → select a canvas → **Export PNG**: the canvas at full resolution as it
+  looks (inherited content and paper included), with straight alpha.
+- **Getting files out:** on the iPad the share sheet opens (choose "Save to Files", AirDrop…); on Chromium
+  desktop a save dialog; elsewhere a download. If a long export outlasts the tap that started it, a
+  **Save…** button appears; tap it.
+- **Two tabs:** only one tab can change a project. A second tab opens it read-only and says so; nothing is
+  saved there. Delete, duplicate and export are refused while another tab has the project open.
+- **Storage full:** the save status turns red and a message offers to delete automatic versions or to open
+  Projects (export and delete). Nothing already saved is lost; the unsaved changes stay on screen.
+- **On iPad, use the home-screen app.** In a Safari tab, Safari may clear a site's data after some days
+  without a visit; the app says so once per visit. A home-screen app's storage is not cleared that way.
 
 ### The workspace
 
@@ -234,13 +282,15 @@ toolbar, or Escape / Enter. Each drag is one undo step.
 | Undo history | 256 MB, counted at raw tile size; the oldest steps are dropped first | `HISTORY_BUDGET_BYTES` |
 | Tile ids (all canvases, layers and undo) | 65,536 | `MAX_TILE_IDS` |
 
-When the GPU budget is full, the least recently used layer tiles are read back, compressed (deflate) and
-kept in JS memory. They reload when a stroke, an undo, a resize or a recomposite needs them. Until then the
+When the GPU budget is full, the least recently used layer tiles leave the GPU. Since Phase 4 they go to
+the open project's store on disk (a tile that is already saved needs no readback); only if writing fails
+are they kept compressed in JS memory, as in Phase 2. They reload when a stroke, an undo, a resize or a recomposite needs them. Until then the
 canvas shows its last composite or a coarser preview, so it never goes blank.
 
 ### URL parameters
 
-- `?canvases=N` starts with N A4 canvases in a grid (default: one 4096 × 4096 canvas).
+- `?canvases=N` creates a new project with N A4 canvases in a grid (default: the last project opens; a new
+  project has one 4096 × 4096 canvas).
 - `?layerBudgetMB=N` sets the GPU budget for layer tiles.
 - `?renderer=webgl2` forces the WebGL2 fallback.
 - `?stress` adds stress mode to **Brush details & debug**:
@@ -256,6 +306,11 @@ canvas shows its last composite or a coarser preview, so it never goes blank.
     screen (1024 × 1024 canvases, right of the existing ones). Then **Root strokes** (default 10) scripted
     strokes are drawn on the root, each spread over about 12 frames like real input. The banner reports the
     change → end of chain time, frame times and p95 by depth. Each run is added to the JSON export.
+  - **Persistence (Phase 4): Canvases × versions** creates a new project with the canvases set above
+    (count, preset, layers, strokes), then **Versions** (default 20) manual versions with three strokes
+    between them. The banner reports average save and version times, storage per version, the time to
+    reopen the project until its previews show and until it is at full resolution, and garbage
+    collection after deleting the older half of the versions. The details go to the JSON export.
 
 **Brush panel:** size and opacity of the current tool (the brush and eraser have separate settings), and
 finger drawing (Auto / On / Off). Under **Brush details & debug** are spacing, smoothing, the pressure
@@ -291,6 +346,8 @@ through the rest of the HUD.
 | `undo memory`     | Undo/redo steps and the tiles only history keeps alive, counted at raw size                              |
 | `chain ms`        | Phase 3: a source change reaching the renderer → the frame that brings the deepest inheritor fully up to date (its GPU work submitted). One value per frame that caught inheritors up |
 | `inheritance`     | Phase 3: the selected canvas's chain depth; in the last frame, inheritors updated through an arrow and inheritors still stale (off screen during a stroke, or waiting for the budget) |
+| `save`            | Phase 4: save status, requests waiting for the storage worker, and the last save that wrote something (ms from start to commit, bytes written) |
+| `storage`         | Phase 4: this project's size on disk, the whole site's storage use (browser estimate, every 10 s), and the last garbage collection (ms, bytes freed) |
 
 > **These latencies are estimates of software latency, not on-glass latency.** They start at the event's
 > timestamp (when the browser received the input) and stop when our GPU work was submitted or completed.
@@ -313,7 +370,10 @@ sheet (choose "Save to Files"). On desktop it downloads `measurements-<label>-<t
 - `memory`: four samples a second of tiles on the GPU, GPU bytes, compressed tiles and bytes, and undo memory
 - `frames[].propagation`, `inheritorsUpdated`, `staleInheritors` (Phase 3): per frame, each inheritor
   caught up with its chain depth and time (ms); `inheritance` sums them up: `chainEnd`, `byDepth`, and
-  `stressRuns` (one summary per Chain / Fan-out run: times by depth, frame times, peak GPU memory)
+  `stressRuns` (one summary per Chain / Fan-out run: times by depth, frame times, peak GPU memory; and
+  per persistence run, `kind: "persistence"`: save and version times, bytes per version, reopen times, GC)
+- `persistence` (Phase 4): every save (ms, bytes and tiles written, records written, whether it committed)
+  and every garbage collection (ms, files and bytes removed, project size after)
 
 Press **Reset stats** before each test run so every file covers exactly one configuration.
 
@@ -410,8 +470,51 @@ change events tell the renderer which tiles to recomposite and which thumbnails 
 The Phase 2 hooks Phase 3 builds on (`onCompositeChanged`, `requestComposite`, `compositeTiles`, the overlay
 pass, generic compositor sources) remain in the `Renderer` interface.
 
+### Persistence (Phase 4)
+
+- **Where.** `src/storage/` runs in a module worker (`storage.worker.ts`); the main thread talks to it
+  through `StorageClient` (`client.ts`). Files live in OPFS, one folder per project
+  (`projects/<id>/`), written with synchronous access handles. The project list and each project's
+  *head* live in IndexedDB. Without OPFS or IndexedDB the app runs in memory and says nothing is saved.
+- **Objects.** A tile is its raw premultiplied RGBA, hashed with SHA-256 and compressed (deflate); the file
+  is named by the hash, with a 24-byte header (magic, codec, sizes, CRC32) so a torn write is detected and
+  rewritten, never trusted (`objectCodec.ts`). Identical tiles are stored once. Fully transparent tiles
+  are not stored at all. Canvas records (layers with their tile maps, the inherited block, previews) are
+  stored the same way.
+- **Two levels.** A root manifest (`manifests/<id>.json`, never rewritten) lists the canvases and points to
+  each canvas's record by hash. The head (IndexedDB) points to the working manifest and lists the
+  versions, each pointing to a manifest. Making a version copies nothing.
+- **Commit sequence** (`projectStore.ts`): tiles → records → check that everything the manifest needs is
+  on disk → write the manifest under a new name → replace the head in one IndexedDB transaction (the
+  commit point, strict durability) → only then delete files nothing refers to. A crash at any step leaves
+  the previous head complete; the tests crash at every step.
+- **Saving on the main thread** (`src/persistence/`). `ProjectSaver` reads changed tiles back from the GPU
+  asynchronously (a few per frame; WebGPU `mapAsync`, WebGL2 pixel buffer + fence), sends them to the
+  worker, then sends the records of changed canvases only. `TileHashes` remembers each live tile's hash,
+  so an unchanged tile is never read back again. `AutosaveScheduler` decides when to save (pure, tested
+  with a fake clock). Hidden pages get no animation frames, so while hidden, frames are driven by a timer
+  and the save skips previews.
+- **Eviction to disk.** When the GPU budget is full, layer tiles now go to the project store
+  (`DiskTileBackingStore`); a tile already saved leaves the GPU without a readback. JS memory holds no
+  evicted tiles, unless writing fails (then they are kept compressed in memory as in Phase 2).
+- **Previews.** Each canvas's composite levels 3–4 (1/8 and 1/16 resolution) are saved as tiles with its
+  record. Opening a project installs them in the pyramid planner as complete tiles, so the workspace shows
+  at once; layer tiles load as the view needs them.
+- **Versions and retention** (`versions.ts`, `retention.ts`, pure and tested). Thumbnails are drawn on the
+  CPU from the saved level-4 previews.
+- **Garbage collection** (`gc.ts`, in the worker): mark everything the head's manifests reach plus the
+  hashes the main thread still holds (undo history, evicted tiles, previews not committed yet), then sweep
+  in short steps so saves carry on. Objects written during a collection are never swept.
+- **Locks.** A Web Lock per project (`projectLock.ts`); without it the tab is read-only.
+- **Format versions.** Every manifest, record and project file carries `formatVersion`; `migrations.ts`
+  holds one step per version (one test migration, from a hand-written draft format 0).
+- **Project files** (`archive.ts`): a zip (fflate) with `project.json`, manifests, and the stored objects
+  as they are. Import checks paths and sizes, migrates and validates, verifies every hash, and always
+  creates a new project. **PNG export** (`src/export/`) reads the canvas's full-resolution composite a few
+  tiles per frame and streams it into a small PNG encoder a tile row at a time.
+
 ## Licence
 
-MIT (see `LICENSE`). The only dependencies are development tools: Vite, Vitest, TypeScript,
-`@vitejs/plugin-basic-ssl`, `@webgpu/types` and `@types/node`. All are MIT or BSD licensed. The shipped app
-has no runtime dependencies.
+MIT (see `LICENSE`). The one runtime dependency is [fflate](https://github.com/101arrowz/fflate) (MIT),
+for zip files and PNG compression. The development tools are Vite, Vitest, TypeScript,
+`@vitejs/plugin-basic-ssl`, `@webgpu/types` and `@types/node`, all MIT or BSD licensed.
