@@ -1,3 +1,4 @@
+import { requestReset, resetIfRequested } from './persistence/resetDevice';
 import './style.css';
 import { GESTURES, INHERITANCE_DEPTH_WARNING, TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
@@ -50,6 +51,8 @@ import { IDENTITY_VIEW, docToClipMatrix, docToScreen, fitRectToView, zoomAt, typ
 async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
   const initialCanvas = document.getElementById('stage') as HTMLCanvasElement;
+  // "Delete all data" (Projects → Storage) is carried out here, before storage opens.
+  const resetMessage = await resetIfRequested();
 
   const { renderer, fallbackReason, canvas } = await createRenderer(
     initialCanvas,
@@ -671,6 +674,7 @@ async function main(): Promise<void> {
           return projectsPanel.refresh();
         }),
       notice: () => (inIosBrowserTab() ? SAFARI_TAB_NOTICE : null),
+      deleteAllData: requestReset,
     },
   });
   /**
@@ -805,7 +809,8 @@ async function main(): Promise<void> {
     }
     if (status.state === 'read-only' && status.message) showBanner(status.message, true);
   };
-  if (project.readOnly && project.status.message) showBanner(project.status.message, true);
+  if (resetMessage) showBanner(resetMessage);
+  else if (project.readOnly && project.status.message) showBanner(project.status.message, true);
   else if (inIosBrowserTab() && !sessionStorage.getItem('vc-tab-notice')) {
     sessionStorage.setItem('vc-tab-notice', '1'); // once per visit
     showBanner(SAFARI_TAB_NOTICE);

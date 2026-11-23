@@ -35,6 +35,8 @@ export interface StorageActions {
   collectGarbage(): void;
   /** A note to show (e.g. "use the home-screen app"), or null. */
   notice(): string | null;
+  /** Delete every project, version and setting on this device (the app reloads). */
+  deleteAllData(): void;
 }
 
 export class ProjectsPanel {
@@ -96,21 +98,10 @@ export class ProjectsPanel {
     );
     const row = document.createElement('div');
     row.className = 'button-row';
-    let confirming = false;
-    const deleteAuto = button('Delete automatic versions…', () => {
-      if (!confirming) {
-        confirming = true;
-        deleteAuto.textContent = 'Delete them for good';
-        deleteAuto.classList.add('danger');
-        return;
-      }
-      confirming = false;
-      deleteAuto.textContent = 'Delete automatic versions…';
-      deleteAuto.classList.remove('danger');
-      s.deleteAutomaticVersions();
-    }, 'Delete every automatic version of the open project that is not pinned, to free space');
+    const deleteAuto = confirmButton('Delete automatic versions…', 'Delete them for good', s.deleteAutomaticVersions, 'Delete every automatic version of the open project that is not pinned, to free space');
     row.append(deleteAuto, button('Clean up', s.collectGarbage, 'Remove data no version uses any more (this happens on its own too)'));
     section.append(row);
+    section.append(confirmButton('Delete all data…', 'Delete everything for good', s.deleteAllData, 'For testing: delete every project, version and setting on this device and start fresh (the app reloads)'));
     return section;
   }
 
@@ -246,5 +237,17 @@ function button(text: string, onClick: () => void, title: string): HTMLButtonEle
   b.title = title;
   b.setAttribute('aria-label', title);
   b.addEventListener('click', onClick);
+  return b;
+}
+
+/** A button that asks again: the first tap turns it into `confirmLabel`, the second runs `run`. */
+function confirmButton(label: string, confirmLabel: string, run: () => void, title: string): HTMLButtonElement {
+  let confirming = false;
+  const b = button(label, () => {
+    confirming = !confirming;
+    b.textContent = confirming ? confirmLabel : label;
+    b.classList.toggle('danger', confirming);
+    if (!confirming) run();
+  }, title);
   return b;
 }

@@ -69,6 +69,7 @@ Notes for the findings (did the indicator say *Saved* before closing? how long d
 | In a Safari tab: the "use the Home Screen app" notice appears once per visit (not in the home-screen app) | |
 | Open the same project in two Safari tabs: the second says read-only, its indicator says *Read-only* | |
 | Then close the first tab: within a few seconds the second says it reloaded the project and saves now | |
+| Projects → Storage → **Delete all data…** (tap twice): the app reloads with one empty project and says everything was deleted | |
 | First launch on a device with no projects (or after deleting them all): the app starts, not read-only | |
 
 ## 5. Export, import, PNG

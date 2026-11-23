@@ -186,7 +186,9 @@ save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for det
   again), and **Export…** (with or without version history). The app opens the last opened project.
 - **Storage on this device** (in the Projects panel): whether the browser may clear stored projects, with
   a button to ask it not to; the retention settings; **Delete automatic versions…** and **Clean up**
-  (removes data nothing uses; this also happens on its own).
+  (removes data nothing uses; this also happens on its own). For testing, **Delete all data…** (asks
+  again) deletes every project, version and setting on this device; the app reloads and starts fresh.
+  Close the app's other tabs first, or nothing is deleted.
 - **PNG export:** Canvases panel → select a canvas → **Export PNG**: the canvas at full resolution as it
   looks (inherited content and paper included), with straight alpha.
 - **Getting files out:** on the iPad the share sheet opens (choose "Save to Files", AirDrop…); on Chromium
