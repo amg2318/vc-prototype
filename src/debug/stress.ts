@@ -10,6 +10,7 @@ import type { Workspace } from '../workspace/workspace';
 import { buttons } from './controls';
 import { buildGroup, describeRun, strokeRoot, type Shape } from './inheritanceStress';
 import type { Metrics } from './metrics';
+import { persistenceRun, type PersistenceStressDeps } from './persistenceStress';
 
 export interface StressDeps {
   /** The active canvas's editor (single-canvas tests draw on it). */
@@ -24,6 +25,8 @@ export interface StressDeps {
   report(message: string): void;
   /** Bytes the renderer holds on the GPU right now. */
   gpuBytes(): number;
+  /** Phase 4: the persistence stress run's extra needs (absent: no persistence run). */
+  persistence?: Pick<PersistenceStressDeps, 'project' | 'waitUntilIdle'>;
 }
 
 /**
@@ -48,6 +51,9 @@ export function createStressPanel(deps: StressDeps): HTMLElement {
     try {
       const result = await task();
       deps.report(`${name}: ${result} (${((performance.now() - start) / 1000).toFixed(1)} s)`);
+    } catch (error) {
+      console.error(error);
+      deps.report(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       running = false;
     }
@@ -102,6 +108,37 @@ export function createStressPanel(deps: StressDeps): HTMLElement {
       ['Fan-out', run('Fan-out', () => inheritanceRun('fan-out', fanOut.value()))],
     ]),
   );
+  const persistence = deps.persistence;
+  if (persistence) {
+    const versionCount = numberField('Versions', 20, 1, 500);
+    wrap.append(
+      document.createTextNode('Persistence (Phase 4), in a new project: the canvases above (preset, layers, strokes), then'),
+      versionCount.row,
+      buttons([
+        ['Canvases × versions', run('Persistence', () => {
+          const size = CANVAS_PRESETS.find((p) => p.name === preset.value) ?? CANVAS_PRESETS[0]!;
+          const rand = random(7);
+          return persistenceRun(
+            {
+              ...persistence,
+              metrics: deps.metrics,
+              report: deps.report,
+              buildCanvases: (n) => buildWorkspace(deps, n, size, layers.value(), strokesPerLayer.value()),
+              drawStrokes: async (index, n) => {
+                const docs = deps.workspace.canvases;
+                const doc = docs[index % docs.length]!;
+                deps.setView(deps.fitRect(doc.placement));
+                for (let i = 0; i < n; i++) await drawOne(deps, deps.workspace.editor(doc.id), rand);
+              },
+              showFirstCanvas: () => deps.setView(deps.fitRect(deps.workspace.canvases[0]!.placement)),
+            },
+            count.value(),
+            versionCount.value(),
+          );
+        })],
+      ]),
+    );
+  }
   return wrap;
 }
 

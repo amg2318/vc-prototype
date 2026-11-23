@@ -1,3 +1,4 @@
+import type { PreviewTile } from '../renderer';
 import {
   ATLAS_PAGE_SIZE,
   COMPOSITE_LEVEL0_PAGES,
@@ -39,9 +40,11 @@ import type {
   StrokeStyle,
   ViewState,
 } from '../renderer';
+import type { TileBackingStore } from '../tileBackingStore';
 import { inheritanceInfo, RenderCore, type Frame } from '../renderCore';
 import { WORKSPACE_BACKGROUND } from '../workspace';
 import * as S from './shaders';
+import { AsyncReads } from './asyncReads';
 
 interface Target {
   texture: WebGLTexture;
@@ -77,6 +80,7 @@ export class WebGL2Renderer implements Renderer {
 
   private readonly layerPages: Target[] = [];
   private readonly level0Pages: Target[] = [];
+  private readonly asyncReads: AsyncReads;
   private readonly previewPages: Target[] = [];
   private readonly canvasGl = new Map<CanvasId, CanvasGl>();
   private readonly dummyPage: WebGLTexture;
@@ -128,6 +132,7 @@ export class WebGL2Renderer implements Renderer {
       this.onLost?.('WebGL context lost — reload the page.');
     });
 
+    this.asyncReads = new AsyncReads(gl);
     this.dummyPage = this.createTexture(1, 1, gl.RGBA8, false);
     this.strokeMask = this.createTarget(S.MASK_SIZE, S.MASK_SIZE, gl.R8);
     this.predictionMask = this.createTarget(S.MASK_SIZE, S.MASK_SIZE, gl.R8);
@@ -228,6 +233,39 @@ export class WebGL2Renderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null> {
+    const read = this.core.readPreviewTiles(canvasId);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]> {
+    const read = this.core.readCompositeTiles(canvasId, keys);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
+    const seeded = this.core.seedPreviews(canvasId, tiles);
+    this.onNeedsFrame?.();
+    return seeded;
+  }
+
+  useBackingStore(backing: TileBackingStore): void {
+    this.core.useBackingStore(backing);
+  }
+
+  adoptStoredTiles(ids: Iterable<TileId>): void {
+    this.core.residency.adoptStored(ids);
+    this.onNeedsFrame?.();
+  }
+
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {
+    const read = this.core.readLayerTiles(ids);
+    this.onNeedsFrame?.(); // the reads happen during frames
+    return read;
+  }
+
   render(view: ViewState): FrameInfo {
     const gl = this.gl;
     const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false, inheritorsUpdated: 0, staleInheritors: 0, propagation: [] };
@@ -235,8 +273,11 @@ export class WebGL2Renderer implements Renderer {
     const compositeStart = performance.now();
     const frame = this.core.buildFrame(view, [2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight]);
     this.syncPages();
+    // Saved previews of an opened project.
+    for (const { slot, rgba } of frame.previewUploads) this.writePreviewSlot(slot, rgba);
     for (const id of frame.removedCanvases) this.releaseCanvas(id);
 
+    this.asyncReads.poll();
     this.runLayerOps(frame.ops, frame.prediction);
     this.runComposites(frame);
     const compositeCpuMs = performance.now() - compositeStart;
@@ -272,7 +313,7 @@ export class WebGL2Renderer implements Renderer {
       else if (op.kind === 'copies') {
         for (const slot of op.zero) this.clearSlot(slot);
         for (const c of op.copies) this.copyRegion(c.src, c.sx, c.sy, c.dst, c.dx, c.dy, c.width, c.height);
-      } else if (op.kind === 'evict') op.done(this.readSlot(op.slot));
+      } else if (op.kind === 'evict') this.readSlotsAsync(this.layerPages, [op.slot], ([rgba]) => op.done(rgba!));
       else this.writeSlot(op.slot, op.rgba);
     }
     if (prediction) {
@@ -323,14 +364,20 @@ export class WebGL2Renderer implements Renderer {
     gl.disable(gl.BLEND);
   }
 
-  /** Synchronous readback of one tile (WebGL2 has no simple async readback). */
-  private readSlot(slot: TileSlot): Uint8Array {
+  /** Read whole tile slots of a pool's pages back without stalling (see AsyncReads). */
+  private readSlotsAsync(pages: readonly Target[], slots: readonly TileSlot[], done: (rgba: Uint8Array[]) => void): void {
+    const regions = slots.map((slot) => {
+      const at = slotLocation(slot);
+      return { framebuffer: pages[at.page]!.framebuffer, x: at.x, y: at.y, width: TILE_SIZE, height: TILE_SIZE };
+    });
+    this.asyncReads.read(regions, (data) => done(slots.map((_, i) => data.slice(i * TILE_BYTES, (i + 1) * TILE_BYTES))));
+  }
+
+  private writePreviewSlot(slot: TileSlot, rgba: Uint8Array): void {
     const gl = this.gl;
     const at = slotLocation(slot);
-    const rgba = new Uint8Array(TILE_BYTES);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.layerPages[at.page]!.framebuffer);
-    gl.readPixels(at.x, at.y, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-    return rgba;
+    gl.bindTexture(gl.TEXTURE_2D, this.previewPages[at.page]!.texture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, at.x, at.y, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
   }
 
   private writeSlot(slot: TileSlot, rgba: Uint8Array): void {
@@ -477,6 +524,11 @@ export class WebGL2Renderer implements Renderer {
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.thumbTarget.framebuffer);
         gl.readPixels(0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, out);
         r.resolve(out);
+        return;
+      }
+      case 'tiles': {
+        const pages = { layer: this.layerPages, level0: this.level0Pages, preview: this.previewPages }[r.pool];
+        this.readSlotsAsync(pages, r.slots, r.resolve);
         return;
       }
       case 'empty': {

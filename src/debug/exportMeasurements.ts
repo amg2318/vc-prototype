@@ -24,7 +24,7 @@ export function buildExport(
 ): object {
   return {
     format: 'vc-prototype-measurements',
-    version: 4,
+    version: 5,
     note:
       'Latencies are software estimates (input event timestamp → GPU work submitted / GPU work done). ' +
       'They exclude display scan-out and digitizer latency; true on-glass latency is higher.',
@@ -52,6 +52,8 @@ export function buildExport(
       byDepth: Object.fromEntries(metrics.propagationByDepth()),
       stressRuns: metrics.stressRuns,
     },
+    /** Phase 4: each save (ms, bytes written) and garbage collection; persistence stress runs are in inheritance.stressRuns too, with kind "persistence". */
+    persistence: metrics.persistence,
   };
 }
 

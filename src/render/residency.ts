@@ -23,6 +23,8 @@ import type { TileBackingStore } from './tileBackingStore';
 export interface Eviction {
   id: TileId;
   slot: TileSlot;
+  /** False if the tile is already on disk: the slot can simply be reused. */
+  needsReadback: boolean;
   pixels(rgba: Uint8Array): void;
 }
 
@@ -73,11 +75,24 @@ export class TileResidency {
 
   constructor(
     readonly capacity: number,
-    private readonly backing: TileBackingStore,
+    private backing: TileBackingStore,
     private readonly now: () => number = () => performance.now(),
     private readonly maxLoadsInFlight = MAX_LOADS_IN_FLIGHT,
   ) {
     this.slots = new TileStore(capacity);
+  }
+
+  /** Switch where evicted tiles go (before anything has been evicted). */
+  useBacking(backing: TileBackingStore): void {
+    this.backing = backing;
+  }
+
+  /**
+   * Phase 4: tiles whose pixels are only on disk (a project just opened).
+   * They load like evicted tiles the first time something needs them.
+   */
+  adoptStored(ids: Iterable<TileId>): void {
+    for (const id of ids) if (!this.entries.has(id)) this.entries.set(id, { where: 'stored', stored: Promise.resolve() });
   }
 
   beginFrame(): void {
@@ -214,6 +229,11 @@ export class TileResidency {
     this.lru.delete(id);
     this.slots.release(victim.slot);
     this.evictions++;
+    if (this.backing.isPersisted?.(id)) {
+      // Already on disk: nothing to read back.
+      this.entries.set(id, { where: 'stored', stored: Promise.resolve() });
+      return { id, slot: victim.slot, needsReadback: false, pixels: () => {} };
+    }
     let pixels!: (rgba: Uint8Array) => void;
     const entry: Entry = {
       where: 'stored',
@@ -227,7 +247,7 @@ export class TileResidency {
       }),
     };
     this.entries.set(id, entry);
-    return { id, slot: victim.slot, pixels };
+    return { id, slot: victim.slot, needsReadback: true, pixels };
   }
 
   private startLoad(id: TileId, e: Extract<Entry, { where: 'stored' }>): void {

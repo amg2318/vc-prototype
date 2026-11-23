@@ -76,6 +76,46 @@ export const ARROW_STYLE = {
 /** Undo history may hold this many bytes of tiles that the document no longer uses. */
 export const HISTORY_BUDGET_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Layer tiles read back from the GPU per frame for saving (Phase 4). Each is
+ * 256 KB; the copies are asynchronous, and the cap keeps any one frame's
+ * share of the work small.
+ */
+export const TILE_READBACKS_PER_FRAME = 16;
+
+/** Autosave of the working copy (Phase 4; see AutosaveScheduler). */
+export const SAVE = {
+  /** Wait this long after the last change (with no stroke in progress) before saving. */
+  debounceMs: 1500,
+};
+
+/**
+ * Versions (Phase 4). Manual and pinned versions are always kept. Automatic
+ * ones: the newest `keepLatest`, then the newest of each day for
+ * `dailyForDays` days, then the newest of each week. The settings panel can
+ * change these (stored per device).
+ */
+export const VERSIONS = {
+  keepLatest: 10,
+  dailyForDays: 30,
+  /** Make an automatic version after this much active editing time (minutes), if anything changed. */
+  autoAfterActiveMin: 30,
+  /** Input within this long (ms) counts the time as active. */
+  activeInputWindowMs: 2 * 60 * 1000,
+  /** Workspace thumbnail size (px, longest side). */
+  thumbnailPx: 320,
+};
+
+/** Garbage collection of unused tiles (Phase 4). */
+export const GC = {
+  /** Each sweep step holds back saves for at most about this long (ms). */
+  sliceMs: 8,
+  /** Collect this long after a project opens (ms), once things have settled. */
+  delayAfterOpenMs: 10_000,
+  /** …and this long after versions were deleted. */
+  delayAfterDeleteMs: 2_000,
+};
+
 /** Layer thumbnails are this many pixels on their longest side. */
 export const THUMBNAIL_SIZE = 64;
 /** Wait this long after the last change before refreshing a layer thumbnail. */

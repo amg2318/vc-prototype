@@ -6,6 +6,10 @@ import type { CanvasId } from '../document/paintDocument';
 import type { RetileJob } from '../document/retile';
 import type { TileStore } from '../document/tileStore';
 import type { TileId, TileKey } from '../document/tiles';
+import type { TileBackingStore } from './tileBackingStore';
+import type { PreviewTile } from './renderCore';
+
+export type { PreviewTile };
 import type { Placement, Rect } from '../workspace/coords';
 
 export type { Dab, MergeJob, RetileJob };
@@ -181,6 +185,10 @@ export interface Renderer {
 
   /** Follow the document's tiles (ids): freed tiles are dropped from the GPU and the backing store. */
   useTileStore(store: TileStore): void;
+  /** Phase 4: where evicted layer tiles go (the project's store on disk). Call before drawing. */
+  useBackingStore(backing: TileBackingStore): void;
+  /** Phase 4: tile ids whose pixels are only on disk (an opened project); loaded when first needed. */
+  adoptStoredTiles(ids: Iterable<TileId>): void;
 
   /** Resize the canvas backing store (device pixels). */
   resize(pixelWidth: number, pixelHeight: number): void;
@@ -222,6 +230,28 @@ export interface Renderer {
   findEmptyTiles(tiles: readonly TileId[]): Promise<boolean[]>;
   /** A THUMBNAIL_SIZE² premultiplied RGBA image of a layer (tiles still reloading are left out). */
   readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array>;
+  /**
+   * Phase 4: the raw premultiplied RGBA of layer tiles, exactly as on the GPU,
+   * for saving. Asynchronous (WebGPU `mapAsync`, WebGL2 pixel-pack buffer +
+   * fence) and spread over frames. Null for tiles freed meanwhile.
+   */
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]>;
+  /**
+   * Phase 4: the canvas's preview tiles (pyramid levels 3–4) for saving, or
+   * null if they aren't complete and up to date in the next frame.
+   */
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null>;
+  /**
+   * Phase 4: show an opened canvas from its saved preview tiles, without
+   * compositing or loading its layer tiles (applied when `setCanvases` has it).
+   */
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean;
+  /**
+   * Phase 4 (PNG export): the canvas's full-resolution composite tiles at
+   * these level-0 keys (inherited content included, on its paper),
+   * premultiplied RGBA; built and read back a few per frame.
+   */
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]>;
 
   destroy(): void;
 }

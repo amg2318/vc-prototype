@@ -1,3 +1,4 @@
+import { requestReset, resetIfRequested } from './persistence/resetDevice';
 import './style.css';
 import { GESTURES, INHERITANCE_DEPTH_WARNING, TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
@@ -11,6 +12,18 @@ import type { Editor } from './document/editor';
 import type { Anchor } from './document/retile';
 import { hitTest, union, visibleWorkspaceRect } from './workspace/coords';
 import { Workspace } from './workspace/workspace';
+import type { PaintDocument } from './document/paintDocument';
+import { ProjectSession } from './persistence/projectSession';
+import { createStorageWorker, workerClient } from './storage/client';
+import { SaveIndicator } from './ui/saveIndicator';
+import { HistoryPanel } from './ui/historyPanel';
+import { formatBytes, ProjectsPanel } from './ui/projectsPanel';
+import { canvasPng } from './export/canvasPng';
+import { deliverFile, GestureExpiredError, safeFileName } from './export/deliver';
+import { PROJECT_FILE_EXTENSION, PROJECT_FILE_TYPE } from './storage/archive';
+import { QUOTA_MESSAGE } from './persistence/projectSession';
+import { inIosBrowserTab, loadRetention, saveRetention } from './persistence/storageSettings';
+import { isQuotaError } from './storage/stores';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -38,6 +51,8 @@ import { IDENTITY_VIEW, docToClipMatrix, docToScreen, fitRectToView, zoomAt, typ
 async function main(): Promise<void> {
   const ui = document.getElementById('ui')!;
   const initialCanvas = document.getElementById('stage') as HTMLCanvasElement;
+  // "Delete all data" (Projects → Storage) is carried out here, before storage opens.
+  const resetMessage = await resetIfRequested();
 
   const { renderer, fallbackReason, canvas } = await createRenderer(
     initialCanvas,
@@ -47,19 +62,36 @@ async function main(): Promise<void> {
   blockBrowserGestures(canvas);
 
   const workspace = new Workspace();
-  seedCanvases(workspace, Number(new URLSearchParams(location.search).get('canvases') ?? 1));
   renderer.useTileStore(workspace.store);
+
+  let view: ViewTransform = IDENTITY_VIEW;
+
+  // Phase 4: open the last project (saved in OPFS by the storage worker) and keep it saved.
+  const storage = workerClient(createStorageWorker());
+  const testCanvases = new URLSearchParams(location.search).get('canvases');
+  const project = new ProjectSession({
+    workspace,
+    renderer,
+    storage,
+    view: () => view,
+    newProjectCanvases: (ws) => seedCanvases(ws, Number(testCanvases ?? 1)),
+  });
+  // `?canvases=N` starts a new project with N canvases (for testing); otherwise the last project opens.
+  const savedView = testCanvases ? (await project.create(`Test: ${testCanvases} canvases`), undefined) : await project.openLast();
+  project.watchPageLifecycle();
+  project.retention = loadRetention();
   // Dev builds only: lets the desktop test scripts inspect renderer state.
-  if (import.meta.env.DEV) (window as unknown as { __debug: unknown }).__debug = { renderer, workspace };
+  if (import.meta.env.DEV) (window as unknown as { __debug: unknown }).__debug = { renderer, workspace, project, storage };
   /** The selected canvas's editor; null when no canvas is selected. */
   const active = (): Editor | null => workspace.activeEditor;
   const tools = new ToolState();
   const metrics = new Metrics();
 
-  let view: ViewTransform = IDENTITY_VIEW;
   let cssWidth = 1;
   let cssHeight = 1;
-  let hasFitted = false;
+  /** A saved camera is used as is; otherwise the first resize fits everything. */
+  let hasFitted = savedView !== undefined;
+  if (savedView) view = savedView;
 
   // --- render loop: only runs when something changed ----------------------
 
@@ -69,9 +101,15 @@ async function main(): Promise<void> {
   function requestFrame(): void {
     if (framePending) return;
     framePending = true;
-    requestAnimationFrame(frame);
+    // Hidden pages get no animation frames, but a save started on hiding still needs frames
+    // to read tiles back from the GPU: drive them with a timer then.
+    if (document.visibilityState === 'hidden') setTimeout(() => frame(performance.now()), 0);
+    else requestAnimationFrame(frame);
   }
+  /** Frames drawn so far (for waitUntilIdle). */
+  let framesDrawn = 0;
   function frame(rafTime: number): void {
+    framesDrawn++;
     framePending = false;
     const start = performance.now();
     const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
@@ -321,6 +359,8 @@ async function main(): Promise<void> {
       metrics.counters.strokes++;
       metrics.noteInput([sample], sample.timeStamp);
       strokes.begin(sample);
+      if (liveStroke) project.scheduler.strokeStarted();
+      project.noteActivity();
     },
     strokeMove(samples, predicted) {
       metrics.noteInput(samples, samples[samples.length - 1]?.timeStamp ?? performance.now());
@@ -330,11 +370,14 @@ async function main(): Promise<void> {
       // A cancelled stroke (e.g. the OS claimed the touch) is still kept: losing
       // what was drawn is worse than keeping it. The HUD counts cancellations.
       if (cancelled) metrics.counters.cancelledStrokes++;
+      const drawing = liveStroke !== null;
       strokes.end();
+      if (drawing) project.scheduler.strokeEnded();
     },
     strokeDiscard() {
       metrics.counters.cancelledStrokes++;
       strokes.discard();
+      project.scheduler.strokeCancelled();
     },
     palmRejected() {
       metrics.counters.palmRejections++;
@@ -417,6 +460,7 @@ async function main(): Promise<void> {
       `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} (${mb(m.residentTiles * TILE_BYTES)}) · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
       `visible canvases ${metrics.frames.at(-1)?.visibleCanvases ?? '—'}`,
       inheritanceLine(),
+      ...persistenceLines(),
       `evictions ${perSecond(r.evictionsPerSecond)}/s · reloads ${perSecond(r.reloadsPerSecond)}/s (total ${m.evictions} / ${m.reloads})${m.loadingTiles ? ` · ${m.loadingTiles} loading` : ''}`,
       `reload ms ${ms(r.reloadMs.p50)} / ${ms(r.reloadMs.p95)}  (p50 / p95, last ${r.reloadMs.count})`,
       `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
@@ -426,6 +470,38 @@ async function main(): Promise<void> {
       `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
     ];
   });
+
+  /** Resolves once no frame has been drawn for a while and no tile is loading (nothing left to do). */
+  async function waitUntilIdle(quietMs = 300): Promise<void> {
+    let frames = -1;
+    let quietSince = performance.now();
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const now = performance.now();
+      if (framesDrawn !== frames || framePending || renderer.memory().loadingTiles > 0) {
+        frames = framesDrawn;
+        quietSince = now;
+      } else if (now - quietSince >= quietMs) {
+        return;
+      }
+    }
+  }
+
+  /** Phase 4 HUD lines: saving, storage, garbage collection. */
+  let siteUsage: number | null = null;
+  const sampleUsage = (): void => void navigator.storage?.estimate?.().then((e) => (siteUsage = e.usage ?? null));
+  sampleUsage();
+  setInterval(sampleUsage, 10_000);
+  function persistenceLines(): string[] {
+    const last = [...metrics.persistence.saves].reverse().find((save) => save.committed); // a save with nothing to write isn't interesting
+    const gc = project.lastGc;
+    return [
+      `save ${project.status.state} · queue ${storage.pending}${project.scheduler.isSaving ? ' (saving)' : ''} · last ${last ? `${ms(last.ms)} ms, ${formatBytes(last.bytesWritten)}` : '—'}`,
+      `storage ${project.project ? formatBytes(project.project.sizeBytes) : '—'} this project · ${siteUsage === null ? '—' : formatBytes(siteUsage)} site · gc ${gc ? `${ms(gc.ms)} ms, freed ${formatBytes(gc.removedBytes)}` : '—'}`,
+    ];
+  }
+  project.onSaved = (stats) => metrics.noteSave(stats);
+  project.onGarbageCollected = (stats) => metrics.noteGc(stats);
 
   const controls = new Controls(
     () => tools.editableSettings,
@@ -482,18 +558,182 @@ async function main(): Promise<void> {
     duplicate: (id) => workspace.setActiveCanvas(workspace.duplicateCanvas(id).id),
     remove: (id) => workspace.deleteCanvas(id),
     bringToFront: (id) => workspace.bringToFront(id),
+    exportPng: (id) => void exportCanvasPng(id),
     fitAll: () => setView(fitAll()),
   });
-  // The layers and canvases panels share the right-hand side: one at a time.
+  /** Flatten a canvas to PNG (a tile row at a time, read back from the GPU) and hand it over. */
+  async function exportCanvasPng(canvasId: string): Promise<void> {
+    const doc = workspace.canvases.find((c) => c.id === canvasId);
+    if (!doc) return;
+    try {
+      showBanner(`Exporting “${doc.name}”…`, true);
+      const png = await canvasPng(doc.placement, (keys) => renderer.readCompositeTiles(canvasId, keys), (done) =>
+        showBanner(`Exporting “${doc.name}”… ${Math.round(done * 100)}%`, true),
+      );
+      await offerFile(png, `${safeFileName(doc.name)}.png`, 'image/png');
+    } catch (error) {
+      reportProjectError(error);
+    }
+  }
+  // The layers, canvases and history panels share the right-hand side: one at a time.
+  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel, projectsPanel];
+  function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
+    const show = !panel.visible;
+    for (const p of sidePanels()) p.setVisible(p === panel && show);
+  }
+  const historyPanel = new HistoryPanel({
+    saveVersion: () => void saveVersion(),
+    restore: (v) =>
+      void project.restoreVersion(v).then((before) => {
+        const kept = before ? `Your previous state is kept as “${before.name}”.` : 'Your previous state was already a version.';
+        showBanner(`Restored “${v.name}”. ${kept} Undo history was cleared.`);
+      }, reportVersionError),
+    rename: (v, name) => void project.renameVersion(v.id, name).catch(reportVersionError),
+    pin: (v, pinned) => void project.pinVersion(v.id, pinned).catch(reportVersionError),
+    remove: (v) => void project.deleteVersion(v.id).then(() => showBanner(`Deleted “${v.name}”.`), reportVersionError),
+    thumbnail: (v) => project.versionThumbnail(v),
+  });
+  project.onVersions = (versions) => historyPanel.setVersions(versions);
+  // A read-only project that no other page has open any more: reload it from disk (with what that tab saved) and save here.
+  project.onLockFreed = (id) =>
+    void switchProject(async () => {
+      const keep = view;
+      await project.open(id);
+      showBanner('This project is no longer open anywhere else: it was reloaded with its latest saved changes and is saved from this tab now.');
+      return keep;
+    });
+  historyPanel.setVersions(project.versions);
+  async function saveVersion(): Promise<void> {
+    try {
+      const version = await project.saveVersion('manual');
+      if (version) showBanner(`Saved version “${version.name}”.`);
+    } catch (error) {
+      reportVersionError(error);
+    }
+  }
+  function reportVersionError(error: unknown): void {
+    console.error(error);
+    if (isQuotaError(error)) showQuotaWarning(QUOTA_MESSAGE);
+    else showBanner(`Version history: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const projectsPanel = new ProjectsPanel({
+    list: () => project.listProjects(),
+    estimate: async () => {
+      const e = await navigator.storage?.estimate?.();
+      return e?.usage !== undefined && e.quota !== undefined ? { usage: e.usage, quota: e.quota } : null;
+    },
+    currentId: () => project.project?.id ?? null,
+    currentReadOnly: () => project.readOnly,
+    create: () => void switchProject(() => project.create('Untitled project').then(() => undefined)),
+    open: (p) => void switchProject(() => project.open(p.id)),
+    rename: (p, name) => void project.renameProject(p.id, name).then(() => projectsPanel.refresh(), reportProjectError),
+    duplicate: (p) =>
+      void project.duplicateProject(p.id, `${p.name} copy`).then((copy) => {
+        showBanner(`Made “${copy.name}”.`);
+        return projectsPanel.refresh();
+      }, reportProjectError),
+    remove: (p) =>
+      void switchProject(async () => {
+        const { reopened, view: saved } = await project.deleteProject(p.id);
+        showBanner(`Deleted “${p.name}”.`);
+        return reopened ? saved : null;
+      }),
+    exportFile: (p, includeHistory) =>
+      void (async () => {
+        try {
+          showBanner(`Exporting “${p.name}”…`, true);
+          const bytes = await project.exportProject(p.id, includeHistory);
+          await offerFile(bytes, `${safeFileName(p.name)}${PROJECT_FILE_EXTENSION}`, PROJECT_FILE_TYPE);
+        } catch (error) {
+          reportProjectError(error);
+        }
+      })(),
+    importFile: (file) =>
+      void (async () => {
+        try {
+          showBanner(`Importing “${file.name}”…`, true);
+          const info = await project.importProject(new Uint8Array(await file.arrayBuffer()));
+          showBanner(`Imported “${info.name}” as a new project.`, false, [{ label: 'Open it', run: () => void switchProject(() => project.open(info.id)) }]);
+          await projectsPanel.refresh();
+        } catch (error) {
+          reportProjectError(error);
+        }
+      })(),
+    storage: {
+      persisted: async () => (navigator.storage?.persisted ? navigator.storage.persisted() : null),
+      requestPersistence: async () => (navigator.storage?.persist ? navigator.storage.persist() : false),
+      retention: () => project.retention,
+      setRetention: (rules) => {
+        saveRetention(rules);
+        void project.setRetention(rules).catch(reportVersionError);
+      },
+      deleteAutomaticVersions: () => void deleteAutomaticVersions(),
+      collectGarbage: () =>
+        void project.collectGarbage().then((stats) => {
+          showBanner(stats ? `Cleaned up ${formatBytes(stats.removedBytes)} in ${stats.removedFiles} files.` : 'Nothing to clean up right now.');
+          return projectsPanel.refresh();
+        }),
+      notice: () => (inIosBrowserTab() ? SAFARI_TAB_NOTICE : null),
+      deleteAllData: requestReset,
+    },
+  });
+  /**
+   * Run a project operation that may load another project, then show it:
+   * the saved camera if it has one, else fit everything. `null` = the
+   * workspace didn't change.
+   */
+  async function switchProject(task: () => Promise<ViewTransform | undefined | null>): Promise<void> {
+    try {
+      const saved = await task();
+      if (saved !== null) {
+        setView(saved ?? fitAll());
+        historyPanel.setVersions(project.versions);
+        refreshUi();
+      }
+      await projectsPanel.refresh();
+    } catch (error) {
+      reportProjectError(error);
+    }
+  }
+  function reportProjectError(error: unknown): void {
+    console.error(error);
+    if (isQuotaError(error)) showQuotaWarning(QUOTA_MESSAGE);
+    else showBanner(error instanceof Error ? error.message : String(error));
+  }
+  /** Hand a finished file over (share sheet, save dialog or download); if the tap has expired, ask for another. */
+  async function offerFile(bytes: Uint8Array, name: string, type: string): Promise<void> {
+    try {
+      const how = await deliverFile(bytes, name, type);
+      if (how === 'cancelled') banner.hidden = true;
+      else showBanner(how === 'downloaded' ? `Downloaded “${name}”.` : `Saved “${name}”.`);
+    } catch (error) {
+      if (!(error instanceof GestureExpiredError)) throw error;
+      showBanner(`“${name}” is ready.`, true, [{ label: 'Save…', run: () => void offerFile(bytes, name, type).catch(reportProjectError) }]);
+    }
+  }
+  /** Storage is full: say so, and offer the two ways to make room. */
+  function showQuotaWarning(message: string): void {
+    showBanner(message, true, [
+      { label: 'Delete automatic versions', run: () => void deleteAutomaticVersions() },
+      { label: 'Projects…', run: () => togglePanel(projectsPanel) },
+    ]);
+  }
+  async function deleteAutomaticVersions(): Promise<void> {
+    try {
+      const deleted = await project.deleteAutomaticVersions();
+      showBanner(deleted > 0 ? `Deleted ${deleted} automatic version${deleted === 1 ? '' : 's'}.` : 'There were no automatic versions to delete.');
+      await project.saveNow().catch(() => undefined); // try the save that failed again
+      await projectsPanel.refresh();
+    } catch (error) {
+      reportProjectError(error);
+    }
+  }
   const toolbar = new Toolbar({
     selectTool,
     undo,
     redo,
     toggleColorPicker: () => picker.toggle(),
-    toggleLayers: () => {
-      layersPanel.setVisible(!layersPanel.visible);
-      if (layersPanel.visible) canvasPanel.setVisible(false);
-    },
+    toggleLayers: () => togglePanel(layersPanel),
     toggleFingerDrawing: () => {
       input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
     },
@@ -503,10 +743,9 @@ async function main(): Promise<void> {
       refreshUi();
       requestFrame();
     },
-    toggleCanvases: () => {
-      canvasPanel.setVisible(!canvasPanel.visible);
-      if (canvasPanel.visible) layersPanel.setVisible(false);
-    },
+    toggleCanvases: () => togglePanel(canvasPanel),
+    toggleHistory: () => togglePanel(historyPanel),
+    toggleProjects: () => togglePanel(projectsPanel),
   });
 
   function refreshUi(): void {
@@ -530,13 +769,52 @@ async function main(): Promise<void> {
   banner.className = 'banner';
   banner.hidden = true;
   let bannerTimer = 0;
-  function showBanner(message: string, sticky = false): void {
+  /** A message at the bottom; `actions` adds buttons (which also dismiss it). */
+  function showBanner(message: string, sticky = false, actions: { label: string; run(): void }[] = []): void {
     banner.textContent = message;
+    if (actions.length > 0) {
+      const row = document.createElement('div');
+      row.className = 'banner-actions';
+      for (const action of actions) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = action.label;
+        b.addEventListener('click', () => {
+          banner.hidden = true;
+          action.run();
+        });
+        row.append(b);
+      }
+      row.append(Object.assign(document.createElement('button'), { type: 'button', textContent: 'Close', onclick: () => (banner.hidden = true) }));
+      banner.append(row);
+    }
     banner.hidden = false;
     clearTimeout(bannerTimer);
     if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
   }
   renderer.onLost = (message) => showBanner(message, true);
+
+  // --- saving (Phase 4) ---------------------------------------------------------
+
+  const saveIndicator = new SaveIndicator((status) =>
+    showBanner(status.message ?? (status.savedAt ? `All changes saved (last save ${new Date(status.savedAt).toLocaleTimeString()}).` : 'Not saved yet.')),
+  );
+  toolbar.element.append(saveIndicator.element);
+  saveIndicator.update(project.status);
+  project.onStatus = (status) => {
+    saveIndicator.update(status);
+    if (status.state === 'error' && status.message) {
+      if (status.quota) showQuotaWarning(status.message);
+      else showBanner(status.message);
+    }
+    if (status.state === 'read-only' && status.message) showBanner(status.message, true);
+  };
+  if (resetMessage) showBanner(resetMessage);
+  else if (project.readOnly && project.status.message) showBanner(project.status.message, true);
+  else if (inIosBrowserTab() && !sessionStorage.getItem('vc-tab-notice')) {
+    sessionStorage.setItem('vc-tab-notice', '1'); // once per visit
+    showBanner(SAFARI_TAB_NOTICE);
+  }
 
   // Soft depth warning: whenever the deepest chain grows past the limit (by an arrow, the source
   // picker, or undo/redo), say so once. It never blocks.
@@ -566,11 +844,12 @@ async function main(): Promise<void> {
         setView,
         report: (m) => showBanner(m, true),
         gpuBytes: () => renderer.memory().bytes,
+        persistence: { project, waitUntilIdle },
       }),
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, projectsPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({
@@ -587,6 +866,7 @@ async function main(): Promise<void> {
       if (doc) setView(fitRectToView(doc.placement, cssWidth, cssHeight));
     },
     toggleHud: () => hud.setVisible(!hud.visible),
+    saveVersion: () => void saveVersion(),
   });
 
   new ResizeObserver(resize).observe(canvas);
@@ -596,21 +876,25 @@ async function main(): Promise<void> {
 }
 
 /**
- * The starting canvases: one 4096² canvas, or with `?canvases=N` a grid of
- * N A4 canvases (for testing many canvases before the canvas UI exists).
+ * The canvases of a new project: one 4096² canvas, or with `?canvases=N` a
+ * grid of N A4 canvases (for testing many canvases).
  */
-function seedCanvases(workspace: Workspace, count: number): void {
+const SAFARI_TAB_NOTICE =
+  'You are using the app in a Safari tab. Safari may clear its saved projects after some days without a visit. Add it to the Home Screen (Share → Add to Home Screen) and use it from there to keep them.';
+
+function seedCanvases(workspace: Workspace, count: number): PaintDocument[] {
   const n = Math.max(1, Math.min(100, Math.floor(count) || 1));
   const size = n === 1 ? { width: 4096, height: 4096 } : { width: 2480, height: 3508 };
   const columns = Math.ceil(Math.sqrt(n));
   const gap = 300;
+  const docs: PaintDocument[] = [];
   for (let i = 0; i < n; i++) {
     const doc = workspace.newCanvas(size, `Canvas ${i + 1}`);
     doc.x = (i % columns) * (size.width + gap);
     doc.y = Math.floor(i / columns) * (size.height + gap);
-    workspace.attachCanvas(doc);
+    docs.push(doc);
   }
-  workspace.activeCanvasId = workspace.canvases[0]!.id;
+  return docs;
 }
 
 main().catch((error: unknown) => {

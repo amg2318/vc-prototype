@@ -145,6 +145,25 @@ export function rateOfTotal(points: readonly { t: number; total: number }[], now
   return span > 0 ? ((last.total - first.total) / span) * 1000 : null;
 }
 
+/** One save of the working copy (Phase 4). */
+export interface SaveRecord {
+  t: number;
+  ms: number;
+  bytesWritten: number;
+  tilesWritten: number;
+  recordsWritten: number;
+  committed: boolean;
+}
+
+/** One garbage collection (Phase 4). */
+export interface GcRecord {
+  t: number;
+  ms: number;
+  removedFiles: number;
+  removedBytes: number;
+  sizeBytes: number;
+}
+
 export class Metrics {
   readonly frames: FrameRecord[] = [];
   /** Every reload latency (ms) since the last reset, in order. */
@@ -155,6 +174,16 @@ export class Metrics {
    * across reset(), since each run resets the stats before it starts.
    */
   readonly stressRuns: object[] = [];
+  /** Phase 4: every save and garbage collection since the last reset. */
+  readonly persistence: { saves: SaveRecord[]; gc: GcRecord[] } = { saves: [], gc: [] };
+
+  noteSave(save: Omit<SaveRecord, 't'>): void {
+    if (this.persistence.saves.length < MAX_RECORDS) this.persistence.saves.push({ t: performance.now(), ...save });
+  }
+
+  noteGc(gc: Omit<GcRecord, 't'>): void {
+    if (this.persistence.gc.length < MAX_RECORDS) this.persistence.gc.push({ t: performance.now(), ...gc });
+  }
 
   noteMemory(sample: MemorySample): void {
     if (this.memory.length < MAX_RECORDS) this.memory.push(sample);
@@ -300,6 +329,8 @@ export class Metrics {
 
   reset(): void {
     this.frames.length = 0;
+    this.persistence.saves.length = 0;
+    this.persistence.gc.length = 0;
     this.reloadTimes.length = 0;
     this.memory.length = 0;
     this.counters = { strokes: 0, cancelledStrokes: 0, palmRejections: 0, implausibleTimestamps: 0 };

@@ -420,3 +420,164 @@ describe('RenderCore: inherited blocks', () => {
     expect(c?.instances.length).toBe(4 * 4); // all four tiles of c
   });
 });
+
+describe('RenderCore.readLayerTiles (Phase 4 saving)', () => {
+  function setup() {
+    const store = new TileStore(64);
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64), new TileResidency(64, new CompressedTileStore()));
+    core.useTileStore(store);
+    core.setCanvases([canvas('a', 0)]);
+    return { store, core };
+  }
+  const style = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const };
+  const tileReadbacks = (frame: Frame) => frame.readbacks.filter((r) => r.kind === 'tiles');
+
+  it('reads a tile only after its pixels are written, and a capped number per frame', () => {
+    const { store, core } = setup();
+    const ids = Array.from({ length: 20 }, () => store.allocate()!);
+    core.merge('a', ids.map((dst, i) => ({ key: i, src: null, dst })), style);
+    void core.readLayerTiles(ids);
+    const first = core.buildFrame(view, px);
+    // The merge runs in this frame, before the reads (16 of the 20).
+    const [read] = tileReadbacks(first);
+    expect(read && read.kind === 'tiles' && read.slots).toHaveLength(16);
+    expect(first.moreWork).toBe(true);
+    const second = core.buildFrame(view, px);
+    const [rest] = tileReadbacks(second);
+    expect(rest && rest.kind === 'tiles' && rest.slots).toHaveLength(4);
+  });
+
+  it('answers null for a tile freed before it was read', async () => {
+    const { store, core } = setup();
+    const id = store.allocate()!;
+    const read = core.readLayerTiles([id]);
+    store.release(id);
+    core.buildFrame(view, px);
+    expect(await read).toEqual([null]);
+  });
+
+  it('passes the pixels the backend read back to the caller', async () => {
+    const { store, core } = setup();
+    const id = store.allocate()!;
+    core.merge('a', [{ key: 0, src: null, dst: id }], style);
+    const read = core.readLayerTiles([id]);
+    const [readback] = tileReadbacks(core.buildFrame(view, px));
+    const pixels = new Uint8Array(TILE_BYTES).fill(9);
+    if (readback?.kind === 'tiles') readback.resolve([pixels]);
+    expect(await read).toEqual([pixels]);
+  });
+});
+
+describe('RenderCore previews (Phase 4)', () => {
+  /** A 512² canvas has one tile at each pinned level (3 and 4). */
+  const previewTiles = () => PyramidPlanner.pinnedKeys({ width: 512, height: 512 }).map((t) => ({ ...t, rgba: new Uint8Array(TILE_BYTES).fill(1) }));
+
+  it('a seeded canvas shows its saved previews without compositing anything', () => {
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64));
+    core.setCanvases([canvas('a', 0, [0, 1])]);
+    core.invalidate('a', 'all'); // what opening a project reports
+    expect(core.seedPreviews('a', previewTiles())).toBe(true);
+    // Zoomed out far enough to show level 4.
+    const far: ViewState = { ...view, canvasPxPerDevicePx: 16 };
+    const frame = core.buildFrame(far, px);
+    expect(frame.previewUploads).toHaveLength(2);
+    expect(frame.stats.composited).toBe(0);
+    expect(frame.display.runs.some((r) => r.kind === 'tile' && r.pool === 'preview')).toBe(true);
+  });
+
+  it('reads the pinned previews back once they are built, and answers null while they are not', async () => {
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64));
+    core.setCanvases([canvas('a', 0)]);
+    const early = core.readPreviewTiles('a');
+    core.buildFrame(view, px); // builds the previews this frame, but the plan ran before they existed
+    const first = await Promise.race([early, Promise.resolve('waiting')]);
+    expect(first === null || first === 'waiting').toBe(true);
+
+    const read = core.readPreviewTiles('a');
+    const frame = core.buildFrame(view, px);
+    const readback = frame.readbacks.find((r) => r.kind === 'tiles' && r.pool === 'preview');
+    expect(readback).toBeDefined();
+    if (readback?.kind === 'tiles') readback.resolve(readback.slots.map(() => new Uint8Array(4)));
+    expect((await read)!.map((t) => t.level)).toEqual([3, 4]);
+  });
+
+  it('pinned previews are not offered while a change has not reached them', () => {
+    const planner = new PyramidPlanner(64, 64, 64);
+    const core = new RenderCore(planner);
+    core.setCanvases([canvas('a', 0)]);
+    core.buildFrame(view, px);
+    expect(planner.pinnedTiles('a')).not.toBeNull();
+    planner.invalidate('a', [0]);
+    expect(planner.pinnedTiles('a')).toBeNull();
+  });
+});
+
+describe('RenderCore composite reads (Phase 4, PNG export)', () => {
+  it('builds requested full-resolution tiles a few per frame and reads each back once it is complete', async () => {
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([canvas('a', 0, [0, 1])]);
+    const keys = Array.from({ length: 20 }, (_, i) => i % 2); // more than one frame's share
+    const read = core.readCompositeTiles('a', keys);
+    let frames = 0;
+    let more = true;
+    while (more && frames < 20) {
+      const frame = core.buildFrame(view, px);
+      frames++;
+      for (const r of frame.readbacks) if (r.kind === 'tiles' && r.pool === 'level0') r.resolve(r.slots.map(() => new Uint8Array(4).fill(7)));
+      more = frame.moreWork;
+    }
+    const tiles = await read;
+    expect(tiles).toHaveLength(20);
+    expect(tiles.every((t) => t?.[0] === 7)).toBe(true);
+    expect(frames).toBeGreaterThan(1);
+  });
+
+  /** The four tiles of a 512 × 512 canvas. */
+  const allFour = [tileKey(0, 0), tileKey(1, 0), tileKey(0, 1), tileKey(1, 1)];
+
+  /** Run frames until the read is answered (or 100 frames pass); returns the frames it took. */
+  async function framesUntilRead(core: RenderCore, read: Promise<unknown>, at: ViewState): Promise<number> {
+    let done = false;
+    void read.then(() => (done = true));
+    let frames = 0;
+    while (!done && frames < 100) {
+      const frame = core.buildFrame(at, px);
+      frames++;
+      for (const r of frame.readbacks) if (r.kind === 'tiles' && r.pool === 'level0') r.resolve(r.slots.map(() => new Uint8Array(4)));
+      await new Promise((settled) => setTimeout(settled, 0));
+    }
+    return frames;
+  }
+
+  it('reads an off-screen inheritor down a chain (its sources are built in full too)', async () => {
+    const size = { width: 512, height: 512 };
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([
+      canvas('a', 5000, [0, 1]),
+      { ...canvas('b', 6000), inherited: createBlock('a', size, size) },
+      { ...canvas('c', 7000), inherited: createBlock('b', size, size) },
+    ]);
+    const read = core.readCompositeTiles('c', allFour);
+    expect(await framesUntilRead(core, read, view)).toBeLessThan(100);
+    expect((await read).every((t) => t !== null)).toBe(true);
+  });
+
+  it('reads an inheritor shown zoomed out (its screen tiles are coarser)', async () => {
+    const size = { width: 512, height: 512 };
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([canvas('a', 0, [0, 1]), { ...canvas('b', 600), inherited: createBlock('a', size, size) }]);
+    const zoomedOut: ViewState = { ...view, canvasPxPerDevicePx: 4 };
+    for (let i = 0; i < 10; i++) core.buildFrame(zoomedOut, px);
+    const read = core.readCompositeTiles('b', allFour);
+    expect(await framesUntilRead(core, read, zoomedOut)).toBeLessThan(100);
+  });
+
+  it('answers null for a canvas that was removed', async () => {
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([canvas('a', 0)]);
+    const read = core.readCompositeTiles('a', [0]);
+    core.setCanvases([]);
+    core.buildFrame(view, px);
+    expect(await read).toEqual([null]);
+  });
+});

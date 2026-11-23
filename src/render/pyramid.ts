@@ -236,6 +236,17 @@ export class PyramidPlanner {
     return this.caches.get(canvasId)?.levels.map((m) => m.size) ?? [];
   }
 
+  /**
+   * Phase 4 (PNG export): the slot of a complete, up-to-date level-0 tile,
+   * or null if it isn't cached, isn't built yet, or a change hasn't reached it.
+   */
+  completeLevel0Slot(canvasId: CanvasId, key: TileKey): TileSlot | null {
+    const cache = this.caches.get(canvasId);
+    const tile = cache?.levels[0]!.get(key);
+    if (!cache || !tile || tile.todo !== null || cache.pending.has(key)) return null;
+    return tile.slot;
+  }
+
   /** True if the tile is cached and complete. */
   isComplete(canvasId: CanvasId, level: number, key: TileKey): boolean {
     return this.caches.get(canvasId)?.levels[level]!.get(key)?.todo === null;
@@ -263,6 +274,60 @@ export class PyramidPlanner {
       const canvasRect = intersect(intersect(levelTileRect(level, key), bounds)!, rect)!;
       return this.displayQuad(canvasId, cache, level, key, canvasRect);
     });
+  }
+
+  /**
+   * Phase 4: the canvas's pinned preview tiles (every tile of the levels from
+   * PINNED_PREVIEW_LEVEL up), if all are built and no change is waiting to
+   * reach them; otherwise null. Their slots are never evicted.
+   */
+  pinnedTiles(canvasId: CanvasId): { level: number; key: TileKey; slot: TileSlot }[] | null {
+    const cache = this.caches.get(canvasId);
+    if (!cache || cache.pending.size > 0) return null;
+    const full = { x: 0, y: 0, width: cache.width, height: cache.height };
+    const tiles: { level: number; key: TileKey; slot: TileSlot }[] = [];
+    for (let level = PINNED_PREVIEW_LEVEL; level < PYRAMID_LEVELS; level++) {
+      for (const key of levelTilesInRect(cache, full, level)) {
+        const tile = cache.levels[level]!.get(key);
+        if (!tile || tile.todo !== null) return null;
+        tiles.push({ level, key, slot: tile.slot });
+      }
+    }
+    return tiles;
+  }
+
+  /**
+   * Phase 4: start a canvas's cache from saved preview tiles (an opened
+   * project), so it shows at once without loading any layer tile. Its pinned
+   * levels become complete; anything cached before is dropped. Returns the
+   * slot of each tile, to upload its pixels into. Null if the preview pool is full.
+   */
+  seed(canvasId: CanvasId, size: { width: number; height: number }, paper: Rgba, tiles: readonly { level: number; key: TileKey }[]): TileSlot[] | null {
+    this.dropCache(canvasId);
+    const cache = new CanvasCache(size.width, size.height);
+    cache.paper = paper;
+    this.caches.set(canvasId, cache);
+    const slots: TileSlot[] = [];
+    for (const { level, key } of tiles) {
+      const slot = this.allocate(level);
+      if (slot === null) {
+        this.dropCache(canvasId);
+        return null;
+      }
+      cache.levels[level]!.set(key, { slot, lastUsed: this.frame, todo: null });
+      slots.push(slot);
+    }
+    return slots;
+  }
+
+  /** Phase 4: the keys of every pinned preview tile of a canvas of this size (levels from PINNED_PREVIEW_LEVEL up). */
+  static pinnedKeys(size: { width: number; height: number }): { level: number; key: TileKey }[] {
+    const full = { x: 0, y: 0, width: size.width, height: size.height };
+    const keys: { level: number; key: TileKey }[] = [];
+    for (let level = PINNED_PREVIEW_LEVEL; level < PYRAMID_LEVELS; level++) {
+      for (const key of levelTilesInRect(full, full, level)) keys.push({ level, key });
+    }
+    return keys;
   }
 
   /**

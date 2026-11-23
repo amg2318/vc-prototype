@@ -14,6 +14,8 @@ export interface CanvasPanelActions {
   duplicate(canvasId: string): void;
   remove(canvasId: string): void;
   bringToFront(canvasId: string): void;
+  /** Save the canvas as a PNG at full resolution (Phase 4). */
+  exportPng(canvasId: string): void;
   fitAll(): void;
 }
 
@@ -79,6 +81,7 @@ export class CanvasPanel {
       button('Duplicate', () => id() && actions.duplicate(id()!), 'Duplicate canvas'),
       button('To front', () => id() && actions.bringToFront(id()!), 'Bring to front'),
       button('Delete', () => id() && actions.remove(id()!), 'Delete canvas (undo brings it back)'),
+      button('Export PNG', () => id() && actions.exportPng(id()!), 'Save this canvas as a PNG at full resolution, inherited content included'),
     );
     this.details.append(
       heading('Selected canvas', 'h3'),

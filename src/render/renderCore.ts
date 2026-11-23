@@ -1,4 +1,4 @@
-import { LAYER_GPU_SLOTS, PINNED_PREVIEW_LEVEL, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
+import { LAYER_GPU_SLOTS, PINNED_PREVIEW_LEVEL, SLOTS_PER_PAGE, TILE_READBACKS_PER_FRAME, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
 import type { TileStore } from '../document/tileStore';
 import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type TileSlot } from '../document/tiles';
 import type { CanvasId } from '../document/paintDocument';
@@ -6,16 +6,23 @@ import { canvasTilesInRect, intersect, union, type Rect } from '../workspace/coo
 import { Propagation } from './propagation';
 import { packCompositeUniforms, packLookup, paperRgba } from './compositePacking';
 import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
-import { levelForZoom, PyramidPlanner, type DisplayQuad, type DownsampleJob, type FramePlan, type PlannerCanvas } from './pyramid';
+import { levelForZoom, levelTileRect, PyramidPlanner, type DisplayQuad, type DownsampleJob, type FramePlan, type PlannerCanvas } from './pyramid';
 import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUniforms, stagingOrigin, STAGING_TILES } from './blockPacking';
 import type { InheritedBlock } from '../document/inheritedBlock';
 import { TileResidency, type Eviction } from './residency';
-import { CompressedTileStore } from './tileBackingStore';
+import { CompressedTileStore, type TileBackingStore } from './tileBackingStore';
 import type { CanvasRenderState, FrameInfo, CompositeTile, Dab, MergeJob, OverlayQuad, OverlayRect, OverlayShape, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
 
 export interface Size {
   width: number;
   height: number;
+}
+
+/** Phase 4: one tile of a canvas's saved preview (pyramid `level`, tile `key` at that level, premultiplied RGBA). */
+export interface PreviewTile {
+  level: number;
+  key: TileKey;
+  rgba: Uint8Array;
 }
 
 /**
@@ -84,8 +91,11 @@ export type DisplayRun =
   | { kind: 'tile'; pool: 'level0' | 'preview'; page: number; first: number; count: number }
   | { kind: 'solid'; first: number; count: number };
 
-/** Queued work that needs tiles on the GPU: ops, and readbacks of layer tiles. */
-type QueuedWork = FrameOp | Exclude<Readback, { kind: 'screenPixel' }>;
+/**
+ * Queued work that needs tiles on the GPU: ops, and readbacks of layer tiles.
+ * (Reads for saving have their own queue: they don't need to wait in line.)
+ */
+type QueuedWork = FrameOp | Exclude<Readback, { kind: 'screenPixel' | 'tiles' }>;
 
 export interface Frame {
   /** Slot-level ops, in order. */
@@ -94,6 +104,8 @@ export interface Frame {
   readbacks: Readback[];
   /** Per-canvas GPU resources to release. */
   removedCanvases: CanvasId[];
+  /** Phase 4: saved preview tiles to write into preview-pool slots before anything else (an opened project). */
+  previewUploads: { slot: TileSlot; rgba: Uint8Array }[];
   /** Composite work in dependency order: sources' stages before their inheritors'. */
   stages: CompositeStage[];
   display: { tiles: Float32Array; solids: Float32Array; runs: DisplayRun[] };
@@ -156,11 +168,26 @@ export class RenderCore {
   private chainPending = new Map<CanvasId, number>();
   /** Inheritors that changed through an arrow in the last frame (for the HUD). */
   inheritorsUpdated = 0;
+  /** Preview reads for saving, answered after the next plan (see `readPreviewTiles`). */
+  private previewReads: { canvasId: CanvasId; resolve: (tiles: PreviewTile[] | null) => void }[] = [];
+  /** Full-resolution composite tiles to read back (PNG export), oldest first. */
+  private compositeReads: { canvasId: CanvasId; key: TileKey; resolve: (rgba: Uint8Array | null) => void }[] = [];
+  /** Saved previews of canvases not yet passed to setCanvases. */
+  private readonly pendingSeeds = new Map<CanvasId, readonly PreviewTile[]>();
+  /** Saved preview tiles waiting to be uploaded (see `seedPreviews`). */
+  private previewUploads: { slot: TileSlot; rgba: Uint8Array }[] = [];
+  /** Layer tiles to read back for saving, oldest first (see `readLayerTiles`). */
+  private tileReads: { id: TileId; resolve: (rgba: Uint8Array | null) => void }[] = [];
   private strokeCanvas: CanvasId | null = null;
   /** Tiles the current stroke has touched: not plain paper even before the stroke is merged. */
   private readonly strokeTiles = new Set<TileKey>();
 
   /** `layerSlots`: the GPU budget for layer tiles, in tiles. */
+  /** Where evicted layer tiles go (Phase 4: the project's store on disk). */
+  useBackingStore(backing: TileBackingStore): void {
+    this.residency.useBacking(backing);
+  }
+
   static withLayerBudget(layerSlots: number): RenderCore {
     return new RenderCore(new PyramidPlanner(), new TileResidency(layerSlots, new CompressedTileStore()));
   }
@@ -208,6 +235,7 @@ export class RenderCore {
       const before = previous.get(c.id);
       if (before && (before.inherited ?? null) !== (c.inherited ?? null)) this.invalidate(c.id, 'all');
     }
+    for (const [id, tiles] of this.pendingSeeds) if (this.byId.has(id)) this.seedPreviews(id, tiles);
   }
 
   canvas(id: CanvasId): CanvasRenderState | undefined {
@@ -279,6 +307,124 @@ export class RenderCore {
     });
   }
 
+  /**
+   * The raw premultiplied RGBA of layer tiles, read back asynchronously, at
+   * most TILE_READBACKS_PER_FRAME per frame. Null for a tile freed before it
+   * was read. A tile is read once its pixels are written; a tile that is off
+   * the GPU is reloaded first.
+   */
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {
+    return Promise.all(ids.map((id) => new Promise<Uint8Array | null>((resolve) => this.tileReads.push({ id, resolve }))));
+  }
+
+  /** This frame's share of the tile reads, as one readback. Returns true if reads are left for later frames. */
+  private takeTileReads(readbacks: Readback[]): boolean {
+    const r = this.residency;
+    const now: { slot: TileSlot; resolve: (rgba: Uint8Array | null) => void }[] = [];
+    const later: typeof this.tileReads = [];
+    for (const read of this.tileReads) {
+      if (!this.isLive(read.id)) read.resolve(null);
+      else if (now.length >= TILE_READBACKS_PER_FRAME || this.unwritten.has(read.id)) later.push(read);
+      else if (r.ensure([read.id])) now.push({ slot: r.slotOf(read.id)!, resolve: read.resolve });
+      else later.push(read); // reloading; the reload asks for a frame
+    }
+    this.tileReads = later;
+    if (now.length > 0) {
+      readbacks.push({
+        kind: 'tiles',
+        pool: 'layer',
+        slots: now.map((n) => n.slot),
+        resolve: (rgba) => now.forEach((n, i) => n.resolve(rgba[i]!)),
+      });
+    }
+    return now.length > 0 && later.length > 0;
+  }
+
+  /**
+   * Phase 4: the canvas's pinned preview tiles (levels 3–4 of its composite)
+   * for saving, read back after the next frame's composites; null if they
+   * aren't complete and up to date then (try again later).
+   */
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null> {
+    return new Promise((resolve) => this.previewReads.push({ canvasId, resolve }));
+  }
+
+  /**
+   * Phase 4: show an opened canvas from its saved preview tiles. Its cache
+   * starts with these as complete pinned levels, and changes already queued
+   * for it are dropped (they only said "everything is new"), so nothing has
+   * to be composited, and no layer tile loaded, to show it zoomed out.
+   * If `setCanvases` doesn't include the canvas yet, this happens when it
+   * does. Returns false if the preview pool is full.
+   */
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
+    const c = this.byId.get(canvasId);
+    if (!c) {
+      this.pendingSeeds.set(canvasId, tiles); // applied when setCanvases brings the canvas
+      return true;
+    }
+    this.pendingSeeds.delete(canvasId);
+    const slots = this.planner.seed(canvasId, c.placement, paperRgba(c), tiles);
+    if (!slots) return false;
+    slots.forEach((slot, i) => this.previewUploads.push({ slot, rgba: tiles[i]!.rgba }));
+    this.pendingChanges.delete(canvasId);
+    this.chainPending.delete(canvasId);
+    return true;
+  }
+
+  /**
+   * Phase 4 (PNG export): the canvas's full-resolution composite tiles
+   * (everything it shows, inherited content included, on its paper), as
+   * premultiplied RGBA. A few are built and read back per frame, so a large
+   * canvas takes many frames but never holds up drawing. Null for a canvas
+   * that is gone.
+   */
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]> {
+    return Promise.all(keys.map((key) => new Promise<Uint8Array | null>((resolve) => this.compositeReads.push({ canvasId, key, resolve }))));
+  }
+
+  /** Ask the planner for this frame's share of the composite reads (before the plan). */
+  private requestCompositeReads(): void {
+    for (const read of this.compositeReads.slice(0, TILE_READBACKS_PER_FRAME)) {
+      if (this.byId.has(read.canvasId)) this.planner.request(read.canvasId, 0, levelTileRect(0, read.key));
+    }
+  }
+
+  /** Read back the requested tiles that are built (after the plan). Returns true if reads are left. */
+  private takeCompositeReads(readbacks: Readback[]): boolean {
+    const now: { slot: TileSlot; resolve: (rgba: Uint8Array | null) => void }[] = [];
+    const later: typeof this.compositeReads = [];
+    this.compositeReads.forEach((read, i) => {
+      if (!this.byId.has(read.canvasId)) return read.resolve(null);
+      const slot = i < TILE_READBACKS_PER_FRAME ? this.planner.completeLevel0Slot(read.canvasId, read.key) : null;
+      if (slot === null) later.push(read);
+      else now.push({ slot, resolve: read.resolve });
+    });
+    this.compositeReads = later;
+    if (now.length > 0) {
+      readbacks.push({ kind: 'tiles', pool: 'level0', slots: now.map((n) => n.slot), resolve: (rgba) => now.forEach((n, i) => n.resolve(rgba[i]!)) });
+    }
+    return later.length > 0;
+  }
+
+  /** Answer this frame's preview reads (after the plan, so the frame's own updates are included). */
+  private takePreviewReads(readbacks: Readback[]): void {
+    for (const { canvasId, resolve } of this.previewReads) {
+      const tiles = this.planner.pinnedTiles(canvasId);
+      if (!tiles) {
+        resolve(null);
+        continue;
+      }
+      readbacks.push({
+        kind: 'tiles',
+        pool: 'preview',
+        slots: tiles.map((t) => t.slot),
+        resolve: (rgba) => resolve(tiles.map((t, i) => ({ level: t.level, key: t.key, rgba: rgba[i]! }))),
+      });
+    }
+    this.previewReads = [];
+  }
+
   beginStroke(canvasId: CanvasId): void {
     this.strokeCanvas = canvasId;
     this.strokeTiles.clear();
@@ -343,7 +489,7 @@ export class RenderCore {
     const work: QueuedWork[] = [...this.waiting, ...drained.ops];
     const readbacks: Readback[] = [];
     for (const rb of drained.readbacks) {
-      if (rb.kind === 'screenPixel') readbacks.push(rb);
+      if (rb.kind === 'screenPixel' || rb.kind === 'tiles') readbacks.push(rb);
       else work.push(rb);
     }
 
@@ -351,7 +497,7 @@ export class RenderCore {
     if (work[0]) r.ensure(this.reads(work[0]));
     const ops: FrameOp[] = [];
     for (const upload of r.takeUploads(UPLOADS_PER_FRAME)) {
-      if (upload.evicted) ops.push(evictOp(upload.evicted));
+      if (upload.evicted) ops.push(...evictOps(upload.evicted));
       ops.push({ kind: 'upload', slot: upload.slot, rgba: upload.rgba });
     }
     // Queued work, in order, as far as its tiles are on the GPU.
@@ -364,6 +510,7 @@ export class RenderCore {
       done++;
     }
     this.waiting = work.slice(done);
+    const moreTileReads = this.takeTileReads(readbacks);
 
     const viewLevel = levelForZoom(view.canvasPxPerDevicePx);
     const blocks = this.activeBlocks();
@@ -396,8 +543,11 @@ export class RenderCore {
         },
       };
     });
+    this.requestCompositeReads();
     const plan = this.planner.plan(plannerCanvases, view.visible, viewLevel);
     const followUps = this.blockFollowUps(plan, blocks, needs);
+    this.takePreviewReads(readbacks);
+    const moreCompositeReads = this.takeCompositeReads(readbacks);
     const stages = this.packStages(plan, blocks, needs);
     for (const [id, keys] of followUps) this.invalidate(id, keys);
     const visibleCanvases = new Set(plan.display.map((q) => q.canvasId)).size;
@@ -408,6 +558,7 @@ export class RenderCore {
       prediction: drained.prediction,
       readbacks,
       removedCanvases: this.removed,
+      previewUploads: this.previewUploads,
       stages,
       display: this.packDisplay(plan.display, view, clipPerDevicePx),
       stats: {
@@ -422,9 +573,10 @@ export class RenderCore {
       },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
-      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0,
+      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0 || moreTileReads || moreCompositeReads,
     };
     this.removed = [];
+    this.previewUploads = [];
     return frame;
   }
 
@@ -453,12 +605,27 @@ export class RenderCore {
    * visible inheritors show of it, through the whole upstream chain. The
    * sources' parts are requested from the planner, so they are built even
    * off screen, and kept (not evicted) while needed.
+   *
+   * Phase 4: the tiles a PNG export reads this frame are needed at full
+   * resolution wherever the canvas is, and so is the part of each source
+   * they show.
    */
   private requestBlockSources(blocks: ReadonlyMap<CanvasId, ActiveBlock>, visible: Rect, viewLevel: number): Map<CanvasId, BlockNeed> {
     const needs = new Map<CanvasId, BlockNeed>();
+    const needOf = (id: CanvasId): BlockNeed => {
+      let need = needs.get(id);
+      if (!need) needs.set(id, (need = { shown: null, full: null }));
+      return need;
+    };
     for (const c of this.canvases) {
       const r = intersect(c.placement, visible);
-      if (r) needs.set(c.id, { level: viewLevel, rect: { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height } });
+      if (r) needOf(c.id).shown = { level: viewLevel, rect: { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height } };
+    }
+    for (const read of this.compositeReads.slice(0, TILE_READBACKS_PER_FRAME)) {
+      if (!this.byId.has(read.canvasId)) continue;
+      const need = needOf(read.canvasId);
+      const rect = levelTileRect(0, read.key);
+      need.full = need.full ? union([need.full, rect])! : rect;
     }
     // Inheritors before their sources (deepest first), so a source has every need before passing its own up.
     const arrows = this.propagation.arrows;
@@ -466,12 +633,22 @@ export class RenderCore {
     for (const id of order) {
       const need = needs.get(id);
       const b = blocks.get(id)!;
-      const rect = need && blockSourceRect(b.block, b.sourceSize, need.rect);
-      if (!need || !rect) continue;
-      const level = sampleLevel(b, need);
-      this.planner.request(b.sourceId, level, rect);
-      const previous = needs.get(b.sourceId);
-      needs.set(b.sourceId, previous ? { level: Math.min(previous.level, level), rect: union([previous.rect, rect])! } : { level, rect });
+      if (!need) continue;
+      const shownRect = need.shown && blockSourceRect(b.block, b.sourceSize, need.shown.rect);
+      if (shownRect) {
+        const level = blockLevel(b.block.placement.scale, shownCoarserBy(need));
+        this.planner.request(b.sourceId, level, shownRect);
+        const source = needOf(b.sourceId);
+        source.shown = source.shown
+          ? { level: Math.min(source.shown.level, level), rect: union([source.shown.rect, shownRect])! }
+          : { level, rect: shownRect };
+      }
+      const fullRect = need.full && blockSourceRect(b.block, b.sourceSize, need.full);
+      if (fullRect) {
+        this.planner.request(b.sourceId, blockLevel(b.block.placement.scale, 0), fullRect);
+        const source = needOf(b.sourceId);
+        source.full = source.full ? union([source.full, fullRect])! : fullRect;
+      }
     }
     return needs;
   }
@@ -493,10 +670,11 @@ export class RenderCore {
       if (rect && this.planner.willUpdate(b.sourceId, sampleLevel(b, need), rect)) {
         again.set(job.canvasId, [...(again.get(job.canvasId) ?? []), job.key]);
       }
-      if (coarserBy(need) > 0 && !this.planner.isScratch(job.dst)) this.planner.forgetTile(job.canvasId, 0, job.key);
+      const neededInFull = need?.full && intersect(tileRect(job.key), need.full);
+      if (!neededInFull && shownCoarserBy(need) > 0 && !this.planner.isScratch(job.dst)) this.planner.forgetTile(job.canvasId, 0, job.key);
     }
     for (const d of plan.downsamples) {
-      if (blocks.has(d.canvasId) && d.level < coarserBy(needs.get(d.canvasId))) this.planner.forgetTile(d.canvasId, d.level, d.key);
+      if (blocks.has(d.canvasId) && d.level < shownCoarserBy(needs.get(d.canvasId))) this.planner.forgetTile(d.canvasId, d.level, d.key);
     }
     return again;
   }
@@ -612,7 +790,7 @@ export class RenderCore {
         ops.push(...evictions); // tiles already evicted for this work must still be read back
         return 'needsRoom'; // every slot is in use this frame
       }
-      if (placed.evicted) evictions.push(evictOp(placed.evicted));
+      if (placed.evicted) evictions.push(...evictOps(placed.evicted));
       slotFor.set(id, placed.slot);
     }
     for (const id of writes) this.unwritten.delete(id);
@@ -679,20 +857,27 @@ export class RenderCore {
   }
 }
 
-/** Which part of a canvas's composite is needed this frame (canvas px), at which pyramid level. */
+/** Which parts of a canvas's composite are needed this frame (canvas px). */
 interface BlockNeed {
-  level: number;
-  rect: Rect;
+  /** For the screen (the canvas or a visible inheritor), at a pyramid level; null if neither shows it. */
+  shown: { level: number; rect: Rect } | null;
+  /** Phase 4 (PNG export): needed at full resolution; null if not. */
+  full: Rect | null;
 }
 
 /**
- * How many levels coarser than full quality an inheritor's composites are
- * this frame: matching the level it is needed at, but never coarser than the
- * always-kept preview levels (so those are always built at full quality).
- * A canvas that nothing needs only builds those kept levels.
+ * How many levels coarser than full quality an inheritor's composites may be
+ * for the screen: matching the level it is shown at, but never coarser than
+ * the always-kept preview levels (so those are always built at full
+ * quality). A canvas that nothing shows only builds those kept levels.
  */
+function shownCoarserBy(need: BlockNeed | undefined): number {
+  return Math.min(need?.shown?.level ?? PINNED_PREVIEW_LEVEL, PINNED_PREVIEW_LEVEL);
+}
+
+/** As shownCoarserBy, but full quality while an export needs part of the canvas. */
 function coarserBy(need: BlockNeed | undefined): number {
-  return Math.min(need?.level ?? PINNED_PREVIEW_LEVEL, PINNED_PREVIEW_LEVEL);
+  return need?.full ? 0 : shownCoarserBy(need);
 }
 
 /** The source level an inheritor samples this frame. */
@@ -841,8 +1026,9 @@ function tileIdsAt(c: CanvasRenderState, key: TileKey): TileId[] {
   return ids;
 }
 
-function evictOp(e: Eviction): FrameOp {
-  return { kind: 'evict', slot: e.slot, done: e.pixels };
+/** The GPU work an eviction needs: a readback, unless the tile is already on disk. */
+function evictOps(e: Eviction): FrameOp[] {
+  return e.needsReadback ? [{ kind: 'evict', slot: e.slot, done: e.pixels }] : [];
 }
 
 /**

@@ -1,3 +1,5 @@
+import type { PreviewTile } from '../renderer';
+import type { TileBackingStore } from '../tileBackingStore';
 import {
   ATLAS_PAGE_SIZE,
   COMPOSITE_LEVEL0_PAGES,
@@ -440,6 +442,39 @@ export class WebGPURenderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null> {
+    const read = this.core.readPreviewTiles(canvasId);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]> {
+    const read = this.core.readCompositeTiles(canvasId, keys);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
+    const seeded = this.core.seedPreviews(canvasId, tiles);
+    this.onNeedsFrame?.();
+    return seeded;
+  }
+
+  useBackingStore(backing: TileBackingStore): void {
+    this.core.useBackingStore(backing);
+  }
+
+  adoptStoredTiles(ids: Iterable<TileId>): void {
+    this.core.residency.adoptStored(ids);
+    this.onNeedsFrame?.();
+  }
+
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {
+    const read = this.core.readLayerTiles(ids);
+    this.onNeedsFrame?.(); // the reads happen during frames
+    return read;
+  }
+
   render(view: ViewState): FrameInfo {
     const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false, inheritorsUpdated: 0, staleInheritors: 0, propagation: [] };
     if (this.lost) return idle;
@@ -449,6 +484,16 @@ export class WebGPURenderer implements Renderer {
     const frame = this.core.buildFrame(view, [2 / canvas.width, 2 / canvas.height]);
     this.syncPages();
     for (const id of frame.removedCanvases) this.releaseCanvas(id);
+    // Saved previews of an opened project (queue writes run before this frame's commands).
+    for (const { slot, rgba } of frame.previewUploads) {
+      const at = slotLocation(slot);
+      device.queue.writeTexture(
+        { texture: this.previewPages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+        rgba as Uint8Array<ArrayBuffer>,
+        { bytesPerRow: TILE_SIZE * 4 },
+        [TILE_SIZE, TILE_SIZE],
+      );
+    }
 
     const encoder = device.createCommandEncoder();
     const afterLayerOps = this.encodeLayerOps(encoder, frame.ops, frame.prediction);
@@ -767,6 +812,21 @@ export class WebGPURenderer implements Renderer {
           vertex.destroy();
           readback.resolve(b);
         });
+      }
+      case 'tiles': {
+        // Whole tiles, copied one after another into one buffer (TILE_SIZE * 4 = 1024 bytes per row: aligned).
+        const pages = { layer: this.layerPages, level0: this.level0Pages, preview: this.previewPages }[readback.pool];
+        const buffer = readBuffer(Math.max(4, readback.slots.length * TILE_BYTES));
+        readback.slots.forEach((slot, i) => {
+          const at = slotLocation(slot);
+          encoder.copyTextureToBuffer(
+            { texture: pages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+            { buffer, offset: i * TILE_BYTES, bytesPerRow: TILE_SIZE * 4 },
+            [TILE_SIZE, TILE_SIZE],
+          );
+        });
+        return () =>
+          mapped(buffer, (b) => readback.resolve(readback.slots.map((_, i) => b.slice(i * TILE_BYTES, (i + 1) * TILE_BYTES))));
       }
       case 'empty': {
         // One pass + copy per batch of tiles, all into separate read buffers.
