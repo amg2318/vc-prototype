@@ -10,7 +10,7 @@ import { levelForZoom, PyramidPlanner, type DisplayQuad, type DownsampleJob, typ
 import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUniforms, stagingOrigin, STAGING_TILES } from './blockPacking';
 import type { InheritedBlock } from '../document/inheritedBlock';
 import { TileResidency, type Eviction } from './residency';
-import { CompressedTileStore } from './tileBackingStore';
+import { CompressedTileStore, type TileBackingStore } from './tileBackingStore';
 import type { CanvasRenderState, FrameInfo, CompositeTile, Dab, MergeJob, OverlayQuad, OverlayRect, OverlayShape, RendererMemory, RetileJob, StrokeStyle, ViewState } from './renderer';
 
 export interface Size {
@@ -166,6 +166,11 @@ export class RenderCore {
   private readonly strokeTiles = new Set<TileKey>();
 
   /** `layerSlots`: the GPU budget for layer tiles, in tiles. */
+  /** Where evicted layer tiles go (Phase 4: the project's store on disk). */
+  useBackingStore(backing: TileBackingStore): void {
+    this.residency.useBacking(backing);
+  }
+
   static withLayerBudget(layerSlots: number): RenderCore {
     return new RenderCore(new PyramidPlanner(), new TileResidency(layerSlots, new CompressedTileStore()));
   }
@@ -389,7 +394,7 @@ export class RenderCore {
     if (work[0]) r.ensure(this.reads(work[0]));
     const ops: FrameOp[] = [];
     for (const upload of r.takeUploads(UPLOADS_PER_FRAME)) {
-      if (upload.evicted) ops.push(evictOp(upload.evicted));
+      if (upload.evicted) ops.push(...evictOps(upload.evicted));
       ops.push({ kind: 'upload', slot: upload.slot, rgba: upload.rgba });
     }
     // Queued work, in order, as far as its tiles are on the GPU.
@@ -651,7 +656,7 @@ export class RenderCore {
         ops.push(...evictions); // tiles already evicted for this work must still be read back
         return 'needsRoom'; // every slot is in use this frame
       }
-      if (placed.evicted) evictions.push(evictOp(placed.evicted));
+      if (placed.evicted) evictions.push(...evictOps(placed.evicted));
       slotFor.set(id, placed.slot);
     }
     for (const id of writes) this.unwritten.delete(id);
@@ -880,8 +885,9 @@ function tileIdsAt(c: CanvasRenderState, key: TileKey): TileId[] {
   return ids;
 }
 
-function evictOp(e: Eviction): FrameOp {
-  return { kind: 'evict', slot: e.slot, done: e.pixels };
+/** The GPU work an eviction needs: a readback, unless the tile is already on disk. */
+function evictOps(e: Eviction): FrameOp[] {
+  return e.needsReadback ? [{ kind: 'evict', slot: e.slot, done: e.pixels }] : [];
 }
 
 /**

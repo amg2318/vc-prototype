@@ -39,6 +39,7 @@ import type {
   StrokeStyle,
   ViewState,
 } from '../renderer';
+import type { TileBackingStore } from '../tileBackingStore';
 import { inheritanceInfo, RenderCore, type Frame } from '../renderCore';
 import { WORKSPACE_BACKGROUND } from '../workspace';
 import * as S from './shaders';
@@ -229,6 +230,15 @@ export class WebGL2Renderer implements Renderer {
 
   readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array> {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
+  }
+
+  useBackingStore(backing: TileBackingStore): void {
+    this.core.useBackingStore(backing);
+  }
+
+  adoptStoredTiles(ids: Iterable<TileId>): void {
+    this.core.residency.adoptStored(ids);
+    this.onNeedsFrame?.();
   }
 
   readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {

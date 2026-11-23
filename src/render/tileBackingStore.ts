@@ -7,8 +7,9 @@ export { deflate, inflate };
  * Where evicted tile pixels go. Tiles are immutable, so a tile id always
  * names the same pixels.
  *
- * Phase 2 keeps them compressed in JS memory (`CompressedTileStore`); Phase 4
- * replaces this with a content-hashed store in OPFS, written from a worker.
+ * Phase 2 kept them compressed in JS memory (`CompressedTileStore`, still the
+ * fallback); Phase 4 keeps them in the content-hashed project store in OPFS
+ * (`DiskTileBackingStore`), written by the storage worker.
  */
 export interface TileBackingStore {
   /** Store a tile's raw RGBA pixels (TILE_SIZE² × 4 bytes). Resolves once stored. */
@@ -18,8 +19,13 @@ export interface TileBackingStore {
   has(id: TileId): boolean;
   /** Forget a tile (it was reloaded onto the GPU, or nothing uses it any more). */
   evict(id: TileId): void;
-  /** Tiles stored and the bytes they take. */
+  /** Tiles stored in memory and the bytes they take. */
   stats(): { tiles: number; bytes: number };
+  /**
+   * Phase 4: true if the tile's pixels are already kept outside the GPU (on
+   * disk) and stay there, so evicting it needs no readback.
+   */
+  isPersisted?(id: TileId): boolean;
 }
 
 /**

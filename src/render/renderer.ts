@@ -6,6 +6,7 @@ import type { CanvasId } from '../document/paintDocument';
 import type { RetileJob } from '../document/retile';
 import type { TileStore } from '../document/tileStore';
 import type { TileId, TileKey } from '../document/tiles';
+import type { TileBackingStore } from './tileBackingStore';
 import type { Placement, Rect } from '../workspace/coords';
 
 export type { Dab, MergeJob, RetileJob };
@@ -181,6 +182,10 @@ export interface Renderer {
 
   /** Follow the document's tiles (ids): freed tiles are dropped from the GPU and the backing store. */
   useTileStore(store: TileStore): void;
+  /** Phase 4: where evicted layer tiles go (the project's store on disk). Call before drawing. */
+  useBackingStore(backing: TileBackingStore): void;
+  /** Phase 4: tile ids whose pixels are only on disk (an opened project); loaded when first needed. */
+  adoptStoredTiles(ids: Iterable<TileId>): void;
 
   /** Resize the canvas backing store (device pixels). */
   resize(pixelWidth: number, pixelHeight: number): void;

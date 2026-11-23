@@ -1,3 +1,4 @@
+import type { TileBackingStore } from '../tileBackingStore';
 import {
   ATLAS_PAGE_SIZE,
   COMPOSITE_LEVEL0_PAGES,
@@ -438,6 +439,15 @@ export class WebGPURenderer implements Renderer {
 
   readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array> {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
+  }
+
+  useBackingStore(backing: TileBackingStore): void {
+    this.core.useBackingStore(backing);
+  }
+
+  adoptStoredTiles(ids: Iterable<TileId>): void {
+    this.core.residency.adoptStored(ids);
+    this.onNeedsFrame?.();
   }
 
   readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {
