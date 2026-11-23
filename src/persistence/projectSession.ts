@@ -162,8 +162,11 @@ export class ProjectSession {
     await this.scheduler.settle();
     this.scheduler.paused = true; // loading is not a change to save
     clearTimeout(this.gcTimer);
-    this.lock?.release();
-    this.lock = await tryLockProject(id);
+    if (this.lock?.projectId !== id) {
+      // Reopening the same project keeps its lock; otherwise let go of the old one first.
+      await this.lock?.release();
+      this.lock = await tryLockProject(id);
+    }
     this.backing.writeToDisk = this.lock !== null;
     const { storage, workspace } = this.deps;
     const opened = await storage.openProject(id);
@@ -497,7 +500,7 @@ export class ProjectSession {
     try {
       return await this.deps.storage.duplicateProject(id, name);
     } finally {
-      lock.release();
+      await lock.release();
     }
   }
 
@@ -513,7 +516,7 @@ export class ProjectSession {
     try {
       return await this.deps.storage.exportProject(id, includeHistory);
     } finally {
-      lock.release();
+      await lock.release();
     }
   }
 
@@ -556,6 +559,7 @@ export class ProjectSession {
     if (this.persistent) this.setStatus({ state: 'saving' });
     try {
       const stats = await this.saver.save(options);
+      if (stats.committed && this.saver.lastInfo && this.project?.id === this.saver.lastInfo.id) this.project = this.saver.lastInfo;
       if (this.persistent) {
         const state = this.scheduler.hasUnsavedChanges ? 'unsaved' : 'saved';
         this.setStatus({ state, savedAt: stats.committed ? Date.now() : this.status.savedAt, message: null, quota: false });

@@ -74,6 +74,8 @@ export class ProjectSaver {
   /** Canvases whose composite changed since their preview was saved. */
   readonly previewsDirty = new Set<CanvasId>();
   head: CommitReply['head'] | null = null;
+  /** The project as the last commit left it (its size, for the HUD). */
+  lastInfo: CommitReply['info'] | null = null;
   lastStats: SaveStats | null = null;
 
   constructor(private readonly deps: SaverDeps) {}
@@ -151,6 +153,7 @@ export class ProjectSaver {
     this.savedManifest = manifest;
     this.savedView = JSON.stringify(view ?? null);
     this.head = reply.head;
+    this.lastInfo = reply.info;
     bytesWritten += reply.bytesWritten;
     return (this.lastStats = { ms: performance.now() - start, bytesWritten, tilesWritten, recordsWritten, committed: true });
   }

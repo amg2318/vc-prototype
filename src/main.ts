@@ -103,7 +103,10 @@ async function main(): Promise<void> {
     if (document.visibilityState === 'hidden') setTimeout(() => frame(performance.now()), 0);
     else requestAnimationFrame(frame);
   }
+  /** Frames drawn so far (for waitUntilIdle). */
+  let framesDrawn = 0;
   function frame(rafTime: number): void {
+    framesDrawn++;
     framePending = false;
     const start = performance.now();
     const canvasPxPerDevicePx = 1 / (view.scale * window.devicePixelRatio);
@@ -454,6 +457,7 @@ async function main(): Promise<void> {
       `tiles ${s.usedSlots} · on gpu ${m.residentTiles}/${m.tileCapacity} (${mb(m.residentTiles * TILE_BYTES)}) · compressed ${m.compressedTiles} (${mb(m.compressedBytes)})`,
       `visible canvases ${metrics.frames.at(-1)?.visibleCanvases ?? '—'}`,
       inheritanceLine(),
+      ...persistenceLines(),
       `evictions ${perSecond(r.evictionsPerSecond)}/s · reloads ${perSecond(r.reloadsPerSecond)}/s (total ${m.evictions} / ${m.reloads})${m.loadingTiles ? ` · ${m.loadingTiles} loading` : ''}`,
       `reload ms ${ms(r.reloadMs.p50)} / ${ms(r.reloadMs.p95)}  (p50 / p95, last ${r.reloadMs.count})`,
       `gpu memory ≈ ${mb(m.bytes)} (layer pages ${m.layerPages}, composite pages ${m.compositePages})`,
@@ -463,6 +467,38 @@ async function main(): Promise<void> {
       `coalesced ${inputCapabilities.coalescedEvents ? 'yes' : 'no'}  predicted ${inputCapabilities.predictedEvents ? 'yes' : 'no'}  ${isStandalone() ? 'home-screen app' : 'browser tab'}`,
     ];
   });
+
+  /** Resolves once no frame has been drawn for a while and no tile is loading (nothing left to do). */
+  async function waitUntilIdle(quietMs = 300): Promise<void> {
+    let frames = -1;
+    let quietSince = performance.now();
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const now = performance.now();
+      if (framesDrawn !== frames || framePending || renderer.memory().loadingTiles > 0) {
+        frames = framesDrawn;
+        quietSince = now;
+      } else if (now - quietSince >= quietMs) {
+        return;
+      }
+    }
+  }
+
+  /** Phase 4 HUD lines: saving, storage, garbage collection. */
+  let siteUsage: number | null = null;
+  const sampleUsage = (): void => void navigator.storage?.estimate?.().then((e) => (siteUsage = e.usage ?? null));
+  sampleUsage();
+  setInterval(sampleUsage, 10_000);
+  function persistenceLines(): string[] {
+    const last = [...metrics.persistence.saves].reverse().find((save) => save.committed); // a save with nothing to write isn't interesting
+    const gc = project.lastGc;
+    return [
+      `save ${project.status.state} · queue ${storage.pending}${project.scheduler.isSaving ? ' (saving)' : ''} · last ${last ? `${ms(last.ms)} ms, ${formatBytes(last.bytesWritten)}` : '—'}`,
+      `storage ${project.project ? formatBytes(project.project.sizeBytes) : '—'} this project · ${siteUsage === null ? '—' : formatBytes(siteUsage)} site · gc ${gc ? `${ms(gc.ms)} ms, freed ${formatBytes(gc.removedBytes)}` : '—'}`,
+    ];
+  }
+  project.onSaved = (stats) => metrics.noteSave(stats);
+  project.onGarbageCollected = (stats) => metrics.noteGc(stats);
 
   const controls = new Controls(
     () => tools.editableSettings,
@@ -795,6 +831,7 @@ async function main(): Promise<void> {
         setView,
         report: (m) => showBanner(m, true),
         gpuBytes: () => renderer.memory().bytes,
+        persistence: { project, waitUntilIdle },
       }),
     );
   }

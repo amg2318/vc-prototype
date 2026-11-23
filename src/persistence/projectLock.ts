@@ -13,20 +13,31 @@ import type { ProjectId } from '../storage/format';
 const lockName = (id: ProjectId) => `vc-project-${id}`;
 
 export interface HeldLock {
-  release(): void;
+  readonly projectId: ProjectId;
+  /** Let go of the lock; resolves once the browser has freed it (so it can be taken again at once). */
+  release(): Promise<void>;
 }
 
 /** Take the project's lock if no other tab holds it; null if one does. */
 export function tryLockProject(id: ProjectId): Promise<HeldLock | null> {
-  if (!('locks' in navigator)) return Promise.resolve({ release() {} });
+  if (!('locks' in navigator)) return Promise.resolve({ projectId: id, release: async () => undefined });
   return new Promise((resolve) => {
-    void navigator.locks.request(lockName(id), { ifAvailable: true }, (lock) => {
+    // `request` settles once the lock is freed again.
+    const freed: Promise<unknown> = navigator.locks.request(lockName(id), { ifAvailable: true }, (lock) => {
       if (!lock) {
         resolve(null);
         return undefined;
       }
       // Hold the lock until release() is called.
-      return new Promise<void>((release) => resolve({ release: () => release() }));
+      return new Promise<void>((letGo) =>
+        resolve({
+          projectId: id,
+          release: async () => {
+            letGo();
+            await freed;
+          },
+        }),
+      );
     });
   });
 }
