@@ -1,4 +1,7 @@
 import type { TileId } from '../document/tiles';
+import { deflate, inflate } from '../storage/compression';
+
+export { deflate, inflate };
 
 /**
  * Where evicted tile pixels go. Tiles are immutable, so a tile id always
@@ -17,22 +20,6 @@ export interface TileBackingStore {
   evict(id: TileId): void;
   /** Tiles stored and the bytes they take. */
   stats(): { tiles: number; bytes: number };
-}
-
-/** Raw RGBA → deflate (lossless) with the browser's built-in CompressionStream. */
-export async function deflate(rgba: Uint8Array): Promise<Uint8Array> {
-  return transform(rgba, new CompressionStream('deflate-raw'));
-}
-
-export async function inflate(compressed: Uint8Array): Promise<Uint8Array> {
-  return transform(compressed, new DecompressionStream('deflate-raw'));
-}
-
-async function transform(input: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
-  const writer = stream.writable.getWriter();
-  void writer.write(input as Uint8Array<ArrayBuffer>);
-  void writer.close();
-  return new Uint8Array(await new Response(stream.readable).arrayBuffer());
 }
 
 /**
