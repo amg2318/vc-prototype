@@ -1,5 +1,6 @@
 import type { CanvasRecord, HeadRecord, ManifestId, ProjectId, ProjectInfo, RootManifest, VersionEntry } from './format';
 import { newId } from './format';
+import { exportArchive, readArchive } from './archive';
 import { GarbageCollector, type SweepProgress } from './gc';
 import { ProjectStore, type CanvasEntry, type PutResult } from './projectStore';
 import { projectFolder as folderOf, scopedStore, type BlobStore, type Catalog } from './stores';
@@ -68,6 +69,10 @@ export interface StorageApi {
   commit(message: CommitMessage): CommitReply;
   updateHead(edit: HeadEdit, thumbnail?: { name: string; bytes: Uint8Array }): HeadRecord;
   readThumbnail(name: string): Uint8Array | null;
+  /** A project file (zip) of a project, with or without its versions (see archive.ts). */
+  exportProject(id: ProjectId, includeHistory: boolean): Uint8Array;
+  /** Read a project file into a new project. */
+  importProject(bytes: Uint8Array): ProjectInfo;
   /** Garbage collection of the open project, in steps (see gc.ts). */
   gcBegin(): void;
   gcMark(live: string[]): number;
@@ -201,6 +206,35 @@ export class StorageService implements AsyncApi {
 
   readThumbnail(name: string): Promise<Uint8Array | null> {
     return this.project.files.read(`thumbnails/${name}`);
+  }
+
+  async exportProject(id: ProjectId, includeHistory: boolean): Promise<Uint8Array> {
+    const store = this.current?.id === id ? this.current : await ProjectStore.open(id, this.files(id), this.catalog);
+    // In the store's lock: no save of the open project changes it while it is read.
+    return store.exclusive(() => exportArchive(store, store.projectInfo.name, includeHistory));
+  }
+
+  /**
+   * Check a project file and write it as a new project. The project is
+   * listed only once all its files are written; if anything fails, its
+   * folder is removed again.
+   */
+  async importProject(bytes: Uint8Array): Promise<ProjectInfo> {
+    const imported = await readArchive(bytes);
+    const now = Date.now();
+    const info: ProjectInfo = { id: newId('p'), name: imported.name, createdAt: now, lastOpenedAt: now, sizeBytes: 0 };
+    const files = this.files(info.id);
+    try {
+      for (const [path, data] of imported.files) {
+        await files.write(path, data);
+        info.sizeBytes += data.byteLength;
+      }
+      await this.catalog.commitHead({ ...imported.head, projectId: info.id }, info);
+    } catch (error) {
+      await this.root.removeDir(folderOf(info.id)).catch(() => undefined);
+      throw error;
+    }
+    return info;
   }
 
   async gcBegin(): Promise<void> {

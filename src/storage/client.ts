@@ -36,6 +36,7 @@ export function workerClient(worker: Worker): StorageClient {
 /** Tile pixels sent for saving are moved to the worker, not copied (the caller must not reuse them). */
 function transfersFor(op: StorageOp, args: unknown[]): Transferable[] {
   if (op === 'putTiles') return (args[0] as Uint8Array[]).map((t) => t.buffer as ArrayBuffer);
+  if (op === 'importProject') return [(args[0] as Uint8Array).buffer as ArrayBuffer];
   return [];
 }
 
@@ -66,6 +67,8 @@ const OPS: readonly StorageOp[] = [
   'readProject',
   'commit',
   'updateHead',
+  'exportProject',
+  'importProject',
   'gcBegin',
   'gcMark',
   'gcSweep',

@@ -236,6 +236,17 @@ export class PyramidPlanner {
     return this.caches.get(canvasId)?.levels.map((m) => m.size) ?? [];
   }
 
+  /**
+   * Phase 4 (PNG export): the slot of a complete, up-to-date level-0 tile,
+   * or null if it isn't cached, isn't built yet, or a change hasn't reached it.
+   */
+  completeLevel0Slot(canvasId: CanvasId, key: TileKey): TileSlot | null {
+    const cache = this.caches.get(canvasId);
+    const tile = cache?.levels[0]!.get(key);
+    if (!cache || !tile || tile.todo !== null || cache.pending.has(key)) return null;
+    return tile.slot;
+  }
+
   /** True if the tile is cached and complete. */
   isComplete(canvasId: CanvasId, level: number, key: TileKey): boolean {
     return this.caches.get(canvasId)?.levels[level]!.get(key)?.todo === null;

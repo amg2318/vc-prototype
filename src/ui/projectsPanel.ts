@@ -1,3 +1,4 @@
+import { PROJECT_FILE_EXTENSION } from '../storage/archive';
 import type { ProjectInfo } from '../storage/format';
 
 /**
@@ -17,6 +18,8 @@ export interface ProjectsActions {
   rename(project: ProjectInfo, name: string): void;
   duplicate(project: ProjectInfo): void;
   remove(project: ProjectInfo): void;
+  exportFile(project: ProjectInfo, includeHistory: boolean): void;
+  importFile(file: File): void;
   storage: StorageActions;
 }
 
@@ -46,7 +49,20 @@ export class ProjectsPanel {
     this.element.className = 'history projects panel';
     this.element.hidden = true;
     const header = document.createElement('header');
-    header.append(Object.assign(document.createElement('h2'), { textContent: 'Projects' }), button('New project', actions.create, 'Create a new project and open it'));
+    const fileInput = Object.assign(document.createElement('input'), { type: 'file', accept: `${PROJECT_FILE_EXTENSION},application/zip,application/octet-stream`, hidden: true });
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (file) actions.importFile(file);
+      fileInput.value = '';
+    });
+    const buttons = document.createElement('div');
+    buttons.className = 'button-row';
+    buttons.append(
+      button('Import…', () => fileInput.click(), `Add a project from a ${PROJECT_FILE_EXTENSION} file (as a new project)`),
+      button('New project', actions.create, 'Create a new project and open it'),
+      fileInput,
+    );
+    header.append(Object.assign(document.createElement('h2'), { textContent: 'Projects' }), buttons);
     this.total.className = 'history-empty';
     this.element.append(header, this.total, this.list, this.storageSection());
   }
@@ -187,7 +203,14 @@ export class ProjectsPanel {
         }, 'Delete this project');
     if (this.confirmingDelete) remove.classList.add('danger');
     row.append(remove);
-    box.append(nameInput, row);
+    const history = Object.assign(document.createElement('input'), { type: 'checkbox', checked: true });
+    const historyLabel = document.createElement('label');
+    historyLabel.className = 'retention-field';
+    historyLabel.append(history, 'with version history');
+    const exportRow = document.createElement('div');
+    exportRow.className = 'button-row';
+    exportRow.append(button('Export…', () => this.actions.exportFile(p, history.checked), `Save this project as a ${PROJECT_FILE_EXTENSION} file`), historyLabel);
+    box.append(nameInput, row, exportRow);
     return box;
   }
 }

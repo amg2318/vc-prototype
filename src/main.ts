@@ -17,6 +17,9 @@ import { createStorageWorker, workerClient } from './storage/client';
 import { SaveIndicator } from './ui/saveIndicator';
 import { HistoryPanel } from './ui/historyPanel';
 import { formatBytes, ProjectsPanel } from './ui/projectsPanel';
+import { canvasPng } from './export/canvasPng';
+import { deliverFile, GestureExpiredError, safeFileName } from './export/deliver';
+import { PROJECT_FILE_EXTENSION, PROJECT_FILE_TYPE } from './storage/archive';
 import { QUOTA_MESSAGE } from './persistence/projectSession';
 import { inIosBrowserTab, loadRetention, saveRetention } from './persistence/storageSettings';
 import { isQuotaError } from './storage/stores';
@@ -516,8 +519,23 @@ async function main(): Promise<void> {
     duplicate: (id) => workspace.setActiveCanvas(workspace.duplicateCanvas(id).id),
     remove: (id) => workspace.deleteCanvas(id),
     bringToFront: (id) => workspace.bringToFront(id),
+    exportPng: (id) => void exportCanvasPng(id),
     fitAll: () => setView(fitAll()),
   });
+  /** Flatten a canvas to PNG (a tile row at a time, read back from the GPU) and hand it over. */
+  async function exportCanvasPng(canvasId: string): Promise<void> {
+    const doc = workspace.canvases.find((c) => c.id === canvasId);
+    if (!doc) return;
+    try {
+      showBanner(`Exporting “${doc.name}”…`, true);
+      const png = await canvasPng(doc.placement, (keys) => renderer.readCompositeTiles(canvasId, keys), (done) =>
+        showBanner(`Exporting “${doc.name}”… ${Math.round(done * 100)}%`, true),
+      );
+      await offerFile(png, `${safeFileName(doc.name)}.png`, 'image/png');
+    } catch (error) {
+      reportProjectError(error);
+    }
+  }
   // The layers, canvases and history panels share the right-hand side: one at a time.
   const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel, projectsPanel];
   function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
@@ -573,6 +591,27 @@ async function main(): Promise<void> {
         showBanner(`Deleted “${p.name}”.`);
         return reopened ? saved : null;
       }),
+    exportFile: (p, includeHistory) =>
+      void (async () => {
+        try {
+          showBanner(`Exporting “${p.name}”…`, true);
+          const bytes = await project.exportProject(p.id, includeHistory);
+          await offerFile(bytes, `${safeFileName(p.name)}${PROJECT_FILE_EXTENSION}`, PROJECT_FILE_TYPE);
+        } catch (error) {
+          reportProjectError(error);
+        }
+      })(),
+    importFile: (file) =>
+      void (async () => {
+        try {
+          showBanner(`Importing “${file.name}”…`, true);
+          const info = await project.importProject(new Uint8Array(await file.arrayBuffer()));
+          showBanner(`Imported “${info.name}” as a new project.`, false, [{ label: 'Open it', run: () => void switchProject(() => project.open(info.id)) }]);
+          await projectsPanel.refresh();
+        } catch (error) {
+          reportProjectError(error);
+        }
+      })(),
     storage: {
       persisted: async () => (navigator.storage?.persisted ? navigator.storage.persisted() : null),
       requestPersistence: async () => (navigator.storage?.persist ? navigator.storage.persist() : false),
@@ -612,6 +651,17 @@ async function main(): Promise<void> {
     console.error(error);
     if (isQuotaError(error)) showQuotaWarning(QUOTA_MESSAGE);
     else showBanner(error instanceof Error ? error.message : String(error));
+  }
+  /** Hand a finished file over (share sheet, save dialog or download); if the tap has expired, ask for another. */
+  async function offerFile(bytes: Uint8Array, name: string, type: string): Promise<void> {
+    try {
+      const how = await deliverFile(bytes, name, type);
+      if (how === 'cancelled') banner.hidden = true;
+      else showBanner(how === 'downloaded' ? `Downloaded “${name}”.` : `Saved “${name}”.`);
+    } catch (error) {
+      if (!(error instanceof GestureExpiredError)) throw error;
+      showBanner(`“${name}” is ready.`, true, [{ label: 'Save…', run: () => void offerFile(bytes, name, type).catch(reportProjectError) }]);
+    }
   }
   /** Storage is full: say so, and offer the two ways to make room. */
   function showQuotaWarning(message: string): void {

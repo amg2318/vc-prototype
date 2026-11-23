@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { thumbnailLayout, unpremultiply } from './workspaceThumbnail';
+import { unpremultiply } from '../export/canvasPng';
+import { thumbnailLayout } from './workspaceThumbnail';
 
 describe('workspace thumbnail', () => {
   it('fits every canvas into the longest side', () => {

@@ -1,4 +1,5 @@
 import type { RGB } from '../document/blend';
+import { unpremultiply } from '../export/canvasPng';
 import { union, type Placement } from '../workspace/coords';
 
 /**
@@ -29,20 +30,6 @@ export function thumbnailLayout(placements: readonly Placement[], maxPx: number)
   if (!all) return null;
   const scale = maxPx / Math.max(all.width, all.height);
   return { width: Math.max(1, Math.round(all.width * scale)), height: Math.max(1, Math.round(all.height * scale)), scale, x: all.x, y: all.y };
-}
-
-/** Premultiplied → straight alpha, for ImageData (rounding to nearest). */
-export function unpremultiply(rgba: Uint8Array): Uint8ClampedArray<ArrayBuffer> {
-  const out = new Uint8ClampedArray(rgba.length);
-  for (let i = 0; i < rgba.length; i += 4) {
-    const a = rgba[i + 3]!;
-    if (a === 0) continue;
-    out[i] = Math.round((rgba[i]! * 255) / a);
-    out[i + 1] = Math.round((rgba[i + 1]! * 255) / a);
-    out[i + 2] = Math.round((rgba[i + 2]! * 255) / a);
-    out[i + 3] = a;
-  }
-  return out;
 }
 
 /** The thumbnail as PNG bytes (browser only: uses a 2D canvas). Null for an empty workspace. */

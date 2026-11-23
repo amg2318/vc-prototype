@@ -501,6 +501,27 @@ export class ProjectSession {
     }
   }
 
+  /** A project file of a project (saving the open one first). Refused while another tab is changing it. */
+  async exportProject(id: ProjectId, includeHistory: boolean): Promise<Uint8Array> {
+    if (id === this.project?.id) {
+      if (this.readOnly) throw new Error('This project is open in another tab: export it there');
+      await this.saveNow();
+      return this.deps.storage.exportProject(id, includeHistory);
+    }
+    const lock = await tryLockProject(id);
+    if (!lock) throw new Error('That project is open in another tab: export it there');
+    try {
+      return await this.deps.storage.exportProject(id, includeHistory);
+    } finally {
+      lock.release();
+    }
+  }
+
+  /** Add a project from a project file, as a new project (not opened). */
+  importProject(bytes: Uint8Array): Promise<ProjectInfo> {
+    return this.deps.storage.importProject(bytes);
+  }
+
   /**
    * Delete a project and everything in it. Refused while another tab has it
    * open. Deleting the open project opens the most recent other one (or a

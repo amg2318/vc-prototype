@@ -448,6 +448,12 @@ export class WebGPURenderer implements Renderer {
     return read;
   }
 
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]> {
+    const read = this.core.readCompositeTiles(canvasId, keys);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
   seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
     const seeded = this.core.seedPreviews(canvasId, tiles);
     this.onNeedsFrame?.();

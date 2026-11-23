@@ -511,3 +511,33 @@ describe('RenderCore previews (Phase 4)', () => {
     expect(planner.pinnedTiles('a')).toBeNull();
   });
 });
+
+describe('RenderCore composite reads (Phase 4, PNG export)', () => {
+  it('builds requested full-resolution tiles a few per frame and reads each back once it is complete', async () => {
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([canvas('a', 0, [0, 1])]);
+    const keys = Array.from({ length: 20 }, (_, i) => i % 2); // more than one frame's share
+    const read = core.readCompositeTiles('a', keys);
+    let frames = 0;
+    let more = true;
+    while (more && frames < 20) {
+      const frame = core.buildFrame(view, px);
+      frames++;
+      for (const r of frame.readbacks) if (r.kind === 'tiles' && r.pool === 'level0') r.resolve(r.slots.map(() => new Uint8Array(4).fill(7)));
+      more = frame.moreWork;
+    }
+    const tiles = await read;
+    expect(tiles).toHaveLength(20);
+    expect(tiles.every((t) => t?.[0] === 7)).toBe(true);
+    expect(frames).toBeGreaterThan(1);
+  });
+
+  it('answers null for a canvas that was removed', async () => {
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([canvas('a', 0)]);
+    const read = core.readCompositeTiles('a', [0]);
+    core.setCanvases([]);
+    core.buildFrame(view, px);
+    expect(await read).toEqual([null]);
+  });
+});

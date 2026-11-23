@@ -246,6 +246,12 @@ export interface Renderer {
    * compositing or loading its layer tiles (applied when `setCanvases` has it).
    */
   seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean;
+  /**
+   * Phase 4 (PNG export): the canvas's full-resolution composite tiles at
+   * these level-0 keys (inherited content included, on its paper),
+   * premultiplied RGBA; built and read back a few per frame.
+   */
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]>;
 
   destroy(): void;
 }

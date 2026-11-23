@@ -6,7 +6,7 @@ import { canvasTilesInRect, intersect, union, type Rect } from '../workspace/coo
 import { Propagation } from './propagation';
 import { packCompositeUniforms, packLookup, paperRgba } from './compositePacking';
 import { FrameQueue, type FrameOp, type Readback, type TileCopy } from './frameQueue';
-import { levelForZoom, PyramidPlanner, type DisplayQuad, type DownsampleJob, type FramePlan, type PlannerCanvas } from './pyramid';
+import { levelForZoom, levelTileRect, PyramidPlanner, type DisplayQuad, type DownsampleJob, type FramePlan, type PlannerCanvas } from './pyramid';
 import { blockBounds, blockLevel, blockSourceRect, packBlockLookup, packBlockUniforms, stagingOrigin, STAGING_TILES } from './blockPacking';
 import type { InheritedBlock } from '../document/inheritedBlock';
 import { TileResidency, type Eviction } from './residency';
@@ -170,6 +170,8 @@ export class RenderCore {
   inheritorsUpdated = 0;
   /** Preview reads for saving, answered after the next plan (see `readPreviewTiles`). */
   private previewReads: { canvasId: CanvasId; resolve: (tiles: PreviewTile[] | null) => void }[] = [];
+  /** Full-resolution composite tiles to read back (PNG export), oldest first. */
+  private compositeReads: { canvasId: CanvasId; key: TileKey; resolve: (rgba: Uint8Array | null) => void }[] = [];
   /** Saved previews of canvases not yet passed to setCanvases. */
   private readonly pendingSeeds = new Map<CanvasId, readonly PreviewTile[]>();
   /** Saved preview tiles waiting to be uploaded (see `seedPreviews`). */
@@ -370,6 +372,41 @@ export class RenderCore {
     return true;
   }
 
+  /**
+   * Phase 4 (PNG export): the canvas's full-resolution composite tiles
+   * (everything it shows, inherited content included, on its paper), as
+   * premultiplied RGBA. A few are built and read back per frame, so a large
+   * canvas takes many frames but never holds up drawing. Null for a canvas
+   * that is gone.
+   */
+  readCompositeTiles(canvasId: CanvasId, keys: readonly TileKey[]): Promise<(Uint8Array | null)[]> {
+    return Promise.all(keys.map((key) => new Promise<Uint8Array | null>((resolve) => this.compositeReads.push({ canvasId, key, resolve }))));
+  }
+
+  /** Ask the planner for this frame's share of the composite reads (before the plan). */
+  private requestCompositeReads(): void {
+    for (const read of this.compositeReads.slice(0, TILE_READBACKS_PER_FRAME)) {
+      if (this.byId.has(read.canvasId)) this.planner.request(read.canvasId, 0, levelTileRect(0, read.key));
+    }
+  }
+
+  /** Read back the requested tiles that are built (after the plan). Returns true if reads are left. */
+  private takeCompositeReads(readbacks: Readback[]): boolean {
+    const now: { slot: TileSlot; resolve: (rgba: Uint8Array | null) => void }[] = [];
+    const later: typeof this.compositeReads = [];
+    this.compositeReads.forEach((read, i) => {
+      if (!this.byId.has(read.canvasId)) return read.resolve(null);
+      const slot = i < TILE_READBACKS_PER_FRAME ? this.planner.completeLevel0Slot(read.canvasId, read.key) : null;
+      if (slot === null) later.push(read);
+      else now.push({ slot, resolve: read.resolve });
+    });
+    this.compositeReads = later;
+    if (now.length > 0) {
+      readbacks.push({ kind: 'tiles', pool: 'level0', slots: now.map((n) => n.slot), resolve: (rgba) => now.forEach((n, i) => n.resolve(rgba[i]!)) });
+    }
+    return later.length > 0;
+  }
+
   /** Answer this frame's preview reads (after the plan, so the frame's own updates are included). */
   private takePreviewReads(readbacks: Readback[]): void {
     for (const { canvasId, resolve } of this.previewReads) {
@@ -506,9 +543,11 @@ export class RenderCore {
         },
       };
     });
+    this.requestCompositeReads();
     const plan = this.planner.plan(plannerCanvases, view.visible, viewLevel);
     const followUps = this.blockFollowUps(plan, blocks, needs);
     this.takePreviewReads(readbacks);
+    const moreCompositeReads = this.takeCompositeReads(readbacks);
     const stages = this.packStages(plan, blocks, needs);
     for (const [id, keys] of followUps) this.invalidate(id, keys);
     const visibleCanvases = new Set(plan.display.map((q) => q.canvasId)).size;
@@ -534,7 +573,7 @@ export class RenderCore {
       },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
-      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0 || moreTileReads,
+      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0 || moreTileReads || moreCompositeReads,
     };
     this.removed = [];
     this.previewUploads = [];
