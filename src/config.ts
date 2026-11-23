@@ -76,6 +76,13 @@ export const ARROW_STYLE = {
 /** Undo history may hold this many bytes of tiles that the document no longer uses. */
 export const HISTORY_BUDGET_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Layer tiles read back from the GPU per frame for saving (Phase 4). Each is
+ * 256 KB; the copies are asynchronous, and the cap keeps any one frame's
+ * share of the work small.
+ */
+export const TILE_READBACKS_PER_FRAME = 16;
+
 /** Layer thumbnails are this many pixels on their longest side. */
 export const THUMBNAIL_SIZE = 64;
 /** Wait this long after the last change before refreshing a layer thumbnail. */

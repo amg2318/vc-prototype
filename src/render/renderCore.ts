@@ -1,4 +1,4 @@
-import { LAYER_GPU_SLOTS, PINNED_PREVIEW_LEVEL, SLOTS_PER_PAGE, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
+import { LAYER_GPU_SLOTS, PINNED_PREVIEW_LEVEL, SLOTS_PER_PAGE, TILE_READBACKS_PER_FRAME, TILE_SIZE, UPLOADS_PER_FRAME } from '../config';
 import type { TileStore } from '../document/tileStore';
 import { DirtyTiles, slotLocation, tileCoords, type TileId, type TileKey, type TileSlot } from '../document/tiles';
 import type { CanvasId } from '../document/paintDocument';
@@ -84,8 +84,11 @@ export type DisplayRun =
   | { kind: 'tile'; pool: 'level0' | 'preview'; page: number; first: number; count: number }
   | { kind: 'solid'; first: number; count: number };
 
-/** Queued work that needs tiles on the GPU: ops, and readbacks of layer tiles. */
-type QueuedWork = FrameOp | Exclude<Readback, { kind: 'screenPixel' }>;
+/**
+ * Queued work that needs tiles on the GPU: ops, and readbacks of layer tiles.
+ * (Reads for saving have their own queue: they don't need to wait in line.)
+ */
+type QueuedWork = FrameOp | Exclude<Readback, { kind: 'screenPixel' | 'tiles' }>;
 
 export interface Frame {
   /** Slot-level ops, in order. */
@@ -156,6 +159,8 @@ export class RenderCore {
   private chainPending = new Map<CanvasId, number>();
   /** Inheritors that changed through an arrow in the last frame (for the HUD). */
   inheritorsUpdated = 0;
+  /** Layer tiles to read back for saving, oldest first (see `readLayerTiles`). */
+  private tileReads: { id: TileId; resolve: (rgba: Uint8Array | null) => void }[] = [];
   private strokeCanvas: CanvasId | null = null;
   /** Tiles the current stroke has touched: not plain paper even before the stroke is merged. */
   private readonly strokeTiles = new Set<TileKey>();
@@ -279,6 +284,39 @@ export class RenderCore {
     });
   }
 
+  /**
+   * The raw premultiplied RGBA of layer tiles, read back asynchronously, at
+   * most TILE_READBACKS_PER_FRAME per frame. Null for a tile freed before it
+   * was read. A tile is read once its pixels are written; a tile that is off
+   * the GPU is reloaded first.
+   */
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {
+    return Promise.all(ids.map((id) => new Promise<Uint8Array | null>((resolve) => this.tileReads.push({ id, resolve }))));
+  }
+
+  /** This frame's share of the tile reads, as one readback. Returns true if reads are left for later frames. */
+  private takeTileReads(readbacks: Readback[]): boolean {
+    const r = this.residency;
+    const now: { slot: TileSlot; resolve: (rgba: Uint8Array | null) => void }[] = [];
+    const later: typeof this.tileReads = [];
+    for (const read of this.tileReads) {
+      if (!this.isLive(read.id)) read.resolve(null);
+      else if (now.length >= TILE_READBACKS_PER_FRAME || this.unwritten.has(read.id)) later.push(read);
+      else if (r.ensure([read.id])) now.push({ slot: r.slotOf(read.id)!, resolve: read.resolve });
+      else later.push(read); // reloading; the reload asks for a frame
+    }
+    this.tileReads = later;
+    if (now.length > 0) {
+      readbacks.push({
+        kind: 'tiles',
+        pool: 'layer',
+        slots: now.map((n) => n.slot),
+        resolve: (rgba) => now.forEach((n, i) => n.resolve(rgba[i]!)),
+      });
+    }
+    return now.length > 0 && later.length > 0;
+  }
+
   beginStroke(canvasId: CanvasId): void {
     this.strokeCanvas = canvasId;
     this.strokeTiles.clear();
@@ -343,7 +381,7 @@ export class RenderCore {
     const work: QueuedWork[] = [...this.waiting, ...drained.ops];
     const readbacks: Readback[] = [];
     for (const rb of drained.readbacks) {
-      if (rb.kind === 'screenPixel') readbacks.push(rb);
+      if (rb.kind === 'screenPixel' || rb.kind === 'tiles') readbacks.push(rb);
       else work.push(rb);
     }
 
@@ -364,6 +402,7 @@ export class RenderCore {
       done++;
     }
     this.waiting = work.slice(done);
+    const moreTileReads = this.takeTileReads(readbacks);
 
     const viewLevel = levelForZoom(view.canvasPxPerDevicePx);
     const blocks = this.activeBlocks();
@@ -422,7 +461,7 @@ export class RenderCore {
       },
       // Budget-limited builds and reloaded tiles waiting for upload continue next frame.
       // (Work waiting for a reload doesn't spin: the reload asks for a frame when it lands.)
-      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0,
+      moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0 || moreTileReads,
     };
     this.removed = [];
     return frame;

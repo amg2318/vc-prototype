@@ -222,6 +222,12 @@ export interface Renderer {
   findEmptyTiles(tiles: readonly TileId[]): Promise<boolean[]>;
   /** A THUMBNAIL_SIZE² premultiplied RGBA image of a layer (tiles still reloading are left out). */
   readThumbnail(tiles: ReadonlyMap<TileKey, TileId>): Promise<Uint8Array>;
+  /**
+   * Phase 4: the raw premultiplied RGBA of layer tiles, exactly as on the GPU,
+   * for saving. Asynchronous (WebGPU `mapAsync`, WebGL2 pixel-pack buffer +
+   * fence) and spread over frames. Null for tiles freed meanwhile.
+   */
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]>;
 
   destroy(): void;
 }

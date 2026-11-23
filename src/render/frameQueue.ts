@@ -36,7 +36,12 @@ export type FrameOp =
 export type Readback =
   | { kind: 'screenPixel'; x: number; y: number; resolve: (rgba: Rgba8) => void }
   | { kind: 'empty'; slots: TileSlot[]; resolve: (empty: boolean[]) => void }
-  | { kind: 'thumbnail'; tiles: [TileKey, TileSlot][]; resolve: (pixels: Uint8Array) => void };
+  | { kind: 'thumbnail'; tiles: [TileKey, TileSlot][]; resolve: (pixels: Uint8Array) => void }
+  /** Raw RGBA of whole tiles in a pool's pages (layer tiles for saving; composite tiles for previews and export). */
+  | { kind: 'tiles'; pool: TilePool; slots: TileSlot[]; resolve: (rgba: Uint8Array[]) => void };
+
+/** The GPU tile pools: layer tiles, and the composite cache's full-resolution and preview pages. */
+export type TilePool = 'layer' | 'level0' | 'preview';
 
 export class FrameQueue {
   private ops: FrameOp[] = [];

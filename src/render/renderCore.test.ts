@@ -420,3 +420,50 @@ describe('RenderCore: inherited blocks', () => {
     expect(c?.instances.length).toBe(4 * 4); // all four tiles of c
   });
 });
+
+describe('RenderCore.readLayerTiles (Phase 4 saving)', () => {
+  function setup() {
+    const store = new TileStore(64);
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64), new TileResidency(64, new CompressedTileStore()));
+    core.useTileStore(store);
+    core.setCanvases([canvas('a', 0)]);
+    return { store, core };
+  }
+  const style = { color: [0, 0, 0] as [number, number, number], opacity: 1, mode: 'paint' as const };
+  const tileReadbacks = (frame: Frame) => frame.readbacks.filter((r) => r.kind === 'tiles');
+
+  it('reads a tile only after its pixels are written, and a capped number per frame', () => {
+    const { store, core } = setup();
+    const ids = Array.from({ length: 20 }, () => store.allocate()!);
+    core.merge('a', ids.map((dst, i) => ({ key: i, src: null, dst })), style);
+    void core.readLayerTiles(ids);
+    const first = core.buildFrame(view, px);
+    // The merge runs in this frame, before the reads (16 of the 20).
+    const [read] = tileReadbacks(first);
+    expect(read && read.kind === 'tiles' && read.slots).toHaveLength(16);
+    expect(first.moreWork).toBe(true);
+    const second = core.buildFrame(view, px);
+    const [rest] = tileReadbacks(second);
+    expect(rest && rest.kind === 'tiles' && rest.slots).toHaveLength(4);
+  });
+
+  it('answers null for a tile freed before it was read', async () => {
+    const { store, core } = setup();
+    const id = store.allocate()!;
+    const read = core.readLayerTiles([id]);
+    store.release(id);
+    core.buildFrame(view, px);
+    expect(await read).toEqual([null]);
+  });
+
+  it('passes the pixels the backend read back to the caller', async () => {
+    const { store, core } = setup();
+    const id = store.allocate()!;
+    core.merge('a', [{ key: 0, src: null, dst: id }], style);
+    const read = core.readLayerTiles([id]);
+    const [readback] = tileReadbacks(core.buildFrame(view, px));
+    const pixels = new Uint8Array(TILE_BYTES).fill(9);
+    if (readback?.kind === 'tiles') readback.resolve([pixels]);
+    expect(await read).toEqual([pixels]);
+  });
+});

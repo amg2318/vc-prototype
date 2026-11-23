@@ -440,6 +440,12 @@ export class WebGPURenderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
+  readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]> {
+    const read = this.core.readLayerTiles(ids);
+    this.onNeedsFrame?.(); // the reads happen during frames
+    return read;
+  }
+
   render(view: ViewState): FrameInfo {
     const idle = { submittedAt: performance.now(), gpuDone: null, compositedTiles: 0, downsampledTiles: 0, visibleCanvases: 0, compositeCpuMs: 0, moreWork: false, inheritorsUpdated: 0, staleInheritors: 0, propagation: [] };
     if (this.lost) return idle;
@@ -767,6 +773,21 @@ export class WebGPURenderer implements Renderer {
           vertex.destroy();
           readback.resolve(b);
         });
+      }
+      case 'tiles': {
+        // Whole tiles, copied one after another into one buffer (TILE_SIZE * 4 = 1024 bytes per row: aligned).
+        const pages = { layer: this.layerPages, level0: this.level0Pages, preview: this.previewPages }[readback.pool];
+        const buffer = readBuffer(Math.max(4, readback.slots.length * TILE_BYTES));
+        readback.slots.forEach((slot, i) => {
+          const at = slotLocation(slot);
+          encoder.copyTextureToBuffer(
+            { texture: pages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+            { buffer, offset: i * TILE_BYTES, bytesPerRow: TILE_SIZE * 4 },
+            [TILE_SIZE, TILE_SIZE],
+          );
+        });
+        return () =>
+          mapped(buffer, (b) => readback.resolve(readback.slots.map((_, i) => b.slice(i * TILE_BYTES, (i + 1) * TILE_BYTES))));
       }
       case 'empty': {
         // One pass + copy per batch of tiles, all into separate read buffers.
