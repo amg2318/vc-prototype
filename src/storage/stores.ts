@@ -66,7 +66,8 @@ export function projectFolder(id: ProjectId): string {
 
 /** True for the error browsers throw when storage is full. */
 export function isQuotaError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'QuotaExceededError';
+  // DOMException, Error, or an error rebuilt from a worker message: all carry the name.
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'QuotaExceededError';
 }
 
 export function quotaError(): Error {
