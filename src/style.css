@@ -899,3 +899,59 @@ body {
 .panel button.danger {
   background: #b3261e;
 }
+
+.storage-settings {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 0 4px;
+}
+
+.storage-settings h3 {
+  font-size: 13px;
+  margin: 8px 0 0;
+  color: var(--panel-muted);
+  font-weight: 600;
+}
+
+.storage-notice {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 159, 10, 0.2);
+  font-size: 13px;
+}
+
+.retention-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.retention-field input {
+  width: 4.5em;
+  min-height: 40px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: #2c2c2e;
+  color: var(--panel-fg);
+  font: inherit;
+}
+
+.banner-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.banner-actions button {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #3a3a3c;
+  color: var(--panel-fg);
+  font: inherit;
+}

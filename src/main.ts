@@ -16,7 +16,10 @@ import { ProjectSession } from './persistence/projectSession';
 import { createStorageWorker, workerClient } from './storage/client';
 import { SaveIndicator } from './ui/saveIndicator';
 import { HistoryPanel } from './ui/historyPanel';
-import { ProjectsPanel } from './ui/projectsPanel';
+import { formatBytes, ProjectsPanel } from './ui/projectsPanel';
+import { QUOTA_MESSAGE } from './persistence/projectSession';
+import { inIosBrowserTab, loadRetention, saveRetention } from './persistence/storageSettings';
+import { isQuotaError } from './storage/stores';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -70,6 +73,7 @@ async function main(): Promise<void> {
   // `?canvases=N` starts a new project with N canvases (for testing); otherwise the last project opens.
   const savedView = testCanvases ? (await project.create(`Test: ${testCanvases} canvases`), undefined) : await project.openLast();
   project.watchPageLifecycle();
+  project.retention = loadRetention();
   // Dev builds only: lets the desktop test scripts inspect renderer state.
   if (import.meta.env.DEV) (window as unknown as { __debug: unknown }).__debug = { renderer, workspace, project, storage };
   /** The selected canvas's editor; null when no canvas is selected. */
@@ -544,7 +548,8 @@ async function main(): Promise<void> {
   }
   function reportVersionError(error: unknown): void {
     console.error(error);
-    showBanner(`Version history: ${error instanceof Error ? error.message : String(error)}`);
+    if (isQuotaError(error)) showQuotaWarning(QUOTA_MESSAGE);
+    else showBanner(`Version history: ${error instanceof Error ? error.message : String(error)}`);
   }
   const projectsPanel = new ProjectsPanel({
     list: () => project.listProjects(),
@@ -568,6 +573,22 @@ async function main(): Promise<void> {
         showBanner(`Deleted “${p.name}”.`);
         return reopened ? saved : null;
       }),
+    storage: {
+      persisted: async () => (navigator.storage?.persisted ? navigator.storage.persisted() : null),
+      requestPersistence: async () => (navigator.storage?.persist ? navigator.storage.persist() : false),
+      retention: () => project.retention,
+      setRetention: (rules) => {
+        saveRetention(rules);
+        void project.setRetention(rules).catch(reportVersionError);
+      },
+      deleteAutomaticVersions: () => void deleteAutomaticVersions(),
+      collectGarbage: () =>
+        void project.collectGarbage().then((stats) => {
+          showBanner(stats ? `Cleaned up ${formatBytes(stats.removedBytes)} in ${stats.removedFiles} files.` : 'Nothing to clean up right now.');
+          return projectsPanel.refresh();
+        }),
+      notice: () => (inIosBrowserTab() ? SAFARI_TAB_NOTICE : null),
+    },
   });
   /**
    * Run a project operation that may load another project, then show it:
@@ -589,7 +610,25 @@ async function main(): Promise<void> {
   }
   function reportProjectError(error: unknown): void {
     console.error(error);
-    showBanner(error instanceof Error ? error.message : String(error));
+    if (isQuotaError(error)) showQuotaWarning(QUOTA_MESSAGE);
+    else showBanner(error instanceof Error ? error.message : String(error));
+  }
+  /** Storage is full: say so, and offer the two ways to make room. */
+  function showQuotaWarning(message: string): void {
+    showBanner(message, true, [
+      { label: 'Delete automatic versions', run: () => void deleteAutomaticVersions() },
+      { label: 'Projects…', run: () => togglePanel(projectsPanel) },
+    ]);
+  }
+  async function deleteAutomaticVersions(): Promise<void> {
+    try {
+      const deleted = await project.deleteAutomaticVersions();
+      showBanner(deleted > 0 ? `Deleted ${deleted} automatic version${deleted === 1 ? '' : 's'}.` : 'There were no automatic versions to delete.');
+      await project.saveNow().catch(() => undefined); // try the save that failed again
+      await projectsPanel.refresh();
+    } catch (error) {
+      reportProjectError(error);
+    }
   }
   const toolbar = new Toolbar({
     selectTool,
@@ -632,8 +671,25 @@ async function main(): Promise<void> {
   banner.className = 'banner';
   banner.hidden = true;
   let bannerTimer = 0;
-  function showBanner(message: string, sticky = false): void {
+  /** A message at the bottom; `actions` adds buttons (which also dismiss it). */
+  function showBanner(message: string, sticky = false, actions: { label: string; run(): void }[] = []): void {
     banner.textContent = message;
+    if (actions.length > 0) {
+      const row = document.createElement('div');
+      row.className = 'banner-actions';
+      for (const action of actions) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = action.label;
+        b.addEventListener('click', () => {
+          banner.hidden = true;
+          action.run();
+        });
+        row.append(b);
+      }
+      row.append(Object.assign(document.createElement('button'), { type: 'button', textContent: 'Close', onclick: () => (banner.hidden = true) }));
+      banner.append(row);
+    }
     banner.hidden = false;
     clearTimeout(bannerTimer);
     if (!sticky) bannerTimer = window.setTimeout(() => (banner.hidden = true), 5000);
@@ -649,10 +705,17 @@ async function main(): Promise<void> {
   saveIndicator.update(project.status);
   project.onStatus = (status) => {
     saveIndicator.update(status);
-    if (status.state === 'error' && status.message) showBanner(status.message, status.quota);
+    if (status.state === 'error' && status.message) {
+      if (status.quota) showQuotaWarning(status.message);
+      else showBanner(status.message);
+    }
     if (status.state === 'read-only' && status.message) showBanner(status.message, true);
   };
   if (project.readOnly && project.status.message) showBanner(project.status.message, true);
+  else if (inIosBrowserTab() && !sessionStorage.getItem('vc-tab-notice')) {
+    sessionStorage.setItem('vc-tab-notice', '1'); // once per visit
+    showBanner(SAFARI_TAB_NOTICE);
+  }
 
   // Soft depth warning: whenever the deepest chain grows past the limit (by an arrow, the source
   // picker, or undo/redo), say so once. It never blocks.
@@ -716,6 +779,9 @@ async function main(): Promise<void> {
  * The canvases of a new project: one 4096² canvas, or with `?canvases=N` a
  * grid of N A4 canvases (for testing many canvases).
  */
+const SAFARI_TAB_NOTICE =
+  'You are using the app in a Safari tab. Safari may clear its saved projects after some days without a visit. Add it to the Home Screen (Share → Add to Home Screen) and use it from there to keep them.';
+
 function seedCanvases(workspace: Workspace, count: number): PaintDocument[] {
   const n = Math.max(1, Math.min(100, Math.floor(count) || 1));
   const size = n === 1 ? { width: 4096, height: 4096 } : { width: 2480, height: 3508 };

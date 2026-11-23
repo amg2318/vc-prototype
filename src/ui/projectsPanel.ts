@@ -17,6 +17,21 @@ export interface ProjectsActions {
   rename(project: ProjectInfo, name: string): void;
   duplicate(project: ProjectInfo): void;
   remove(project: ProjectInfo): void;
+  storage: StorageActions;
+}
+
+/** The Storage section (settings kept per device). */
+export interface StorageActions {
+  /** Whether the browser promised not to clear this site's storage (null: unknown). */
+  persisted(): Promise<boolean | null>;
+  /** Ask for that promise; true if granted. */
+  requestPersistence(): Promise<boolean>;
+  retention(): { keepLatest: number; dailyForDays: number };
+  setRetention(rules: { keepLatest: number; dailyForDays: number }): void;
+  deleteAutomaticVersions(): void;
+  collectGarbage(): void;
+  /** A note to show (e.g. "use the home-screen app"), or null. */
+  notice(): string | null;
 }
 
 export class ProjectsPanel {
@@ -33,7 +48,70 @@ export class ProjectsPanel {
     const header = document.createElement('header');
     header.append(Object.assign(document.createElement('h2'), { textContent: 'Projects' }), button('New project', actions.create, 'Create a new project and open it'));
     this.total.className = 'history-empty';
-    this.element.append(header, this.total, this.list);
+    this.element.append(header, this.total, this.list, this.storageSection());
+  }
+
+  private readonly persistLine = document.createElement('div');
+
+  private storageSection(): HTMLElement {
+    const s = this.actions.storage;
+    const section = document.createElement('section');
+    section.className = 'storage-settings';
+    section.append(Object.assign(document.createElement('h3'), { textContent: 'Storage on this device' }));
+    const notice = s.notice();
+    if (notice) section.append(Object.assign(document.createElement('p'), { className: 'storage-notice', textContent: notice }));
+    this.persistLine.className = 'button-row';
+    section.append(this.persistLine);
+
+    const rules = s.retention();
+    const keep = numberInput(rules.keepLatest, 'Newest automatic versions to keep');
+    const days = numberInput(rules.dailyForDays, 'Then one a day for this many days');
+    const apply = (): void => {
+      const keepLatest = Math.max(0, Math.round(Number(keep.value)));
+      const dailyForDays = Math.max(0, Math.round(Number(days.value)));
+      if (Number.isFinite(keepLatest) && Number.isFinite(dailyForDays)) s.setRetention({ keepLatest, dailyForDays });
+    };
+    keep.addEventListener('change', apply);
+    days.addEventListener('change', apply);
+    section.append(
+      field('Keep the newest', keep, 'automatic versions'),
+      field('then one a day for', days, 'days, then one a week'),
+      Object.assign(document.createElement('p'), { className: 'history-empty', textContent: 'Saved and pinned versions are always kept.' }),
+    );
+    const row = document.createElement('div');
+    row.className = 'button-row';
+    let confirming = false;
+    const deleteAuto = button('Delete automatic versions…', () => {
+      if (!confirming) {
+        confirming = true;
+        deleteAuto.textContent = 'Delete them for good';
+        deleteAuto.classList.add('danger');
+        return;
+      }
+      confirming = false;
+      deleteAuto.textContent = 'Delete automatic versions…';
+      deleteAuto.classList.remove('danger');
+      s.deleteAutomaticVersions();
+    }, 'Delete every automatic version of the open project that is not pinned, to free space');
+    row.append(deleteAuto, button('Clean up', s.collectGarbage, 'Remove data no version uses any more (this happens on its own too)'));
+    section.append(row);
+    return section;
+  }
+
+  private async refreshPersistence(): Promise<void> {
+    const s = this.actions.storage;
+    const persisted = await s.persisted().catch(() => null);
+    const label = Object.assign(document.createElement('span'), {
+      className: 'version-meta',
+      textContent:
+        persisted === null ? 'This browser can’t say whether it may clear stored projects.' : persisted ? 'The browser will not clear stored projects on its own.' : 'The browser may clear stored projects when space runs low.',
+    });
+    this.persistLine.replaceChildren(label);
+    if (persisted === false) {
+      this.persistLine.append(
+        button('Ask to keep them', () => void s.requestPersistence().then(() => this.refreshPersistence()), 'Ask the browser not to clear this site’s storage'),
+      );
+    }
   }
 
   get visible(): boolean {
@@ -55,6 +133,7 @@ export class ProjectsPanel {
       `${projects.length} project${projects.length === 1 ? '' : 's'}, ${formatBytes(sum)} in all` +
       (estimate ? ` · this site uses ${formatBytes(estimate.usage)} of ${formatBytes(estimate.quota)} available` : '');
     this.render();
+    await this.refreshPersistence();
   }
 
   private render(): void {
@@ -118,6 +197,23 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function numberInput(value: number, label: string): HTMLInputElement {
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = '0';
+  input.step = '1';
+  input.value = String(value);
+  input.setAttribute('aria-label', label);
+  return input;
+}
+
+function field(before: string, input: HTMLInputElement, after: string): HTMLLabelElement {
+  const label = document.createElement('label');
+  label.className = 'retention-field';
+  label.append(before, input, after);
+  return label;
 }
 
 function button(text: string, onClick: () => void, title: string): HTMLButtonElement {

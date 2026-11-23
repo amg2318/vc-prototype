@@ -17,9 +17,10 @@ import { ProjectSaver, type SaveOptions, type SaveStats } from './saver';
 import { canvasFromRecord } from './snapshot';
 import { TileHashes } from './tileHashes';
 import { isProjectLocked, tryLockProject, type HeldLock } from './projectLock';
-import type { RetentionRules } from './retention';
+import { applyRetention, type RetentionRules } from './retention';
 import { ActiveTime, addVersionEdit, newVersion, workingCopyUnversioned } from './versions';
 import { renderWorkspaceThumbnail } from './workspaceThumbnail';
+import { DEFAULT_RETENTION } from './storageSettings';
 import type { HeadRecord, VersionEntry } from '../storage/format';
 import type { HeadEdit } from '../storage/service';
 
@@ -63,6 +64,8 @@ export interface SessionDeps {
 
 const LAST_PROJECT_KEY = 'vc-last-project';
 
+export const QUOTA_MESSAGE = 'Storage is full: your latest changes are not saved. Delete old automatic versions or export and delete projects to make room.';
+
 export class ProjectSession {
   readonly hashes: TileHashes;
   readonly backing: DiskTileBackingStore;
@@ -82,7 +85,7 @@ export class ProjectSession {
   /** Called when the version list changes. */
   onVersions: ((versions: readonly VersionEntry[]) => void) | null = null;
   /** Retention rules for automatic versions (the settings panel may change them). */
-  retention: RetentionRules = { keepLatest: VERSIONS.keepLatest, dailyForDays: VERSIONS.dailyForDays };
+  retention: RetentionRules = { ...DEFAULT_RETENTION };
   private persistent = true;
   /** This tab's lock on the open project; null when another tab has it (read-only). */
   private lock: HeldLock | null = null;
@@ -95,6 +98,10 @@ export class ProjectSession {
     this.hashes = new TileHashes(workspace.store);
     this.backing = new DiskTileBackingStore(storage, this.hashes, workspace.store);
     renderer.useBackingStore(this.backing);
+    this.backing.onWriteError = (error) => {
+      // The tile is kept in memory instead, so nothing is lost yet; but saving will fail the same way.
+      if (isQuotaError(error)) this.setStatus({ state: 'error', message: QUOTA_MESSAGE, quota: true });
+    };
     renderer.onCompositeChanged = (canvasId) => this.saver.previewsDirty.add(canvasId);
     this.saver = new ProjectSaver({
       workspace,
@@ -308,6 +315,27 @@ export class ProjectSession {
     this.scheduleGarbageCollection(GC.delayAfterDeleteMs);
   }
 
+  /**
+   * Free space: delete every automatic version that isn't pinned, then
+   * collect garbage at once. Returns how many versions were deleted.
+   */
+  async deleteAutomaticVersions(): Promise<number> {
+    const before = this.versions.length;
+    await this.editVersions((versions) => versions.filter((v) => v.kind === 'manual' || v.pinned));
+    const deleted = before - this.versions.length;
+    clearTimeout(this.gcTimer);
+    await this.collectGarbage();
+    return deleted;
+  }
+
+  /** Apply new retention rules now (they also apply each time a version is made). */
+  async setRetention(rules: RetentionRules): Promise<void> {
+    this.retention = rules;
+    if (this.readOnly || !this.saver.head) return;
+    await this.editVersions((versions) => applyRetention(versions, Date.now(), rules));
+    this.scheduleGarbageCollection(GC.delayAfterDeleteMs);
+  }
+
   // --- garbage collection -------------------------------------------------------
 
   /** Collect garbage after `delayMs` (a later call replaces an earlier one). */
@@ -518,7 +546,7 @@ export class ProjectSession {
     } catch (error) {
       const quota = isQuotaError(error);
       const message = quota
-        ? 'Storage is full: your latest changes are not saved. Delete old versions or export projects to make room.'
+        ? QUOTA_MESSAGE
         : `Could not save: ${error instanceof Error ? error.message : String(error)}`;
       console.error('Save failed:', error);
       this.setStatus({ state: 'error', message, quota });
