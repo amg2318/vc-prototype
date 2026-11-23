@@ -1,6 +1,6 @@
 import { HISTORY_BUDGET_BYTES, MAX_CANVAS_SIZE, TILE_BYTES } from '../config';
 import { Editor } from '../document/editor';
-import { PaintDocument, setLayerTile, type CanvasId } from '../document/paintDocument';
+import { PaintDocument, releaseAllTiles, setLayerTile, type CanvasId } from '../document/paintDocument';
 import type { TileSlot } from '../document/tiles';
 import { TileStore } from '../document/tileStore';
 import type { Change, Command, CommandContext } from '../history/command';
@@ -59,7 +59,8 @@ export class Workspace {
   private readonly detached = new Map<CanvasId, PaintDocument>();
   private readonly editors = new Map<CanvasId, Editor>();
   private listeners: ((change: Change) => void)[] = [];
-  private canvasCounter = 0;
+  /** Canvases created so far (canvas ids are numbered from it; saved, so ids never repeat). */
+  canvasCounter = 0;
   readonly ctx: CommandContext;
   activeCanvasId: CanvasId | null = null;
 
@@ -137,6 +138,24 @@ export class Workspace {
   forgetCanvas(id: CanvasId): void {
     this.detached.delete(id);
     this.editors.delete(id);
+  }
+
+  /**
+   * Replace every canvas with `docs` (opening a project, or restoring a
+   * version). Not undoable: the undo history is cleared first, which also
+   * releases the tiles that only history kept alive.
+   */
+  load(docs: readonly PaintDocument[], canvasCounter: number, activeCanvasId: CanvasId | null): void {
+    this.history.clear();
+    for (const doc of this.canvases) for (const layer of doc.layers) releaseAllTiles(this.store, layer.tiles);
+    this.canvases.length = 0;
+    this.detached.clear();
+    this.editors.clear();
+    for (const doc of docs) this.canvases.push(doc);
+    this.canvasCounter = canvasCounter;
+    this.activeCanvasId = activeCanvasId !== null && this.hasCanvas(activeCanvasId) ? activeCanvasId : (docs[0]?.id ?? null);
+    for (const doc of docs) this.emit({ canvasId: doc.id, tiles: 'all', layers: doc.layers.map((l) => l.id), structure: true, workspace: true });
+    if (docs.length === 0) this.emit({ canvasId: '', tiles: [], layers: [], structure: true, workspace: true });
   }
 
   // --- canvas operations (each one undoable) ----------------------------------

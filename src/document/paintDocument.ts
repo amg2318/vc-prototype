@@ -73,7 +73,8 @@ export class PaintDocument {
   paperVisible = true;
   /** Another canvas's composite shown below every layer (Phase 3), or null. Changed only through commands. */
   inherited: InheritedBlock | null = null;
-  private layerCounter = 0;
+  /** Layers created so far (layer ids are numbered from it; saved, so ids never repeat). */
+  layerCounter = 0;
 
   constructor(
     readonly id: CanvasId,
