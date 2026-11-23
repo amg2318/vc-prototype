@@ -292,9 +292,13 @@ export class ProjectStore {
    * Change the head without a new manifest (rename, pin or delete a version;
    * restore points the working copy at a version's manifest).
    */
-  updateHead(edit: (head: HeadRecord) => HeadRecord): Promise<HeadRecord> {
+  updateHead(edit: (head: HeadRecord) => HeadRecord, thumbnail?: { name: string; bytes: Uint8Array }): Promise<HeadRecord> {
     return this.exclusive(async () => {
       if (!this.currentHead) throw new Error('The project has not been saved yet');
+      if (thumbnail) {
+        await this.files.write(thumbnailPath(thumbnail.name), thumbnail.bytes);
+        this.info.sizeBytes += thumbnail.bytes.byteLength;
+      }
       await this.replaceHead(edit(structuredClone(this.currentHead)));
       return this.currentHead!;
     });

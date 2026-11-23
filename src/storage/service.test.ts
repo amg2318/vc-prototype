@@ -56,6 +56,27 @@ describe('StorageService', () => {
     expect(reply.head.versions[0]!.manifestId).toBe(reply.manifestId);
   });
 
+  it('updateHead adds a version of the working copy with its thumbnail; deleting it removes the thumbnail', async () => {
+    const { storage, files } = setup();
+    const project = await storage.openProject((await storage.createProject('P')).id);
+    const saved = await saveOneCanvas(storage, 3);
+    const png = new Uint8Array([1, 2, 3]);
+    const version = { id: 'v-1', manifestId: null, name: 'Saved', createdAt: 1, kind: 'manual' as const, pinned: false, thumbnail: 'v-1.png' };
+    const head = await storage.updateHead({ versions: [version] }, { name: 'v-1.png', bytes: png });
+    expect(head.versions[0]!.manifestId).toBe(saved.manifestId);
+    expect(await storage.readThumbnail('v-1.png')).toEqual(png);
+
+    // A later save replaces the working manifest; the version keeps the old one.
+    const later = await saveOneCanvas(storage, 4);
+    expect(later.head.versions[0]!.manifestId).toBe(saved.manifestId);
+    expect((await storage.readProject(saved.manifestId))!.records).toHaveLength(1);
+
+    await storage.updateHead({ versions: [] });
+    expect(await storage.readThumbnail('v-1.png')).toBeNull();
+    await expect(storage.readProject(saved.manifestId)).rejects.toThrow(/missing/);
+    expect([...files.files.keys()].some((k) => k.startsWith(`projects/${project.info.id}/manifests/`))).toBe(true);
+  });
+
   it('duplicates a project into a new one with the same content', async () => {
     const { storage } = setup();
     const original = await storage.createProject('Original');

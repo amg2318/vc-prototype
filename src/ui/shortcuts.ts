@@ -14,6 +14,8 @@ export interface ShortcutActions {
   /** Fit every canvas (⇧1) or the selected canvas (⇧2). */
   fitAll(): void;
   fitSelection(): void;
+  /** Save a version of the project (⌘S). */
+  saveVersion(): void;
 }
 
 /**
@@ -21,7 +23,7 @@ export interface ShortcutActions {
  *   ⌘/Ctrl+Z undo · ⇧⌘Z or Ctrl+Y redo · B brush · E eraser · I eyedropper
  *   [ / ] brush size · ⇧N new layer (⌘⇧N is taken by browsers) · H toggle HUD
  *   ⌘/Ctrl + = / − / 0 zoom in / out / 100% · ⇧1 fit all canvases · ⇧2 fit the selected canvas
- *   (the zoom keys are the same as Figma's)
+ *   (the zoom keys are the same as Figma's) · ⌘/Ctrl+S save a version
  */
 export function installShortcuts(actions: ShortcutActions): void {
   window.addEventListener('keydown', (e) => {
@@ -33,6 +35,11 @@ export function installShortcuts(actions: ShortcutActions): void {
       e.preventDefault();
       if (e.shiftKey) actions.redo();
       else actions.undo();
+      return;
+    }
+    if (mod && key === 's') {
+      e.preventDefault(); // instead of the browser's "save page"
+      actions.saveVersion();
       return;
     }
     if (mod && key === 'y') {

@@ -1,4 +1,4 @@
-import { SAVE, TILE_BYTES } from '../config';
+import { SAVE, TILE_BYTES, VERSIONS } from '../config';
 import { tileCoords } from '../document/tiles';
 import { PyramidPlanner } from '../render/pyramid';
 import type { PreviewTile } from '../render/renderer';
@@ -16,6 +16,11 @@ import { DiskTileBackingStore } from './diskTileBackingStore';
 import { ProjectSaver, type SaveOptions, type SaveStats } from './saver';
 import { canvasFromRecord } from './snapshot';
 import { TileHashes } from './tileHashes';
+import type { RetentionRules } from './retention';
+import { ActiveTime, addVersionEdit, newVersion, workingCopyUnversioned } from './versions';
+import { renderWorkspaceThumbnail } from './workspaceThumbnail';
+import type { HeadRecord, VersionEntry } from '../storage/format';
+import type { HeadEdit } from '../storage/service';
 
 /**
  * The open project: loading it into the workspace, and keeping it saved.
@@ -60,7 +65,14 @@ export class ProjectSession {
   onStatus: ((status: SaveStatus) => void) | null = null;
   /** Called after each save with its measurements (for the HUD). */
   onSaved: ((stats: SaveStats) => void) | null = null;
+  /** Called when the version list changes. */
+  onVersions: ((versions: readonly VersionEntry[]) => void) | null = null;
+  /** Retention rules for automatic versions (the settings panel may change them). */
+  retention: RetentionRules = { keepLatest: VERSIONS.keepLatest, dailyForDays: VERSIONS.dailyForDays };
   private persistent = true;
+  private activeTime = new ActiveTime(0, VERSIONS.activeInputWindowMs);
+  /** Version operations in progress (one at a time, so each edits the latest version list). */
+  private busy: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: SessionDeps) {
     const { workspace, renderer, storage } = deps;
@@ -75,6 +87,7 @@ export class ProjectSession {
       readLayerTiles: (ids) => renderer.readLayerTiles(ids),
       readPreviewTiles: (canvasId) => renderer.readPreviewTiles(canvasId),
       view: () => deps.view(),
+      headExtras: () => ({ activeMsSinceVersion: Math.round(this.activeTime.ms) }),
     });
     this.scheduler = new AutosaveScheduler(async () => {
       // While the page is hidden, every second counts (it may be closed for good): skip the previews.
@@ -83,6 +96,7 @@ export class ProjectSession {
     workspace.onChange(() => {
       if (this.scheduler.paused) return;
       this.scheduler.changed();
+      this.noteActivity();
       if (this.status.state === 'saved') this.setStatus({ state: 'unsaved' });
     });
   }
@@ -149,7 +163,16 @@ export class ProjectSession {
     });
     const recordHashes: ObjectHash[] = copy.manifest.canvases.map((c) => c.record);
     this.saver.remember(copy.records, recordHashes, copy.manifest, opened.head);
+    this.activeTime = new ActiveTime(opened.head?.activeMsSinceVersion ?? 0, VERSIONS.activeInputWindowMs);
+    if (workingCopyUnversioned(opened.head)) {
+      // The previous session ended with changes no version holds: keep them as a version.
+      const level4 = previews.map((p) => p?.find((t) => t.level === 4)?.rgba ?? null);
+      await this.addVersionOfWorkingCopy('auto', 'session-ended', opened.head!.updatedAt, copy.records, level4).catch((error: unknown) =>
+        console.error('Could not make the "session ended" version:', error),
+      );
+    }
     this.afterOpen(opened.head?.updatedAt ?? null);
+    this.onVersions?.(this.versions);
     return copy.manifest.view;
   }
 
@@ -169,6 +192,108 @@ export class ProjectSession {
         return { level, key, rgba: hash ? await this.deps.storage.getTile(hash) : new Uint8Array(TILE_BYTES) };
       }),
     );
+  }
+
+  // --- versions ---------------------------------------------------------------
+
+  get versions(): readonly VersionEntry[] {
+    return this.saver.head?.versions ?? [];
+  }
+
+  /** User input (a stroke, an edit): counts as active time; may make an automatic version. */
+  noteActivity(now = Date.now()): void {
+    this.activeTime.input(now);
+    if (this.activeTime.ms < VERSIONS.autoAfterActiveMin * 60 * 1000 || this.status.state === 'read-only') return;
+    this.activeTime.reset(); // also stops a second trigger while this one runs
+    void this.saveVersion('auto', 'active-time').catch((error: unknown) => console.error('Automatic version failed:', error));
+  }
+
+  /**
+   * Make a version of the project as it is now: save the working copy (with
+   * up-to-date previews), then point a new version at its manifest. Nothing
+   * is copied. An automatic version of an unchanged project is skipped.
+   */
+  async saveVersion(kind: VersionEntry['kind'], reason?: VersionEntry['reason']): Promise<VersionEntry | null> {
+    await this.saveNow();
+    return this.exclusive(async () => {
+      const head = this.saver.head;
+      if (!head) return null;
+      if (kind === 'auto' && !workingCopyUnversioned(head)) return null;
+      const records = this.saver.savedRecords();
+      const level4 = await Promise.all(records.map((r) => this.level4Preview(r)));
+      return this.addVersionOfWorkingCopy(kind, reason, Date.now(), records, level4);
+    });
+  }
+
+  async renameVersion(id: string, name: string): Promise<void> {
+    await this.editVersions((versions) => versions.map((v) => (v.id === id ? { ...v, name } : v)));
+  }
+
+  async pinVersion(id: string, pinned: boolean): Promise<void> {
+    await this.editVersions((versions) => versions.map((v) => (v.id === id ? { ...v, pinned } : v)));
+  }
+
+  /** Delete a version (its manifest and thumbnail go; tiles it alone used are left for garbage collection). */
+  async deleteVersion(id: string): Promise<void> {
+    await this.editVersions((versions) => versions.filter((v) => v.id !== id));
+  }
+
+  /** A version's thumbnail as PNG bytes, if it has one. */
+  async versionThumbnail(version: VersionEntry): Promise<Uint8Array | null> {
+    return version.thumbnail ? this.deps.storage.readThumbnail(version.thumbnail) : null;
+  }
+
+  /**
+   * Point a new version at the working manifest. `records` (for the
+   * thumbnail) are what it held when the caller looked; an autosave may have
+   * replaced it since, which only makes the version slightly newer.
+   */
+  private async addVersionOfWorkingCopy(
+    kind: VersionEntry['kind'],
+    reason: VersionEntry['reason'] | undefined,
+    at: number,
+    records: readonly CanvasRecord[],
+    level4: readonly (Uint8Array | null)[],
+  ): Promise<VersionEntry | null> {
+    const head = this.saver.head;
+    if (!head) return null;
+    const version = newVersion(kind, reason, at, null, null); // null: the working manifest when the worker applies it
+    const png = await renderWorkspaceThumbnail(
+      records.map((r, i) => ({ placement: r, paper: r.paper, paperVisible: r.paperVisible, preview: level4[i] ?? null })),
+      VERSIONS.thumbnailPx,
+    ).catch(() => null);
+    if (png) version.thumbnail = `${version.id}.png`;
+    const edit = addVersionEdit(head, version, Date.now(), this.retention);
+    await this.applyHeadEdit(edit, png ? { name: version.thumbnail!, bytes: png } : undefined);
+    this.activeTime.reset();
+    return this.versions.find((v) => v.id === version.id) ?? null;
+  }
+
+  private async editVersions(change: (versions: VersionEntry[]) => VersionEntry[]): Promise<void> {
+    await this.exclusive(async () => {
+      const head = this.saver.head;
+      if (head) await this.applyHeadEdit({ versions: change([...head.versions]) });
+    });
+  }
+
+  private async applyHeadEdit(edit: HeadEdit, thumbnail?: { name: string; bytes: Uint8Array }): Promise<HeadRecord> {
+    const head = await this.deps.storage.updateHead(edit, thumbnail);
+    this.saver.head = head;
+    this.onVersions?.(head.versions);
+    return head;
+  }
+
+  /** The canvas's saved level-4 preview tile (null: none saved, or fully transparent). */
+  private async level4Preview(record: CanvasRecord): Promise<Uint8Array | null> {
+    const hash = record.previews.find((p) => p.level === 4)?.tiles['0,0'];
+    return hash ? this.deps.storage.getTile(hash) : null;
+  }
+
+  /** Run version operations one after another. */
+  private exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.busy.then(task);
+    this.busy = run.catch(() => undefined);
+    return run;
   }
 
   /** Create a project (with the default canvases), open it and save it. */

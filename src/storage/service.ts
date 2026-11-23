@@ -11,7 +11,12 @@ import { projectFolder as folderOf, scopedStore, type BlobStore, type Catalog } 
  * One project is open at a time; the tile and save operations apply to it.
  */
 
-/** Head changes the app asks for. A version with `manifestId: null` points at the manifest this commit writes. */
+/**
+ * Head changes the app asks for. A version with `manifestId: null` points at
+ * the manifest this commit writes, or, in `updateHead`, at the working
+ * manifest when the edit is applied (operations are serialized, so it can't
+ * be replaced in between).
+ */
 export interface HeadEdit {
   working?: ManifestId;
   versions?: (Omit<VersionEntry, 'manifestId'> & { manifestId: ManifestId | null })[];
@@ -60,7 +65,7 @@ export interface StorageApi {
   getTile(hash: string): Uint8Array;
   readProject(manifestId: ManifestId | null): { manifest: RootManifest; records: CanvasRecord[] } | null;
   commit(message: CommitMessage): CommitReply;
-  updateHead(edit: HeadEdit): HeadRecord;
+  updateHead(edit: HeadEdit, thumbnail?: { name: string; bytes: Uint8Array }): HeadRecord;
   readThumbnail(name: string): Uint8Array | null;
 }
 
@@ -177,8 +182,9 @@ export class StorageService implements AsyncApi {
     };
   }
 
-  updateHead(edit: HeadEdit): Promise<HeadRecord> {
-    return this.project.updateHead((head) => applyEdit(head, edit, null));
+  /** Change the head without a new manifest (versions of manifests already saved), with an optional new thumbnail. */
+  updateHead(edit: HeadEdit, thumbnail?: { name: string; bytes: Uint8Array }): Promise<HeadRecord> {
+    return this.project.updateHead((head) => applyEdit(head, edit, head.working), thumbnail);
   }
 
   readThumbnail(name: string): Promise<Uint8Array | null> {

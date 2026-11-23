@@ -89,6 +89,23 @@ export const SAVE = {
   debounceMs: 1500,
 };
 
+/**
+ * Versions (Phase 4). Manual and pinned versions are always kept. Automatic
+ * ones: the newest `keepLatest`, then the newest of each day for
+ * `dailyForDays` days, then the newest of each week. The settings panel can
+ * change these (stored per device).
+ */
+export const VERSIONS = {
+  keepLatest: 10,
+  dailyForDays: 30,
+  /** Make an automatic version after this much active editing time (minutes), if anything changed. */
+  autoAfterActiveMin: 30,
+  /** Input within this long (ms) counts the time as active. */
+  activeInputWindowMs: 2 * 60 * 1000,
+  /** Workspace thumbnail size (px, longest side). */
+  thumbnailPx: 320,
+};
+
 /** Layer thumbnails are this many pixels on their longest side. */
 export const THUMBNAIL_SIZE = 64;
 /** Wait this long after the last change before refreshing a layer thumbnail. */

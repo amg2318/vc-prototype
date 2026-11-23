@@ -15,6 +15,7 @@ import type { PaintDocument } from './document/paintDocument';
 import { ProjectSession } from './persistence/projectSession';
 import { createStorageWorker, workerClient } from './storage/client';
 import { SaveIndicator } from './ui/saveIndicator';
+import { HistoryPanel } from './ui/historyPanel';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -345,6 +346,7 @@ async function main(): Promise<void> {
       metrics.noteInput([sample], sample.timeStamp);
       strokes.begin(sample);
       if (liveStroke) project.scheduler.strokeStarted();
+      project.noteActivity();
     },
     strokeMove(samples, predicted) {
       metrics.noteInput(samples, samples[samples.length - 1]?.timeStamp ?? performance.now());
@@ -511,16 +513,39 @@ async function main(): Promise<void> {
     bringToFront: (id) => workspace.bringToFront(id),
     fitAll: () => setView(fitAll()),
   });
-  // The layers and canvases panels share the right-hand side: one at a time.
+  // The layers, canvases and history panels share the right-hand side: one at a time.
+  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel];
+  function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
+    const show = !panel.visible;
+    for (const p of sidePanels()) p.setVisible(p === panel && show);
+  }
+  const historyPanel = new HistoryPanel({
+    saveVersion: () => void saveVersion(),
+    rename: (v, name) => void project.renameVersion(v.id, name).catch(reportVersionError),
+    pin: (v, pinned) => void project.pinVersion(v.id, pinned).catch(reportVersionError),
+    remove: (v) => void project.deleteVersion(v.id).then(() => showBanner(`Deleted “${v.name}”.`), reportVersionError),
+    thumbnail: (v) => project.versionThumbnail(v),
+  });
+  project.onVersions = (versions) => historyPanel.setVersions(versions);
+  historyPanel.setVersions(project.versions);
+  async function saveVersion(): Promise<void> {
+    try {
+      const version = await project.saveVersion('manual');
+      if (version) showBanner(`Saved version “${version.name}”.`);
+    } catch (error) {
+      reportVersionError(error);
+    }
+  }
+  function reportVersionError(error: unknown): void {
+    console.error(error);
+    showBanner(`Version history: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const toolbar = new Toolbar({
     selectTool,
     undo,
     redo,
     toggleColorPicker: () => picker.toggle(),
-    toggleLayers: () => {
-      layersPanel.setVisible(!layersPanel.visible);
-      if (layersPanel.visible) canvasPanel.setVisible(false);
-    },
+    toggleLayers: () => togglePanel(layersPanel),
     toggleFingerDrawing: () => {
       input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
     },
@@ -530,10 +555,8 @@ async function main(): Promise<void> {
       refreshUi();
       requestFrame();
     },
-    toggleCanvases: () => {
-      canvasPanel.setVisible(!canvasPanel.visible);
-      if (canvasPanel.visible) layersPanel.setVisible(false);
-    },
+    toggleCanvases: () => togglePanel(canvasPanel),
+    toggleHistory: () => togglePanel(historyPanel),
   });
 
   function refreshUi(): void {
@@ -609,7 +632,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({
@@ -626,6 +649,7 @@ async function main(): Promise<void> {
       if (doc) setView(fitRectToView(doc.placement, cssWidth, cssHeight));
     },
     toggleHud: () => hud.setVisible(!hud.visible),
+    saveVersion: () => void saveVersion(),
   });
 
   new ResizeObserver(resize).observe(canvas);

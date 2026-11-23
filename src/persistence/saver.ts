@@ -37,6 +37,8 @@ export interface SaverDeps {
   /** The canvas's preview tiles (composite levels 3–4), or null if they aren't up to date yet. */
   readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null>;
   view(): RootManifest['view'] | undefined;
+  /** Head fields to update with every commit (the active editing time). */
+  headExtras?(): HeadEdit;
 }
 
 export interface SaveStats {
@@ -136,7 +138,7 @@ export class ProjectSaver {
       canvasCounter: workspace.canvasCounter,
       activeCanvasId: workspace.activeCanvasId,
       ...(view ? { view } : {}),
-      ...(options.head ? { head: options.head(this.head) } : {}),
+      head: { ...this.deps.headExtras?.(), ...options.head?.(this.head) },
       ...(options.thumbnail ? { thumbnail: options.thumbnail } : {}),
     });
     const hashOf = new Map(reply.recordHashes);
@@ -151,6 +153,11 @@ export class ProjectSaver {
     this.head = reply.head;
     bytesWritten += reply.bytesWritten;
     return (this.lastStats = { ms: performance.now() - start, bytesWritten, tilesWritten, recordsWritten, committed: true });
+  }
+
+  /** The saved record of each canvas, in workspace order (what the working manifest holds after a save). */
+  savedRecords(): CanvasRecord[] {
+    return [...this.saved.values()].map((s) => s.record);
   }
 
   /** True if the camera moved since the last save (saved when the page is hidden, not on every pan). */
