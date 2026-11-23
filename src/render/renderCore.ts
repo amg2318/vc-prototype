@@ -605,12 +605,27 @@ export class RenderCore {
    * visible inheritors show of it, through the whole upstream chain. The
    * sources' parts are requested from the planner, so they are built even
    * off screen, and kept (not evicted) while needed.
+   *
+   * Phase 4: the tiles a PNG export reads this frame are needed at full
+   * resolution wherever the canvas is, and so is the part of each source
+   * they show.
    */
   private requestBlockSources(blocks: ReadonlyMap<CanvasId, ActiveBlock>, visible: Rect, viewLevel: number): Map<CanvasId, BlockNeed> {
     const needs = new Map<CanvasId, BlockNeed>();
+    const needOf = (id: CanvasId): BlockNeed => {
+      let need = needs.get(id);
+      if (!need) needs.set(id, (need = { shown: null, full: null }));
+      return need;
+    };
     for (const c of this.canvases) {
       const r = intersect(c.placement, visible);
-      if (r) needs.set(c.id, { level: viewLevel, rect: { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height } });
+      if (r) needOf(c.id).shown = { level: viewLevel, rect: { x: r.x - c.placement.x, y: r.y - c.placement.y, width: r.width, height: r.height } };
+    }
+    for (const read of this.compositeReads.slice(0, TILE_READBACKS_PER_FRAME)) {
+      if (!this.byId.has(read.canvasId)) continue;
+      const need = needOf(read.canvasId);
+      const rect = levelTileRect(0, read.key);
+      need.full = need.full ? union([need.full, rect])! : rect;
     }
     // Inheritors before their sources (deepest first), so a source has every need before passing its own up.
     const arrows = this.propagation.arrows;
@@ -618,12 +633,22 @@ export class RenderCore {
     for (const id of order) {
       const need = needs.get(id);
       const b = blocks.get(id)!;
-      const rect = need && blockSourceRect(b.block, b.sourceSize, need.rect);
-      if (!need || !rect) continue;
-      const level = sampleLevel(b, need);
-      this.planner.request(b.sourceId, level, rect);
-      const previous = needs.get(b.sourceId);
-      needs.set(b.sourceId, previous ? { level: Math.min(previous.level, level), rect: union([previous.rect, rect])! } : { level, rect });
+      if (!need) continue;
+      const shownRect = need.shown && blockSourceRect(b.block, b.sourceSize, need.shown.rect);
+      if (shownRect) {
+        const level = blockLevel(b.block.placement.scale, shownCoarserBy(need));
+        this.planner.request(b.sourceId, level, shownRect);
+        const source = needOf(b.sourceId);
+        source.shown = source.shown
+          ? { level: Math.min(source.shown.level, level), rect: union([source.shown.rect, shownRect])! }
+          : { level, rect: shownRect };
+      }
+      const fullRect = need.full && blockSourceRect(b.block, b.sourceSize, need.full);
+      if (fullRect) {
+        this.planner.request(b.sourceId, blockLevel(b.block.placement.scale, 0), fullRect);
+        const source = needOf(b.sourceId);
+        source.full = source.full ? union([source.full, fullRect])! : fullRect;
+      }
     }
     return needs;
   }
@@ -645,10 +670,11 @@ export class RenderCore {
       if (rect && this.planner.willUpdate(b.sourceId, sampleLevel(b, need), rect)) {
         again.set(job.canvasId, [...(again.get(job.canvasId) ?? []), job.key]);
       }
-      if (coarserBy(need) > 0 && !this.planner.isScratch(job.dst)) this.planner.forgetTile(job.canvasId, 0, job.key);
+      const neededInFull = need?.full && intersect(tileRect(job.key), need.full);
+      if (!neededInFull && shownCoarserBy(need) > 0 && !this.planner.isScratch(job.dst)) this.planner.forgetTile(job.canvasId, 0, job.key);
     }
     for (const d of plan.downsamples) {
-      if (blocks.has(d.canvasId) && d.level < coarserBy(needs.get(d.canvasId))) this.planner.forgetTile(d.canvasId, d.level, d.key);
+      if (blocks.has(d.canvasId) && d.level < shownCoarserBy(needs.get(d.canvasId))) this.planner.forgetTile(d.canvasId, d.level, d.key);
     }
     return again;
   }
@@ -831,20 +857,27 @@ export class RenderCore {
   }
 }
 
-/** Which part of a canvas's composite is needed this frame (canvas px), at which pyramid level. */
+/** Which parts of a canvas's composite are needed this frame (canvas px). */
 interface BlockNeed {
-  level: number;
-  rect: Rect;
+  /** For the screen (the canvas or a visible inheritor), at a pyramid level; null if neither shows it. */
+  shown: { level: number; rect: Rect } | null;
+  /** Phase 4 (PNG export): needed at full resolution; null if not. */
+  full: Rect | null;
 }
 
 /**
- * How many levels coarser than full quality an inheritor's composites are
- * this frame: matching the level it is needed at, but never coarser than the
- * always-kept preview levels (so those are always built at full quality).
- * A canvas that nothing needs only builds those kept levels.
+ * How many levels coarser than full quality an inheritor's composites may be
+ * for the screen: matching the level it is shown at, but never coarser than
+ * the always-kept preview levels (so those are always built at full
+ * quality). A canvas that nothing shows only builds those kept levels.
  */
+function shownCoarserBy(need: BlockNeed | undefined): number {
+  return Math.min(need?.shown?.level ?? PINNED_PREVIEW_LEVEL, PINNED_PREVIEW_LEVEL);
+}
+
+/** As shownCoarserBy, but full quality while an export needs part of the canvas. */
 function coarserBy(need: BlockNeed | undefined): number {
-  return Math.min(need?.level ?? PINNED_PREVIEW_LEVEL, PINNED_PREVIEW_LEVEL);
+  return need?.full ? 0 : shownCoarserBy(need);
 }
 
 /** The source level an inheritor samples this frame. */

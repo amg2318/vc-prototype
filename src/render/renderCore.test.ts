@@ -532,6 +532,46 @@ describe('RenderCore composite reads (Phase 4, PNG export)', () => {
     expect(frames).toBeGreaterThan(1);
   });
 
+  /** The four tiles of a 512 × 512 canvas. */
+  const allFour = [tileKey(0, 0), tileKey(1, 0), tileKey(0, 1), tileKey(1, 1)];
+
+  /** Run frames until the read is answered (or 100 frames pass); returns the frames it took. */
+  async function framesUntilRead(core: RenderCore, read: Promise<unknown>, at: ViewState): Promise<number> {
+    let done = false;
+    void read.then(() => (done = true));
+    let frames = 0;
+    while (!done && frames < 100) {
+      const frame = core.buildFrame(at, px);
+      frames++;
+      for (const r of frame.readbacks) if (r.kind === 'tiles' && r.pool === 'level0') r.resolve(r.slots.map(() => new Uint8Array(4)));
+      await new Promise((settled) => setTimeout(settled, 0));
+    }
+    return frames;
+  }
+
+  it('reads an off-screen inheritor down a chain (its sources are built in full too)', async () => {
+    const size = { width: 512, height: 512 };
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([
+      canvas('a', 5000, [0, 1]),
+      { ...canvas('b', 6000), inherited: createBlock('a', size, size) },
+      { ...canvas('c', 7000), inherited: createBlock('b', size, size) },
+    ]);
+    const read = core.readCompositeTiles('c', allFour);
+    expect(await framesUntilRead(core, read, view)).toBeLessThan(100);
+    expect((await read).every((t) => t !== null)).toBe(true);
+  });
+
+  it('reads an inheritor shown zoomed out (its screen tiles are coarser)', async () => {
+    const size = { width: 512, height: 512 };
+    const core = new RenderCore(new PyramidPlanner(256, 64, 16));
+    core.setCanvases([canvas('a', 0, [0, 1]), { ...canvas('b', 600), inherited: createBlock('a', size, size) }]);
+    const zoomedOut: ViewState = { ...view, canvasPxPerDevicePx: 4 };
+    for (let i = 0; i < 10; i++) core.buildFrame(zoomedOut, px);
+    const read = core.readCompositeTiles('b', allFour);
+    expect(await framesUntilRead(core, read, zoomedOut)).toBeLessThan(100);
+  });
+
   it('answers null for a canvas that was removed', async () => {
     const core = new RenderCore(new PyramidPlanner(256, 64, 16));
     core.setCanvases([canvas('a', 0)]);
