@@ -31,7 +31,7 @@ so they show whether the design works and where its costs are, not how an iPad w
   migrates, verifies every hash and creates a new project. PNG export per canvas at full resolution.
 - **Measurement:** HUD `save` and `storage` lines; every save and GC in the JSON export; a
   "Canvases × versions" stress run.
-- **Tests:** 420 unit tests in all (Phase 4 adds the codec, commit sequence with a crash at every step,
+- **Tests:** 423 unit tests in all (Phase 4 adds the codec, commit sequence with a crash at every step,
   migrations, retention, scheduler, saver, GC including undo-history tiles, session-level versions,
   restore and projects, archives, PNG).
 
@@ -72,6 +72,29 @@ page. Single runs unless noted, so treat them as orders of magnitude.
 - **Reopening a project came back read-only.** Releasing a Web Lock is asynchronous; asking for it again
   at once failed. The lock is now kept when reopening the same project, and releasing waits until it is
   free.
+- **Found on the iPad (first test): the app opened read-only although no other tab was open.**
+  Two causes:
+  - A new project's first save waited for previews, which need frames, and frames only start once the
+    app has started. So the first launch on a new device (or `?canvases=N`) hung while holding the
+    project's lock.
+  - A page kept in the back/forward cache keeps its Web Lock, so any later page opened the project
+    read-only.
+
+  Fixes:
+  - The first save of a new project leaves its previews to the next save.
+  - On `pagehide` into the cache, the page lets go of the lock (and takes it back, read-only until then,
+    if restored).
+  - Opening waits up to 2 s for the lock.
+  - A read-only tab waits in the background and reloads the project with saving on once no other page
+    has it.
+
+  Checked in desktop Chrome: a page navigated away from let go of its lock, and the waiting tab took over
+  within 2 s. Restoring from the cache with Back was not tried.
+- **Found on the iPad: PNG export of an inheriting canvas never finished.** The level an inherited
+  block is built at followed only what the screen needed. For a canvas off screen or zoomed out, the
+  export's tiles were built at low resolution and then dropped as such, over and over. Export now
+  counts as a full-resolution need for the canvas and its sources. Checked in desktop Chrome on WebGPU
+  and WebGL2 (an A4 canvas inheriting another, zoomed out: correct PNG, the same on both).
 - **Sizes drifted** when files were removed after the head moved; the size recorded with the head now
   already leaves them out, and garbage collection recounts from the files.
 
@@ -95,6 +118,9 @@ page. Single runs unless noted, so treat them as orders of magnitude.
   Large projects may run out of memory on an iPad. PNG export streams, so its memory doesn't grow with the
   canvas.
 - **Saves wait during an export of the open project** (it is read inside the project's lock).
+- **A page frozen in the back/forward cache mid-save** lets go of its lock; if another tab opens the
+  project and the frozen page is restored, its unfinished save can still land on top of the other tab's
+  head. Rare, not handled.
 - **Read-only tabs keep evicted tiles in memory**, since the owning tab's garbage collection doesn't know
   about them.
 - **The size shown per project counts our files**, not the file system's overhead; the browser's estimate

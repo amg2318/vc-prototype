@@ -42,6 +42,44 @@ export function tryLockProject(id: ProjectId): Promise<HeldLock | null> {
   });
 }
 
+/**
+ * Wait for the project's lock: resolves with it once no other tab holds it,
+ * or null if `signal` aborts first (or the browser refuses the request).
+ */
+export function waitForProjectLock(id: ProjectId, signal: AbortSignal): Promise<HeldLock | null> {
+  if (!('locks' in navigator)) return Promise.resolve({ projectId: id, release: async () => undefined });
+  return new Promise((resolve) => {
+    const freed: Promise<unknown> = navigator.locks
+      .request(lockName(id), { signal }, () => {
+        // Hold the lock until release() is called (or the tab closes).
+        return new Promise<void>((letGo) =>
+          resolve({
+            projectId: id,
+            release: async () => {
+              letGo();
+              await freed;
+            },
+          }),
+        );
+      })
+      .catch(() => resolve(null)); // aborted before the lock was granted
+  });
+}
+
+/**
+ * Take the project's lock, waiting up to `waitMs` for another page to let go
+ * (a page that is reloading or closing may still hold it for a moment).
+ */
+export async function lockProject(id: ProjectId, waitMs: number): Promise<HeldLock | null> {
+  const now = await tryLockProject(id);
+  if (now || waitMs <= 0) return now;
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), waitMs);
+  const lock = await waitForProjectLock(id, timeout.signal);
+  clearTimeout(timer);
+  return lock;
+}
+
 /** True if another tab (or this one) holds the project's lock. */
 export async function isProjectLocked(id: ProjectId): Promise<boolean> {
   if (!('locks' in navigator)) return false;

@@ -68,6 +68,8 @@ Notes for the findings (did the indicator say *Saved* before closing? how long d
 | Storage on this device: what does the persistence line say? Does "Ask to keep them" change it? | |
 | In a Safari tab: the "use the Home Screen app" notice appears once per visit (not in the home-screen app) | |
 | Open the same project in two Safari tabs: the second says read-only, its indicator says *Read-only* | |
+| Then close the first tab: within a few seconds the second says it reloaded the project and saves now | |
+| First launch on a device with no projects (or after deleting them all): the app starts, not read-only | |
 
 ## 5. Export, import, PNG
 
@@ -76,7 +78,7 @@ Notes for the findings (did the indicator say *Saved* before closing? how long d
 | Export a project with history: the share sheet opens; "Save to Files" works; file size | |
 | Delete that project, then **Import…** the file: it comes back as a new project with its versions | |
 | Export without history, import: only the working copy | |
-| Canvases → **Export PNG** on a canvas that inherits another: the PNG shows the inherited content; time for a 4096² canvas | |
+| Canvases → **Export PNG** on a canvas that inherits another, zoomed out and with it off screen: the PNG shows the inherited content; time for a 4096² canvas | |
 | If the share sheet did not open after a long export, did the **Save…** button work? | |
 | Share a PNG to another app (Photos, Mail…) | |
 

@@ -591,6 +591,14 @@ async function main(): Promise<void> {
     thumbnail: (v) => project.versionThumbnail(v),
   });
   project.onVersions = (versions) => historyPanel.setVersions(versions);
+  // A read-only project that no other page has open any more: reload it from disk (with what that tab saved) and save here.
+  project.onLockFreed = (id) =>
+    void switchProject(async () => {
+      const keep = view;
+      await project.open(id);
+      showBanner('This project is no longer open anywhere else: it was reloaded with its latest saved changes and is saved from this tab now.');
+      return keep;
+    });
   historyPanel.setVersions(project.versions);
   async function saveVersion(): Promise<void> {
     try {

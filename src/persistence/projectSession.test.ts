@@ -12,9 +12,10 @@ import { ProjectSession } from './projectSession';
 /**
  * The session with storage in memory and a stand-in renderer whose "GPU"
  * holds, for each tile id, a tile filled with a value the test chose.
- * Browser globals the session touches are stubbed.
+ * Browser globals the session touches are stubbed. With `framesRunning`
+ * false, preview reads (answered by frames) never come back, as at launch.
  */
-async function setup() {
+async function setup(framesRunning = true) {
   const store = new TileStore(256);
   const workspace = new Workspace(store);
   const storage = inProcessClient(new StorageService(new MemoryBlobStore(), new MemoryCatalog()));
@@ -23,7 +24,7 @@ async function setup() {
     useBackingStore() {},
     onCompositeChanged: null,
     readLayerTiles: async (ids: readonly TileId[]) => ids.map((id) => (store.refCount(id) > 0 ? new Uint8Array(TILE_BYTES).fill(pixels.get(id) ?? 0) : null)),
-    readPreviewTiles: async () => [],
+    readPreviewTiles: () => (framesRunning ? Promise.resolve([]) : new Promise(() => undefined)),
     seedPreviews: () => true,
     adoptStoredTiles() {},
   } as unknown as Renderer;
@@ -56,6 +57,11 @@ describe('ProjectSession versions', () => {
     vi.stubGlobal('localStorage', { getItem: (k: string) => items.get(k) ?? null, setItem: (k: string, v: string) => items.set(k, v) });
   });
   afterEach(() => vi.unstubAllGlobals());
+
+  it('creating a project finishes before frames run (its first save leaves previews for later)', async () => {
+    const { session } = await setup(false);
+    expect(session.status.state).toBe('saved');
+  });
 
   it('a manual version keeps the state it was made in', async () => {
     const { session, stroke, savedValue } = await setup();

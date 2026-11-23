@@ -16,7 +16,7 @@ import { DiskTileBackingStore } from './diskTileBackingStore';
 import { ProjectSaver, type SaveOptions, type SaveStats } from './saver';
 import { canvasFromRecord } from './snapshot';
 import { TileHashes } from './tileHashes';
-import { isProjectLocked, tryLockProject, type HeldLock } from './projectLock';
+import { isProjectLocked, lockProject, tryLockProject, waitForProjectLock, type HeldLock } from './projectLock';
 import { applyRetention, type RetentionRules } from './retention';
 import { ActiveTime, addVersionEdit, newVersion, workingCopyUnversioned } from './versions';
 import { renderWorkspaceThumbnail } from './workspaceThumbnail';
@@ -66,6 +66,12 @@ const LAST_PROJECT_KEY = 'vc-last-project';
 
 export const QUOTA_MESSAGE = 'Storage is full: your latest changes are not saved. Delete old automatic versions or export and delete projects to make room.';
 
+/**
+ * How long opening a project waits for its lock before opening it read-only:
+ * a page that is reloading or closing may still hold it for a moment.
+ */
+const LOCK_WAIT_MS = 2000;
+
 export class ProjectSession {
   readonly hashes: TileHashes;
   readonly backing: DiskTileBackingStore;
@@ -89,6 +95,14 @@ export class ProjectSession {
   private persistent = true;
   /** This tab's lock on the open project; null when another tab has it (read-only). */
   private lock: HeldLock | null = null;
+  /** While read-only: stops waiting for the other tab to let go of the project. */
+  private lockWait: AbortController | null = null;
+  /**
+   * Called when a read-only project's lock comes free (the other page closed
+   * it). This tab now holds the lock; reopen the project to load what the
+   * other page saved and start saving here.
+   */
+  onLockFreed: ((id: ProjectId) => void) | null = null;
   private activeTime = new ActiveTime(0, VERSIONS.activeInputWindowMs);
   /** Version operations in progress (one at a time, so each edits the latest version list). */
   private busy: Promise<unknown> = Promise.resolve();
@@ -137,7 +151,23 @@ export class ProjectSession {
       if (document.visibilityState === 'hidden') flush();
       else if (this.saver.previewsDirty.size > 0) this.scheduler.changed(); // previews skipped while hidden
     });
-    window.addEventListener('pagehide', flush);
+    window.addEventListener('pagehide', (event) => {
+      flush();
+      // Kept in the back/forward cache (frozen, maybe for good): let another
+      // page have the project meanwhile. A frozen page would otherwise keep
+      // its lock, and every new page would open the project read-only.
+      if (event.persisted && this.lock) {
+        void this.lock.release();
+        this.lock = null;
+        this.scheduler.paused = true;
+      }
+    });
+    window.addEventListener('pageshow', (event) => {
+      // Back from the cache: read-only until the lock is ours again, then reopened.
+      if (!event.persisted || !this.project || this.lock) return;
+      this.afterOpen(this.status.savedAt);
+      this.waitForLock(this.project.id);
+    });
   }
 
   // --- opening ----------------------------------------------------------------
@@ -162,10 +192,13 @@ export class ProjectSession {
     await this.scheduler.settle();
     this.scheduler.paused = true; // loading is not a change to save
     clearTimeout(this.gcTimer);
+    this.lockWait?.abort();
+    this.lockWait = null;
     if (this.lock?.projectId !== id) {
       // Reopening the same project keeps its lock; otherwise let go of the old one first.
       await this.lock?.release();
-      this.lock = await tryLockProject(id);
+      this.lock = await lockProject(id, LOCK_WAIT_MS);
+      if (!this.lock) this.waitForLock(id);
     }
     this.backing.writeToDisk = this.lock !== null;
     const { storage, workspace } = this.deps;
@@ -180,11 +213,13 @@ export class ProjectSession {
       return undefined;
     }
     if (!copy) {
-      // Created but never saved: start it with the default canvases.
+      // Created but never saved: start it with the default canvases. Previews
+      // are read back from the GPU in frames, which may not be running yet (at
+      // launch), so they are left to the next save.
       workspace.load(this.deps.newProjectCanvases(workspace), workspace.canvasCounter, null);
       this.saver.remember([], [], null, opened.head);
       this.afterOpen();
-      await this.saveNow();
+      await this.saveNow({ skipPreviews: true });
       return undefined;
     }
     const previews = await this.load(copy);
@@ -464,6 +499,22 @@ export class ProjectSession {
     } else {
       this.setStatus({ state: 'saved', savedAt, message: null, quota: false });
     }
+  }
+
+  /** While read-only, wait in the background for the other tab to let go of the project. */
+  private waitForLock(id: ProjectId): void {
+    const wait = new AbortController();
+    this.lockWait = wait;
+    void waitForProjectLock(id, wait.signal).then((lock) => {
+      if (!lock) return;
+      if (wait.signal.aborted || this.project?.id !== id || this.lock) {
+        void lock.release();
+        return;
+      }
+      this.lockWait = null;
+      this.lock = lock; // saving starts when the project is reopened
+      this.onLockFreed?.(id);
+    });
   }
 
   /** True when another tab has the open project (nothing is saved here). */
