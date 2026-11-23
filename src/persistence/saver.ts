@@ -155,6 +155,11 @@ export class ProjectSaver {
     return (this.lastStats = { ms: performance.now() - start, bytesWritten, tilesWritten, recordsWritten, committed: true });
   }
 
+  /** Hashes of the preview tiles this saver holds (stored, maybe not committed yet): kept by garbage collection. */
+  previewHashes(): string[] {
+    return [...this.previews.values()].flatMap((levels) => levels.flatMap((l) => Object.values(l.tiles)));
+  }
+
   /** The saved record of each canvas, in workspace order (what the working manifest holds after a save). */
   savedRecords(): CanvasRecord[] {
     return [...this.saved.values()].map((s) => s.record);

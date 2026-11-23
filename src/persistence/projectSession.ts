@@ -1,4 +1,4 @@
-import { SAVE, TILE_BYTES, VERSIONS } from '../config';
+import { GC, SAVE, TILE_BYTES, VERSIONS } from '../config';
 import { tileCoords } from '../document/tiles';
 import { PyramidPlanner } from '../render/pyramid';
 import type { PreviewTile } from '../render/renderer';
@@ -42,6 +42,14 @@ export interface SaveStatus {
   quota: boolean;
 }
 
+export interface GcStats {
+  ms: number;
+  removedFiles: number;
+  removedBytes: number;
+  /** The project's size afterwards (bytes). */
+  sizeBytes: number;
+}
+
 export interface SessionDeps {
   workspace: Workspace;
   renderer: Renderer;
@@ -65,6 +73,11 @@ export class ProjectSession {
   onStatus: ((status: SaveStatus) => void) | null = null;
   /** Called after each save with its measurements (for the HUD). */
   onSaved: ((stats: SaveStats) => void) | null = null;
+  /** Called after each garbage collection (for the HUD). */
+  onGarbageCollected: ((stats: GcStats) => void) | null = null;
+  lastGc: GcStats | null = null;
+  private gcRunning = false;
+  private gcTimer = 0;
   /** Called when the version list changes. */
   onVersions: ((versions: readonly VersionEntry[]) => void) | null = null;
   /** Retention rules for automatic versions (the settings panel may change them). */
@@ -161,6 +174,7 @@ export class ProjectSession {
     }
     this.afterOpen(opened.head?.updatedAt ?? null);
     this.onVersions?.(this.versions);
+    this.scheduleGarbageCollection(GC.delayAfterOpenMs);
     return copy.manifest.view;
   }
 
@@ -274,6 +288,52 @@ export class ProjectSession {
   /** Delete a version (its manifest and thumbnail go; tiles it alone used are left for garbage collection). */
   async deleteVersion(id: string): Promise<void> {
     await this.editVersions((versions) => versions.filter((v) => v.id !== id));
+    this.scheduleGarbageCollection(GC.delayAfterDeleteMs);
+  }
+
+  // --- garbage collection -------------------------------------------------------
+
+  /** Collect garbage after `delayMs` (a later call replaces an earlier one). */
+  scheduleGarbageCollection(delayMs: number): void {
+    clearTimeout(this.gcTimer);
+    this.gcTimer = window.setTimeout(() => void this.collectGarbage(), delayMs);
+  }
+
+  /**
+   * Remove the open project's unused tiles, records, manifests and
+   * thumbnails (see storage/gc.ts). Runs in the worker in short steps, so
+   * drawing and saving carry on. Opening another project stops it (safely).
+   * Returns null if it didn't run or was stopped.
+   */
+  async collectGarbage(): Promise<GcStats | null> {
+    if (this.gcRunning || !this.persistent || this.status.state === 'read-only') return null;
+    const { storage } = this.deps;
+    const projectId = this.project?.id;
+    this.gcRunning = true;
+    const start = performance.now();
+    try {
+      await storage.gcBegin();
+      // Collected after `gcBegin` answered: every tile written before it has its hash noted by now.
+      await storage.gcMark([...this.hashes.liveHashes(), ...this.saver.previewHashes()]);
+      let progress;
+      do {
+        progress = await storage.gcSweep(GC.sliceMs);
+        if (this.project?.id !== projectId) return null;
+      } while (!progress.done);
+      const sizeBytes = await storage.gcFinish();
+      if (this.project) this.project = { ...this.project, sizeBytes };
+      const stats = { ms: performance.now() - start, removedFiles: progress.removedFiles, removedBytes: progress.removedBytes, sizeBytes };
+      this.lastGc = stats;
+      this.onGarbageCollected?.(stats);
+      return stats;
+    } catch (error) {
+      // Stopped (another project was opened) or failed: nothing in use was deleted.
+      if (this.project?.id === projectId) console.warn('Garbage collection stopped:', error);
+      await storage.gcCancel().catch(() => undefined);
+      return null;
+    } finally {
+      this.gcRunning = false;
+    }
   }
 
   /** A version's thumbnail as PNG bytes, if it has one. */

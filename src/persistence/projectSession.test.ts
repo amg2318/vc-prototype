@@ -91,4 +91,18 @@ describe('ProjectSession versions', () => {
     await session.restoreVersion(before!);
     expect(await savedValue()).toBe(9);
   });
+
+  it('garbage collection keeps tiles only the undo history holds, so undo saves again afterwards', async () => {
+    const { session, stroke, savedValue, workspace } = await setup();
+    stroke(5);
+    await session.saveNow();
+    stroke(9); // replaces the tile: the 5 is now only in undo history
+    await session.saveNow();
+    const stats = (await session.collectGarbage())!;
+    expect(stats.removedFiles).toBeGreaterThan(0); // the old working manifest's leftovers, at least
+
+    workspace.history.undo();
+    await session.saveNow();
+    expect(await savedValue()).toBe(5);
+  });
 });

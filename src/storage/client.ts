@@ -66,6 +66,11 @@ const OPS: readonly StorageOp[] = [
   'readProject',
   'commit',
   'updateHead',
+  'gcBegin',
+  'gcMark',
+  'gcSweep',
+  'gcFinish',
+  'gcCancel',
   'readThumbnail',
 ] satisfies (keyof StorageApi)[];
 

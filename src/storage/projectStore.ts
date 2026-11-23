@@ -122,8 +122,8 @@ export class ProjectStore {
     return { ...this.info };
   }
 
-  /** Run `task` after every operation asked for before it. */
-  private exclusive<T>(task: () => Promise<T>): Promise<T> {
+  /** Run `task` after every operation asked for before it (garbage collection uses it for its steps). */
+  exclusive<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task);
     this.queue = run.catch(() => undefined);
     return run;
@@ -318,6 +318,12 @@ export class ProjectStore {
     await this.catalog.commitHead(head, this.info);
     this.currentHead = head;
     for (const path of unused) await this.files.remove(path);
+  }
+
+  /** Set the project's size to a fresh count (garbage collection recounts it). */
+  async setSize(sizeBytes: number): Promise<void> {
+    this.info = { ...this.info, sizeBytes };
+    await this.catalog.putProject(this.info);
   }
 
   /** Rename the project (in the catalog only). */

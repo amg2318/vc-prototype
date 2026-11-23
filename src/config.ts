@@ -106,6 +106,16 @@ export const VERSIONS = {
   thumbnailPx: 320,
 };
 
+/** Garbage collection of unused tiles (Phase 4). */
+export const GC = {
+  /** Each sweep step holds back saves for at most about this long (ms). */
+  sliceMs: 8,
+  /** Collect this long after a project opens (ms), once things have settled. */
+  delayAfterOpenMs: 10_000,
+  /** …and this long after versions were deleted. */
+  delayAfterDeleteMs: 2_000,
+};
+
 /** Layer thumbnails are this many pixels on their longest side. */
 export const THUMBNAIL_SIZE = 64;
 /** Wait this long after the last change before refreshing a layer thumbnail. */

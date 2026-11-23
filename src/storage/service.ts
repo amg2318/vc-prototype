@@ -1,5 +1,6 @@
 import type { CanvasRecord, HeadRecord, ManifestId, ProjectId, ProjectInfo, RootManifest, VersionEntry } from './format';
 import { newId } from './format';
+import { GarbageCollector, type SweepProgress } from './gc';
 import { ProjectStore, type CanvasEntry, type PutResult } from './projectStore';
 import { projectFolder as folderOf, scopedStore, type BlobStore, type Catalog } from './stores';
 
@@ -67,6 +68,12 @@ export interface StorageApi {
   commit(message: CommitMessage): CommitReply;
   updateHead(edit: HeadEdit, thumbnail?: { name: string; bytes: Uint8Array }): HeadRecord;
   readThumbnail(name: string): Uint8Array | null;
+  /** Garbage collection of the open project, in steps (see gc.ts). */
+  gcBegin(): void;
+  gcMark(live: string[]): number;
+  gcSweep(budgetMs: number): SweepProgress;
+  gcFinish(): number;
+  gcCancel(): void;
 }
 
 export type StorageOp = keyof StorageApi;
@@ -74,6 +81,7 @@ export type AsyncApi = { [K in StorageOp]: (...args: Parameters<StorageApi[K]>) 
 
 export class StorageService implements AsyncApi {
   private current: ProjectStore | null = null;
+  private gc: GarbageCollector | null = null;
 
   constructor(
     private readonly root: BlobStore,
@@ -111,11 +119,15 @@ export class StorageService implements AsyncApi {
     const info = await this.catalog.project(id);
     if (!info) throw new Error(`No project ${id}`);
     await this.catalog.putProject({ ...info, lastOpenedAt: Date.now() });
+    this.gc?.cancel();
+    this.gc = null;
     this.current = await ProjectStore.open(id, this.files(id), this.catalog);
     return { info: this.current.projectInfo, head: this.current.head };
   }
 
   async closeProject(): Promise<void> {
+    this.gc?.cancel();
+    this.gc = null;
     this.current = null;
   }
 
@@ -189,6 +201,36 @@ export class StorageService implements AsyncApi {
 
   readThumbnail(name: string): Promise<Uint8Array | null> {
     return this.project.files.read(`thumbnails/${name}`);
+  }
+
+  async gcBegin(): Promise<void> {
+    this.gc?.cancel();
+    this.gc = new GarbageCollector(this.project);
+    await this.gc.begin();
+  }
+
+  gcMark(live: string[]): Promise<number> {
+    return this.collector.mark(live);
+  }
+
+  gcSweep(budgetMs: number): Promise<SweepProgress> {
+    return this.collector.sweep(budgetMs);
+  }
+
+  async gcFinish(): Promise<number> {
+    const size = await this.collector.finish();
+    this.gc = null;
+    return size;
+  }
+
+  async gcCancel(): Promise<void> {
+    this.gc?.cancel();
+    this.gc = null;
+  }
+
+  private get collector(): GarbageCollector {
+    if (!this.gc) throw new Error('No garbage collection is running');
+    return this.gc;
   }
 }
 
