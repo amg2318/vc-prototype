@@ -467,3 +467,47 @@ describe('RenderCore.readLayerTiles (Phase 4 saving)', () => {
     expect(await read).toEqual([pixels]);
   });
 });
+
+describe('RenderCore previews (Phase 4)', () => {
+  /** A 512² canvas has one tile at each pinned level (3 and 4). */
+  const previewTiles = () => PyramidPlanner.pinnedKeys({ width: 512, height: 512 }).map((t) => ({ ...t, rgba: new Uint8Array(TILE_BYTES).fill(1) }));
+
+  it('a seeded canvas shows its saved previews without compositing anything', () => {
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64));
+    core.setCanvases([canvas('a', 0, [0, 1])]);
+    core.invalidate('a', 'all'); // what opening a project reports
+    expect(core.seedPreviews('a', previewTiles())).toBe(true);
+    // Zoomed out far enough to show level 4.
+    const far: ViewState = { ...view, canvasPxPerDevicePx: 16 };
+    const frame = core.buildFrame(far, px);
+    expect(frame.previewUploads).toHaveLength(2);
+    expect(frame.stats.composited).toBe(0);
+    expect(frame.display.runs.some((r) => r.kind === 'tile' && r.pool === 'preview')).toBe(true);
+  });
+
+  it('reads the pinned previews back once they are built, and answers null while they are not', async () => {
+    const core = new RenderCore(new PyramidPlanner(64, 64, 64));
+    core.setCanvases([canvas('a', 0)]);
+    const early = core.readPreviewTiles('a');
+    core.buildFrame(view, px); // builds the previews this frame, but the plan ran before they existed
+    const first = await Promise.race([early, Promise.resolve('waiting')]);
+    expect(first === null || first === 'waiting').toBe(true);
+
+    const read = core.readPreviewTiles('a');
+    const frame = core.buildFrame(view, px);
+    const readback = frame.readbacks.find((r) => r.kind === 'tiles' && r.pool === 'preview');
+    expect(readback).toBeDefined();
+    if (readback?.kind === 'tiles') readback.resolve(readback.slots.map(() => new Uint8Array(4)));
+    expect((await read)!.map((t) => t.level)).toEqual([3, 4]);
+  });
+
+  it('pinned previews are not offered while a change has not reached them', () => {
+    const planner = new PyramidPlanner(64, 64, 64);
+    const core = new RenderCore(planner);
+    core.setCanvases([canvas('a', 0)]);
+    core.buildFrame(view, px);
+    expect(planner.pinnedTiles('a')).not.toBeNull();
+    planner.invalidate('a', [0]);
+    expect(planner.pinnedTiles('a')).toBeNull();
+  });
+});

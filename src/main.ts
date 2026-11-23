@@ -89,7 +89,10 @@ async function main(): Promise<void> {
   function requestFrame(): void {
     if (framePending) return;
     framePending = true;
-    requestAnimationFrame(frame);
+    // Hidden pages get no animation frames, but a save started on hiding still needs frames
+    // to read tiles back from the GPU: drive them with a timer then.
+    if (document.visibilityState === 'hidden') setTimeout(() => frame(performance.now()), 0);
+    else requestAnimationFrame(frame);
   }
   function frame(rafTime: number): void {
     framePending = false;

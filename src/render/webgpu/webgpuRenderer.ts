@@ -1,3 +1,4 @@
+import type { PreviewTile } from '../renderer';
 import type { TileBackingStore } from '../tileBackingStore';
 import {
   ATLAS_PAGE_SIZE,
@@ -441,6 +442,18 @@ export class WebGPURenderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null> {
+    const read = this.core.readPreviewTiles(canvasId);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
+    const seeded = this.core.seedPreviews(canvasId, tiles);
+    this.onNeedsFrame?.();
+    return seeded;
+  }
+
   useBackingStore(backing: TileBackingStore): void {
     this.core.useBackingStore(backing);
   }
@@ -465,6 +478,16 @@ export class WebGPURenderer implements Renderer {
     const frame = this.core.buildFrame(view, [2 / canvas.width, 2 / canvas.height]);
     this.syncPages();
     for (const id of frame.removedCanvases) this.releaseCanvas(id);
+    // Saved previews of an opened project (queue writes run before this frame's commands).
+    for (const { slot, rgba } of frame.previewUploads) {
+      const at = slotLocation(slot);
+      device.queue.writeTexture(
+        { texture: this.previewPages.textures[at.page]!, origin: { x: at.x, y: at.y } },
+        rgba as Uint8Array<ArrayBuffer>,
+        { bytesPerRow: TILE_SIZE * 4 },
+        [TILE_SIZE, TILE_SIZE],
+      );
+    }
 
     const encoder = device.createCommandEncoder();
     const afterLayerOps = this.encodeLayerOps(encoder, frame.ops, frame.prediction);

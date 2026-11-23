@@ -7,6 +7,9 @@ import type { RetileJob } from '../document/retile';
 import type { TileStore } from '../document/tileStore';
 import type { TileId, TileKey } from '../document/tiles';
 import type { TileBackingStore } from './tileBackingStore';
+import type { PreviewTile } from './renderCore';
+
+export type { PreviewTile };
 import type { Placement, Rect } from '../workspace/coords';
 
 export type { Dab, MergeJob, RetileJob };
@@ -233,6 +236,16 @@ export interface Renderer {
    * fence) and spread over frames. Null for tiles freed meanwhile.
    */
   readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]>;
+  /**
+   * Phase 4: the canvas's preview tiles (pyramid levels 3–4) for saving, or
+   * null if they aren't complete and up to date in the next frame.
+   */
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null>;
+  /**
+   * Phase 4: show an opened canvas from its saved preview tiles, without
+   * compositing or loading its layer tiles (applied when `setCanvases` has it).
+   */
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean;
 
   destroy(): void;
 }

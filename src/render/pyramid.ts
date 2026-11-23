@@ -266,6 +266,60 @@ export class PyramidPlanner {
   }
 
   /**
+   * Phase 4: the canvas's pinned preview tiles (every tile of the levels from
+   * PINNED_PREVIEW_LEVEL up), if all are built and no change is waiting to
+   * reach them; otherwise null. Their slots are never evicted.
+   */
+  pinnedTiles(canvasId: CanvasId): { level: number; key: TileKey; slot: TileSlot }[] | null {
+    const cache = this.caches.get(canvasId);
+    if (!cache || cache.pending.size > 0) return null;
+    const full = { x: 0, y: 0, width: cache.width, height: cache.height };
+    const tiles: { level: number; key: TileKey; slot: TileSlot }[] = [];
+    for (let level = PINNED_PREVIEW_LEVEL; level < PYRAMID_LEVELS; level++) {
+      for (const key of levelTilesInRect(cache, full, level)) {
+        const tile = cache.levels[level]!.get(key);
+        if (!tile || tile.todo !== null) return null;
+        tiles.push({ level, key, slot: tile.slot });
+      }
+    }
+    return tiles;
+  }
+
+  /**
+   * Phase 4: start a canvas's cache from saved preview tiles (an opened
+   * project), so it shows at once without loading any layer tile. Its pinned
+   * levels become complete; anything cached before is dropped. Returns the
+   * slot of each tile, to upload its pixels into. Null if the preview pool is full.
+   */
+  seed(canvasId: CanvasId, size: { width: number; height: number }, paper: Rgba, tiles: readonly { level: number; key: TileKey }[]): TileSlot[] | null {
+    this.dropCache(canvasId);
+    const cache = new CanvasCache(size.width, size.height);
+    cache.paper = paper;
+    this.caches.set(canvasId, cache);
+    const slots: TileSlot[] = [];
+    for (const { level, key } of tiles) {
+      const slot = this.allocate(level);
+      if (slot === null) {
+        this.dropCache(canvasId);
+        return null;
+      }
+      cache.levels[level]!.set(key, { slot, lastUsed: this.frame, todo: null });
+      slots.push(slot);
+    }
+    return slots;
+  }
+
+  /** Phase 4: the keys of every pinned preview tile of a canvas of this size (levels from PINNED_PREVIEW_LEVEL up). */
+  static pinnedKeys(size: { width: number; height: number }): { level: number; key: TileKey }[] {
+    const full = { x: 0, y: 0, width: size.width, height: size.height };
+    const keys: { level: number; key: TileKey }[] = [];
+    for (let level = PINNED_PREVIEW_LEVEL; level < PYRAMID_LEVELS; level++) {
+      for (const key of levelTilesInRect(full, full, level)) keys.push({ level, key });
+    }
+    return keys;
+  }
+
+  /**
    * Plan one frame.
    * @param canvases every canvas, back to front
    * @param visible the workspace rect on screen

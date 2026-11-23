@@ -1,3 +1,4 @@
+import type { PreviewTile } from '../renderer';
 import {
   ATLAS_PAGE_SIZE,
   COMPOSITE_LEVEL0_PAGES,
@@ -232,6 +233,18 @@ export class WebGL2Renderer implements Renderer {
     return new Promise((resolve) => this.core.queue.addReadback({ kind: 'thumbnail', tiles: [...tiles], resolve }));
   }
 
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null> {
+    const read = this.core.readPreviewTiles(canvasId);
+    this.onNeedsFrame?.();
+    return read;
+  }
+
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
+    const seeded = this.core.seedPreviews(canvasId, tiles);
+    this.onNeedsFrame?.();
+    return seeded;
+  }
+
   useBackingStore(backing: TileBackingStore): void {
     this.core.useBackingStore(backing);
   }
@@ -254,6 +267,8 @@ export class WebGL2Renderer implements Renderer {
     const compositeStart = performance.now();
     const frame = this.core.buildFrame(view, [2 / gl.drawingBufferWidth, 2 / gl.drawingBufferHeight]);
     this.syncPages();
+    // Saved previews of an opened project.
+    for (const { slot, rgba } of frame.previewUploads) this.writePreviewSlot(slot, rgba);
     for (const id of frame.removedCanvases) this.releaseCanvas(id);
 
     this.asyncReads.poll();
@@ -350,6 +365,13 @@ export class WebGL2Renderer implements Renderer {
       return { framebuffer: pages[at.page]!.framebuffer, x: at.x, y: at.y, width: TILE_SIZE, height: TILE_SIZE };
     });
     this.asyncReads.read(regions, (data) => done(slots.map((_, i) => data.slice(i * TILE_BYTES, (i + 1) * TILE_BYTES))));
+  }
+
+  private writePreviewSlot(slot: TileSlot, rgba: Uint8Array): void {
+    const gl = this.gl;
+    const at = slotLocation(slot);
+    gl.bindTexture(gl.TEXTURE_2D, this.previewPages[at.page]!.texture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, at.x, at.y, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
   }
 
   private writeSlot(slot: TileSlot, rgba: Uint8Array): void {

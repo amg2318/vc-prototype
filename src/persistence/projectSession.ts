@@ -1,4 +1,8 @@
-import { SAVE } from '../config';
+import { SAVE, TILE_BYTES } from '../config';
+import { tileCoords } from '../document/tiles';
+import { PyramidPlanner } from '../render/pyramid';
+import type { PreviewTile } from '../render/renderer';
+import { tileMapKey, type CanvasRecord } from '../storage/format';
 import type { PaintDocument } from '../document/paintDocument';
 import type { TileId } from '../document/tiles';
 import type { Renderer } from '../render/renderer';
@@ -63,16 +67,18 @@ export class ProjectSession {
     this.hashes = new TileHashes(workspace.store);
     this.backing = new DiskTileBackingStore(storage, this.hashes, workspace.store);
     renderer.useBackingStore(this.backing);
+    renderer.onCompositeChanged = (canvasId) => this.saver.previewsDirty.add(canvasId);
     this.saver = new ProjectSaver({
       workspace,
       hashes: this.hashes,
       storage,
       readLayerTiles: (ids) => renderer.readLayerTiles(ids),
-      previews: () => [],
+      readPreviewTiles: (canvasId) => renderer.readPreviewTiles(canvasId),
       view: () => deps.view(),
     });
     this.scheduler = new AutosaveScheduler(async () => {
-      await this.saveWorkingCopy();
+      // While the page is hidden, every second counts (it may be closed for good): skip the previews.
+      await this.saveWorkingCopy({ skipPreviews: document.visibilityState === 'hidden' });
     }, SAVE.debounceMs);
     workspace.onChange(() => {
       if (this.scheduler.paused) return;
@@ -81,12 +87,20 @@ export class ProjectSession {
     });
   }
 
-  /** Save at once when the page is hidden or closed (`beforeunload` / `unload` often don't fire on iPad). */
+  /**
+   * Save at once when the page is hidden or closed (`beforeunload` and
+   * `unload` often don't fire on iPad). A moved camera is saved then too.
+   */
   watchPageLifecycle(): void {
+    const flush = (): void => {
+      if (this.saver.viewChanged() && !this.scheduler.paused) this.scheduler.changed();
+      this.scheduler.flush();
+    };
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') this.scheduler.flush();
+      if (document.visibilityState === 'hidden') flush();
+      else if (this.saver.previewsDirty.size > 0) this.scheduler.changed(); // previews skipped while hidden
     });
-    window.addEventListener('pagehide', () => this.scheduler.flush());
+    window.addEventListener('pagehide', flush);
   }
 
   // --- opening ----------------------------------------------------------------
@@ -127,12 +141,34 @@ export class ProjectSession {
       if (!doc) throw new Error('This project has more tiles than fit in memory');
       docs.push(doc);
     }
+    const previews = await Promise.all(copy.records.map((r) => this.loadPreviews(r)));
     renderer.adoptStoredTiles(fresh);
     workspace.load(docs, copy.manifest.canvasCounter, copy.manifest.activeCanvasId);
+    copy.records.forEach((r, i) => {
+      if (previews[i]) renderer.seedPreviews(r.id, previews[i]!);
+    });
     const recordHashes: ObjectHash[] = copy.manifest.canvases.map((c) => c.record);
     this.saver.remember(copy.records, recordHashes, copy.manifest, opened.head);
     this.afterOpen(opened.head?.updatedAt ?? null);
     return copy.manifest.view;
+  }
+
+  /**
+   * A canvas's saved preview tiles, ready to seed into the renderer: every
+   * pinned tile of its size (transparent where none was stored). Null if
+   * the record has none (it was saved before its previews were ready).
+   */
+  private async loadPreviews(record: CanvasRecord): Promise<PreviewTile[] | null> {
+    const keys = PyramidPlanner.pinnedKeys(record);
+    const saved = new Map(record.previews.map((p) => [p.level, p.tiles]));
+    if (keys.some((k) => !saved.has(k.level))) return null;
+    return Promise.all(
+      keys.map(async ({ level, key }) => {
+        const { tx, ty } = tileCoords(key);
+        const hash = saved.get(level)![tileMapKey(tx, ty)];
+        return { level, key, rgba: hash ? await this.deps.storage.getTile(hash) : new Uint8Array(TILE_BYTES) };
+      }),
+    );
   }
 
   /** Create a project (with the default canvases), open it and save it. */
@@ -167,6 +203,8 @@ export class ProjectSession {
         const state = this.scheduler.hasUnsavedChanges ? 'unsaved' : 'saved';
         this.setStatus({ state, savedAt: stats.committed ? Date.now() : this.status.savedAt, message: null, quota: false });
       }
+      // A preview that wasn't up to date (or was skipped) is saved by another save shortly after.
+      if (this.saver.previewsDirty.size > 0 && document.visibilityState === 'visible') this.scheduler.changed();
       this.onSaved?.(stats);
       return stats;
     } catch (error) {

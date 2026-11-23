@@ -18,6 +18,13 @@ export interface Size {
   height: number;
 }
 
+/** Phase 4: one tile of a canvas's saved preview (pyramid `level`, tile `key` at that level, premultiplied RGBA). */
+export interface PreviewTile {
+  level: number;
+  key: TileKey;
+  rgba: Uint8Array;
+}
+
 /**
  * Backend-independent half of both renderers. It queues work, keeps the
  * canvases' render state, runs the pyramid planner, and packs everything the
@@ -97,6 +104,8 @@ export interface Frame {
   readbacks: Readback[];
   /** Per-canvas GPU resources to release. */
   removedCanvases: CanvasId[];
+  /** Phase 4: saved preview tiles to write into preview-pool slots before anything else (an opened project). */
+  previewUploads: { slot: TileSlot; rgba: Uint8Array }[];
   /** Composite work in dependency order: sources' stages before their inheritors'. */
   stages: CompositeStage[];
   display: { tiles: Float32Array; solids: Float32Array; runs: DisplayRun[] };
@@ -159,6 +168,12 @@ export class RenderCore {
   private chainPending = new Map<CanvasId, number>();
   /** Inheritors that changed through an arrow in the last frame (for the HUD). */
   inheritorsUpdated = 0;
+  /** Preview reads for saving, answered after the next plan (see `readPreviewTiles`). */
+  private previewReads: { canvasId: CanvasId; resolve: (tiles: PreviewTile[] | null) => void }[] = [];
+  /** Saved previews of canvases not yet passed to setCanvases. */
+  private readonly pendingSeeds = new Map<CanvasId, readonly PreviewTile[]>();
+  /** Saved preview tiles waiting to be uploaded (see `seedPreviews`). */
+  private previewUploads: { slot: TileSlot; rgba: Uint8Array }[] = [];
   /** Layer tiles to read back for saving, oldest first (see `readLayerTiles`). */
   private tileReads: { id: TileId; resolve: (rgba: Uint8Array | null) => void }[] = [];
   private strokeCanvas: CanvasId | null = null;
@@ -218,6 +233,7 @@ export class RenderCore {
       const before = previous.get(c.id);
       if (before && (before.inherited ?? null) !== (c.inherited ?? null)) this.invalidate(c.id, 'all');
     }
+    for (const [id, tiles] of this.pendingSeeds) if (this.byId.has(id)) this.seedPreviews(id, tiles);
   }
 
   canvas(id: CanvasId): CanvasRenderState | undefined {
@@ -320,6 +336,56 @@ export class RenderCore {
       });
     }
     return now.length > 0 && later.length > 0;
+  }
+
+  /**
+   * Phase 4: the canvas's pinned preview tiles (levels 3–4 of its composite)
+   * for saving, read back after the next frame's composites; null if they
+   * aren't complete and up to date then (try again later).
+   */
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null> {
+    return new Promise((resolve) => this.previewReads.push({ canvasId, resolve }));
+  }
+
+  /**
+   * Phase 4: show an opened canvas from its saved preview tiles. Its cache
+   * starts with these as complete pinned levels, and changes already queued
+   * for it are dropped (they only said "everything is new"), so nothing has
+   * to be composited, and no layer tile loaded, to show it zoomed out.
+   * If `setCanvases` doesn't include the canvas yet, this happens when it
+   * does. Returns false if the preview pool is full.
+   */
+  seedPreviews(canvasId: CanvasId, tiles: readonly PreviewTile[]): boolean {
+    const c = this.byId.get(canvasId);
+    if (!c) {
+      this.pendingSeeds.set(canvasId, tiles); // applied when setCanvases brings the canvas
+      return true;
+    }
+    this.pendingSeeds.delete(canvasId);
+    const slots = this.planner.seed(canvasId, c.placement, paperRgba(c), tiles);
+    if (!slots) return false;
+    slots.forEach((slot, i) => this.previewUploads.push({ slot, rgba: tiles[i]!.rgba }));
+    this.pendingChanges.delete(canvasId);
+    this.chainPending.delete(canvasId);
+    return true;
+  }
+
+  /** Answer this frame's preview reads (after the plan, so the frame's own updates are included). */
+  private takePreviewReads(readbacks: Readback[]): void {
+    for (const { canvasId, resolve } of this.previewReads) {
+      const tiles = this.planner.pinnedTiles(canvasId);
+      if (!tiles) {
+        resolve(null);
+        continue;
+      }
+      readbacks.push({
+        kind: 'tiles',
+        pool: 'preview',
+        slots: tiles.map((t) => t.slot),
+        resolve: (rgba) => resolve(tiles.map((t, i) => ({ level: t.level, key: t.key, rgba: rgba[i]! }))),
+      });
+    }
+    this.previewReads = [];
   }
 
   beginStroke(canvasId: CanvasId): void {
@@ -442,6 +508,7 @@ export class RenderCore {
     });
     const plan = this.planner.plan(plannerCanvases, view.visible, viewLevel);
     const followUps = this.blockFollowUps(plan, blocks, needs);
+    this.takePreviewReads(readbacks);
     const stages = this.packStages(plan, blocks, needs);
     for (const [id, keys] of followUps) this.invalidate(id, keys);
     const visibleCanvases = new Set(plan.display.map((q) => q.canvasId)).size;
@@ -452,6 +519,7 @@ export class RenderCore {
       prediction: drained.prediction,
       readbacks,
       removedCanvases: this.removed,
+      previewUploads: this.previewUploads,
       stages,
       display: this.packDisplay(plan.display, view, clipPerDevicePx),
       stats: {
@@ -469,6 +537,7 @@ export class RenderCore {
       moreWork: plan.overBudget || r.hasUploads || heldForRoom || followUps.size > 0 || moreTileReads,
     };
     this.removed = [];
+    this.previewUploads = [];
     return frame;
   }
 

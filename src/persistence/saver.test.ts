@@ -24,6 +24,8 @@ async function setup() {
   await storage.openProject((await storage.createProject('Test')).id);
   const pixels = new Map<TileId, number>();
   const reads: TileId[][] = [];
+  /** What the renderer answers for previews: one level-4 tile, or null (not ready). */
+  const preview = { ready: true, value: 4 };
   const saver = new ProjectSaver({
     workspace,
     hashes,
@@ -32,7 +34,7 @@ async function setup() {
       reads.push([...ids]);
       return ids.map((id) => (store.refCount(id) > 0 ? new Uint8Array(TILE_BYTES).fill(pixels.get(id) ?? 0) : null));
     },
-    previews: () => [],
+    readPreviewTiles: async () => (preview.ready ? [{ level: 4, key: 0, rgba: new Uint8Array(TILE_BYTES).fill(preview.value) }] : null),
     view: () => undefined,
   });
   /** A stroke over `keys` whose new tiles get the pixel value `value`. */
@@ -40,7 +42,7 @@ async function setup() {
     const editor = workspace.editor(canvasId);
     for (const job of editor.commitStroke(editor.activeLayerId, keys, 'paint')!) pixels.set(job.dst, value);
   };
-  return { workspace, doc, hashes, files, storage, saver, stroke, reads };
+  return { workspace, doc, hashes, files, storage, saver, stroke, reads, preview };
 }
 
 describe('ProjectSaver', () => {
@@ -49,7 +51,7 @@ describe('ProjectSaver', () => {
     stroke([tileKey(0, 0), tileKey(1, 0)], 7);
     const stats = await saver.save();
     expect(stats.committed).toBe(true);
-    expect(stats.tilesWritten).toBe(1); // both tiles have the same pixels: stored once
+    expect(stats.tilesWritten).toBe(2); // both layer tiles have the same pixels (stored once), plus one preview tile
 
     const saved = (await storage.readProject(null))!;
     expect(saved.records).toHaveLength(1);
@@ -108,5 +110,27 @@ describe('ProjectSaver', () => {
     await saver.save();
     const saved = (await storage.readProject(null))!;
     expect(Object.keys(saved.records[0]!.layers[0]!.tiles)).toEqual(['1,0']);
+  });
+
+  it('saves previews with the record, and keeps the previous ones while new ones are not ready', async () => {
+    const { saver, stroke, storage, doc, preview } = await setup();
+    stroke([tileKey(0, 0)], 1);
+    await saver.save();
+    const first = (await storage.readProject(null))!.records[0]!.previews;
+    expect(first).toEqual([{ level: 4, tiles: { '0,0': expect.stringMatching(/^[0-9a-f]{64}$/) } }]);
+
+    // The composite changed, but its previews aren't rebuilt yet: keep the old ones, try again later.
+    preview.ready = false;
+    saver.previewsDirty.add(doc.id);
+    stroke([tileKey(1, 1)], 2);
+    await saver.save();
+    expect((await storage.readProject(null))!.records[0]!.previews).toEqual(first);
+    expect(saver.previewsDirty.has(doc.id)).toBe(true);
+
+    preview.ready = true;
+    preview.value = 9;
+    await saver.save();
+    expect((await storage.readProject(null))!.records[0]!.previews).not.toEqual(first);
+    expect(saver.previewsDirty.size).toBe(0);
   });
 });

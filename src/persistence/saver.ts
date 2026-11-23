@@ -1,6 +1,7 @@
-import type { CanvasId, PaintDocument } from '../document/paintDocument';
-import type { TileId } from '../document/tiles';
-import type { CanvasRecord, PreviewRecord, RootManifest } from '../storage/format';
+import type { CanvasId } from '../document/paintDocument';
+import { tileCoords, type TileId } from '../document/tiles';
+import type { PreviewTile } from '../render/renderer';
+import { tileMapKey, type CanvasRecord, type PreviewRecord, type RootManifest } from '../storage/format';
 import type { CanvasEntry } from '../storage/projectStore';
 import type { CommitReply, HeadEdit } from '../storage/service';
 import type { StorageClient } from '../storage/client';
@@ -12,6 +13,9 @@ import type { TileHashes } from './tileHashes';
 /**
  * Saves the working copy: one call to `save` is one save.
  *
+ *  0. Read back the previews (composite levels 3–4) of canvases whose
+ *     composite changed, and store them like tiles. A preview that isn't up
+ *     to date yet keeps its previous version and is tried at the next save.
  *  1. Find the layer tiles nothing has hashed yet, read them back from the
  *     GPU (asynchronously, a few per frame) and send them to the storage
  *     worker, which hashes, compresses and writes them.
@@ -30,8 +34,8 @@ export interface SaverDeps {
   hashes: TileHashes;
   storage: StorageClient;
   readLayerTiles(ids: readonly TileId[]): Promise<(Uint8Array | null)[]>;
-  /** The saved previews of a canvas (Phase 4 previews; empty until they exist). */
-  previews(doc: PaintDocument): PreviewRecord[];
+  /** The canvas's preview tiles (composite levels 3–4), or null if they aren't up to date yet. */
+  readPreviewTiles(canvasId: CanvasId): Promise<PreviewTile[] | null>;
   view(): RootManifest['view'] | undefined;
 }
 
@@ -50,6 +54,8 @@ export interface SaveOptions {
   thumbnail?: { name: string; bytes: Uint8Array };
   /** Commit even if nothing changed (a manual version of an unchanged project). */
   force?: boolean;
+  /** An urgent save (the page is being hidden): keep the previous previews, refresh them later. */
+  skipPreviews?: boolean;
 }
 
 /** Hash rounds before giving up on a moving target (strokes keep adding tiles). */
@@ -59,6 +65,12 @@ export class ProjectSaver {
   /** The last saved record of each canvas, and its hash. */
   private saved = new Map<CanvasId, { record: CanvasRecord; hash: ObjectHash }>();
   private savedManifest: string | null = null;
+  /** The camera of the last save. */
+  private savedView: string | null = null;
+  /** The current saved previews of each canvas. */
+  private previews = new Map<CanvasId, PreviewRecord[]>();
+  /** Canvases whose composite changed since their preview was saved. */
+  readonly previewsDirty = new Set<CanvasId>();
   head: CommitReply['head'] | null = null;
   lastStats: SaveStats | null = null;
 
@@ -67,7 +79,10 @@ export class ProjectSaver {
   /** After opening a project: what is on disk now, so the next save only writes changes. */
   remember(records: CanvasRecord[], hashes: ObjectHash[], manifest: RootManifest | null, head: CommitReply['head'] | null): void {
     this.saved = new Map(records.map((r, i) => [r.id, { record: r, hash: hashes[i]! }]));
+    this.previews = new Map(records.map((r) => [r.id, r.previews]));
+    this.previewsDirty.clear();
     this.savedManifest = manifest ? manifestKey(manifest.canvases.map((c) => c.id), manifest.canvasCounter) : null;
+    this.savedView = JSON.stringify(manifest?.view ?? null);
     this.head = head;
   }
 
@@ -76,6 +91,14 @@ export class ProjectSaver {
     const { workspace, hashes, storage } = this.deps;
     let tilesWritten = 0;
     let bytesWritten = 0;
+
+    // 0. Previews of canvases whose composite changed.
+    for (const doc of workspace.canvases) {
+      if (options.skipPreviews || (!this.previewsDirty.has(doc.id) && this.previews.has(doc.id))) continue;
+      const written = await this.savePreview(doc.id);
+      tilesWritten += written.tiles;
+      bytesWritten += written.bytes;
+    }
 
     // 1. Hash every tile the canvases use (the target moves while strokes go on).
     for (let round = 0; ; round++) {
@@ -91,7 +114,7 @@ export class ProjectSaver {
     const canvases: CanvasEntry[] = [];
     let recordsWritten = 0;
     for (const doc of workspace.canvases) {
-      const record = canvasRecord(doc, hashes, this.deps.previews(doc));
+      const record = canvasRecord(doc, hashes, this.previews.get(doc.id) ?? []);
       const previous = this.saved.get(doc.id);
       if (previous && recordsEqual(previous.record, record)) {
         canvases.push({ id: doc.id, hash: previous.hash });
@@ -101,7 +124,8 @@ export class ProjectSaver {
       }
     }
     const manifest = manifestKey(workspace.canvases.map((c) => c.id), workspace.canvasCounter);
-    if (recordsWritten === 0 && manifest === this.savedManifest && !options.force && !options.head) {
+    const unchanged = recordsWritten === 0 && manifest === this.savedManifest && !this.viewChanged();
+    if (unchanged && !options.force && !options.head) {
       return (this.lastStats = { ms: performance.now() - start, bytesWritten, tilesWritten, recordsWritten, committed: false });
     }
 
@@ -123,9 +147,43 @@ export class ProjectSaver {
     }
     this.saved = next;
     this.savedManifest = manifest;
+    this.savedView = JSON.stringify(view ?? null);
     this.head = reply.head;
     bytesWritten += reply.bytesWritten;
     return (this.lastStats = { ms: performance.now() - start, bytesWritten, tilesWritten, recordsWritten, committed: true });
+  }
+
+  /** True if the camera moved since the last save (saved when the page is hidden, not on every pan). */
+  viewChanged(): boolean {
+    return JSON.stringify(this.deps.view() ?? null) !== this.savedView;
+  }
+
+  /** Store the canvas's current preview tiles, if they are up to date. */
+  private async savePreview(canvasId: CanvasId): Promise<{ tiles: number; bytes: number }> {
+    this.previewsDirty.delete(canvasId); // changes from now on mark it again
+    const tiles = await this.deps.readPreviewTiles(canvasId);
+    if (!tiles) {
+      this.previewsDirty.add(canvasId);
+      return { tiles: 0, bytes: 0 };
+    }
+    const results = await this.deps.storage.putTiles(tiles.map((t) => t.rgba));
+    const levels = new Map<number, PreviewRecord>();
+    let written = 0;
+    let bytes = 0;
+    tiles.forEach((t, i) => {
+      const result = results[i];
+      if (result && result.written > 0) {
+        written++;
+        bytes += result.written;
+      }
+      let level = levels.get(t.level);
+      if (!level) levels.set(t.level, (level = { level: t.level, tiles: {} }));
+      if (!result) return; // transparent: left out
+      const { tx, ty } = tileCoords(t.key);
+      level.tiles[tileMapKey(tx, ty)] = result.hash;
+    });
+    this.previews.set(canvasId, [...levels.values()]);
+    return { tiles: written, bytes };
   }
 
   /** Read tiles back, have the worker store them, and note their hashes. */
