@@ -772,3 +772,41 @@ body {
   pointer-events: auto;
   white-space: nowrap;
 }
+
+/* --- save indicator (Phase 4) ------------------------------------------------ */
+
+.save-indicator {
+  min-width: 84px;
+  font-size: 13px;
+  color: var(--panel-muted);
+}
+
+.save-indicator::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #30d158; /* saved */
+  vertical-align: 1px;
+}
+
+.save-indicator[data-state='saving']::before,
+.save-indicator[data-state='unsaved']::before {
+  background: var(--panel-muted);
+}
+
+.save-indicator[data-state='error']::before,
+.save-indicator[data-state='not-persistent']::before {
+  background: #ff453a;
+}
+
+.save-indicator[data-state='error'],
+.save-indicator[data-state='not-persistent'] {
+  color: #ff453a;
+}
+
+.save-indicator[data-state='read-only']::before {
+  background: var(--warn);
+}

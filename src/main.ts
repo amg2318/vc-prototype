@@ -11,6 +11,10 @@ import type { Editor } from './document/editor';
 import type { Anchor } from './document/retile';
 import { hitTest, union, visibleWorkspaceRect } from './workspace/coords';
 import { Workspace } from './workspace/workspace';
+import type { PaintDocument } from './document/paintDocument';
+import { ProjectSession } from './persistence/projectSession';
+import { createStorageWorker, workerClient } from './storage/client';
+import { SaveIndicator } from './ui/saveIndicator';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -47,19 +51,35 @@ async function main(): Promise<void> {
   blockBrowserGestures(canvas);
 
   const workspace = new Workspace();
-  seedCanvases(workspace, Number(new URLSearchParams(location.search).get('canvases') ?? 1));
   renderer.useTileStore(workspace.store);
+
+  let view: ViewTransform = IDENTITY_VIEW;
+
+  // Phase 4: open the last project (saved in OPFS by the storage worker) and keep it saved.
+  const storage = workerClient(createStorageWorker());
+  const testCanvases = new URLSearchParams(location.search).get('canvases');
+  const project = new ProjectSession({
+    workspace,
+    renderer,
+    storage,
+    view: () => view,
+    newProjectCanvases: (ws) => seedCanvases(ws, Number(testCanvases ?? 1)),
+  });
+  // `?canvases=N` starts a new project with N canvases (for testing); otherwise the last project opens.
+  const savedView = testCanvases ? (await project.create(`Test: ${testCanvases} canvases`), undefined) : await project.openLast();
+  project.watchPageLifecycle();
   // Dev builds only: lets the desktop test scripts inspect renderer state.
-  if (import.meta.env.DEV) (window as unknown as { __debug: unknown }).__debug = { renderer, workspace };
+  if (import.meta.env.DEV) (window as unknown as { __debug: unknown }).__debug = { renderer, workspace, project, storage };
   /** The selected canvas's editor; null when no canvas is selected. */
   const active = (): Editor | null => workspace.activeEditor;
   const tools = new ToolState();
   const metrics = new Metrics();
 
-  let view: ViewTransform = IDENTITY_VIEW;
   let cssWidth = 1;
   let cssHeight = 1;
-  let hasFitted = false;
+  /** A saved camera is used as is; otherwise the first resize fits everything. */
+  let hasFitted = savedView !== undefined;
+  if (savedView) view = savedView;
 
   // --- render loop: only runs when something changed ----------------------
 
@@ -321,6 +341,7 @@ async function main(): Promise<void> {
       metrics.counters.strokes++;
       metrics.noteInput([sample], sample.timeStamp);
       strokes.begin(sample);
+      if (liveStroke) project.scheduler.strokeStarted();
     },
     strokeMove(samples, predicted) {
       metrics.noteInput(samples, samples[samples.length - 1]?.timeStamp ?? performance.now());
@@ -330,11 +351,14 @@ async function main(): Promise<void> {
       // A cancelled stroke (e.g. the OS claimed the touch) is still kept: losing
       // what was drawn is worse than keeping it. The HUD counts cancellations.
       if (cancelled) metrics.counters.cancelledStrokes++;
+      const drawing = liveStroke !== null;
       strokes.end();
+      if (drawing) project.scheduler.strokeEnded();
     },
     strokeDiscard() {
       metrics.counters.cancelledStrokes++;
       strokes.discard();
+      project.scheduler.strokeCancelled();
     },
     palmRejected() {
       metrics.counters.palmRejections++;
@@ -538,6 +562,18 @@ async function main(): Promise<void> {
   }
   renderer.onLost = (message) => showBanner(message, true);
 
+  // --- saving (Phase 4) ---------------------------------------------------------
+
+  const saveIndicator = new SaveIndicator((status) =>
+    showBanner(status.message ?? (status.savedAt ? `All changes saved (last save ${new Date(status.savedAt).toLocaleTimeString()}).` : 'Not saved yet.')),
+  );
+  toolbar.element.append(saveIndicator.element);
+  saveIndicator.update(project.status);
+  project.onStatus = (status) => {
+    saveIndicator.update(status);
+    if (status.state === 'error' && status.message) showBanner(status.message, status.quota);
+  };
+
   // Soft depth warning: whenever the deepest chain grows past the limit (by an arrow, the source
   // picker, or undo/redo), say so once. It never blocks.
   let deepestChain = workspace.graph().maxDepth();
@@ -596,21 +632,22 @@ async function main(): Promise<void> {
 }
 
 /**
- * The starting canvases: one 4096² canvas, or with `?canvases=N` a grid of
- * N A4 canvases (for testing many canvases before the canvas UI exists).
+ * The canvases of a new project: one 4096² canvas, or with `?canvases=N` a
+ * grid of N A4 canvases (for testing many canvases).
  */
-function seedCanvases(workspace: Workspace, count: number): void {
+function seedCanvases(workspace: Workspace, count: number): PaintDocument[] {
   const n = Math.max(1, Math.min(100, Math.floor(count) || 1));
   const size = n === 1 ? { width: 4096, height: 4096 } : { width: 2480, height: 3508 };
   const columns = Math.ceil(Math.sqrt(n));
   const gap = 300;
+  const docs: PaintDocument[] = [];
   for (let i = 0; i < n; i++) {
     const doc = workspace.newCanvas(size, `Canvas ${i + 1}`);
     doc.x = (i % columns) * (size.width + gap);
     doc.y = Math.floor(i / columns) * (size.height + gap);
-    workspace.attachCanvas(doc);
+    docs.push(doc);
   }
-  workspace.activeCanvasId = workspace.canvases[0]!.id;
+  return docs;
 }
 
 main().catch((error: unknown) => {
