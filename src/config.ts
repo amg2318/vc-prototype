@@ -83,6 +83,12 @@ export const HISTORY_BUDGET_BYTES = 256 * 1024 * 1024;
  */
 export const TILE_READBACKS_PER_FRAME = 16;
 
+/** Autosave of the working copy (Phase 4; see AutosaveScheduler). */
+export const SAVE = {
+  /** Wait this long after the last change (with no stroke in progress) before saving. */
+  debounceMs: 1500,
+};
+
 /** Layer thumbnails are this many pixels on their longest side. */
 export const THUMBNAIL_SIZE = 64;
 /** Wait this long after the last change before refreshing a layer thumbnail. */
