@@ -16,6 +16,7 @@ import { DiskTileBackingStore } from './diskTileBackingStore';
 import { ProjectSaver, type SaveOptions, type SaveStats } from './saver';
 import { canvasFromRecord } from './snapshot';
 import { TileHashes } from './tileHashes';
+import { isProjectLocked, tryLockProject, type HeldLock } from './projectLock';
 import type { RetentionRules } from './retention';
 import { ActiveTime, addVersionEdit, newVersion, workingCopyUnversioned } from './versions';
 import { renderWorkspaceThumbnail } from './workspaceThumbnail';
@@ -83,6 +84,8 @@ export class ProjectSession {
   /** Retention rules for automatic versions (the settings panel may change them). */
   retention: RetentionRules = { keepLatest: VERSIONS.keepLatest, dailyForDays: VERSIONS.dailyForDays };
   private persistent = true;
+  /** This tab's lock on the open project; null when another tab has it (read-only). */
+  private lock: HeldLock | null = null;
   private activeTime = new ActiveTime(0, VERSIONS.activeInputWindowMs);
   /** Version operations in progress (one at a time, so each edits the latest version list). */
   private busy: Promise<unknown> = Promise.resolve();
@@ -144,15 +147,28 @@ export class ProjectSession {
     return undefined;
   }
 
-  /** Save the current project, then load `id` (with a fresh undo history). */
+  /**
+   * Save the current project, then load `id` (with a fresh undo history).
+   * If another tab has it open, it opens read-only here.
+   */
   async open(id: ProjectId): Promise<RootManifest['view'] | undefined> {
     await this.scheduler.settle();
+    this.scheduler.paused = true; // loading is not a change to save
+    clearTimeout(this.gcTimer);
+    this.lock?.release();
+    this.lock = await tryLockProject(id);
+    this.backing.writeToDisk = this.lock !== null;
     const { storage, workspace } = this.deps;
     const opened = await storage.openProject(id);
     this.project = opened.info;
     localStorage.setItem(LAST_PROJECT_KEY, id);
     const copy = await storage.readProject(null);
-    this.scheduler.paused = true; // loading is not a change to save
+    if (!copy && this.readOnly) {
+      workspace.load(this.deps.newProjectCanvases(workspace), workspace.canvasCounter, null);
+      this.saver.remember([], [], null, opened.head);
+      this.afterOpen();
+      return undefined;
+    }
     if (!copy) {
       // Created but never saved: start it with the default canvases.
       workspace.load(this.deps.newProjectCanvases(workspace), workspace.canvasCounter, null);
@@ -165,7 +181,7 @@ export class ProjectSession {
     const recordHashes: ObjectHash[] = copy.manifest.canvases.map((c) => c.record);
     this.saver.remember(copy.records, recordHashes, copy.manifest, opened.head);
     this.activeTime = new ActiveTime(opened.head?.activeMsSinceVersion ?? 0, VERSIONS.activeInputWindowMs);
-    if (workingCopyUnversioned(opened.head)) {
+    if (!this.readOnly && workingCopyUnversioned(opened.head)) {
       // The previous session ended with changes no version holds: keep them as a version.
       const level4 = previews.map((p) => p?.find((t) => t.level === 4)?.rgba ?? null);
       await this.addVersionOfWorkingCopy('auto', 'session-ended', opened.head!.updatedAt, copy.records, level4).catch((error: unknown) =>
@@ -174,7 +190,7 @@ export class ProjectSession {
     }
     this.afterOpen(opened.head?.updatedAt ?? null);
     this.onVersions?.(this.versions);
-    this.scheduleGarbageCollection(GC.delayAfterOpenMs);
+    if (!this.readOnly) this.scheduleGarbageCollection(GC.delayAfterOpenMs);
     return copy.manifest.view;
   }
 
@@ -223,8 +239,9 @@ export class ProjectSession {
 
   /** User input (a stroke, an edit): counts as active time; may make an automatic version. */
   noteActivity(now = Date.now()): void {
+    if (this.readOnly) return;
     this.activeTime.input(now);
-    if (this.activeTime.ms < VERSIONS.autoAfterActiveMin * 60 * 1000 || this.status.state === 'read-only') return;
+    if (this.activeTime.ms < VERSIONS.autoAfterActiveMin * 60 * 1000) return;
     this.activeTime.reset(); // also stops a second trigger while this one runs
     void this.saveVersion('auto', 'active-time').catch((error: unknown) => console.error('Automatic version failed:', error));
   }
@@ -306,7 +323,7 @@ export class ProjectSession {
    * Returns null if it didn't run or was stopped.
    */
   async collectGarbage(): Promise<GcStats | null> {
-    if (this.gcRunning || !this.persistent || this.status.state === 'read-only') return null;
+    if (this.gcRunning || !this.persistent || this.readOnly) return null;
     const { storage } = this.deps;
     const projectId = this.project?.id;
     this.gcRunning = true;
@@ -368,6 +385,7 @@ export class ProjectSession {
   }
 
   private async editVersions(change: (versions: VersionEntry[]) => VersionEntry[]): Promise<void> {
+    if (this.readOnly) throw new Error('This project is read-only in this tab');
     await this.exclusive(async () => {
       const head = this.saver.head;
       if (head) await this.applyHeadEdit({ versions: change([...head.versions]) });
@@ -402,18 +420,85 @@ export class ProjectSession {
   }
 
   private afterOpen(savedAt: number | null = null): void {
-    this.scheduler.paused = false;
-    this.setStatus(
-      this.persistent
-        ? { state: 'saved', savedAt, message: null, quota: false }
-        : { state: 'not-persistent', savedAt: null, message: 'Storage is unavailable: nothing is saved on this device', quota: false },
-    );
+    this.scheduler.paused = this.readOnly;
+    if (!this.persistent) {
+      this.setStatus({ state: 'not-persistent', savedAt: null, message: 'Storage is unavailable: nothing is saved on this device', quota: false });
+    } else if (this.readOnly) {
+      this.setStatus({
+        state: 'read-only',
+        savedAt,
+        message: 'This project is open in another tab, so it is read-only here: changes made in this tab are not saved.',
+        quota: false,
+      });
+    } else {
+      this.setStatus({ state: 'saved', savedAt, message: null, quota: false });
+    }
+  }
+
+  /** True when another tab has the open project (nothing is saved here). */
+  get readOnly(): boolean {
+    return this.lock === null;
+  }
+
+  // --- projects ---------------------------------------------------------------
+
+  listProjects(): Promise<ProjectInfo[]> {
+    return this.deps.storage.listProjects();
+  }
+
+  async renameProject(id: ProjectId, name: string): Promise<void> {
+    const info = await this.deps.storage.renameProject(id, name);
+    if (id === this.project?.id) this.project = info;
+  }
+
+  /** Copy a project into a new one (not opened). Refused while another tab is changing it. */
+  async duplicateProject(id: ProjectId, name: string): Promise<ProjectInfo> {
+    if (id === this.project?.id) {
+      if (this.readOnly) throw new Error('This project is open in another tab: duplicate it there');
+      await this.scheduler.settle();
+      this.scheduler.paused = true; // no commit may replace a manifest while its files are copied
+      try {
+        return await this.deps.storage.duplicateProject(id, name);
+      } finally {
+        this.scheduler.paused = false;
+        if (this.scheduler.hasUnsavedChanges) this.scheduler.changed(); // strokes made meanwhile
+      }
+    }
+    const lock = await tryLockProject(id);
+    if (!lock) throw new Error('That project is open in another tab: close it there first');
+    try {
+      return await this.deps.storage.duplicateProject(id, name);
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * Delete a project and everything in it. Refused while another tab has it
+   * open. Deleting the open project opens the most recent other one (or a
+   * new one); the result says so, with that project's saved camera.
+   */
+  async deleteProject(id: ProjectId): Promise<{ reopened: boolean; view: RootManifest['view'] | undefined }> {
+    let reopened = false;
+    let view: RootManifest['view'] | undefined;
+    if (id === this.project?.id) {
+      if (this.readOnly) throw new Error('This project is open in another tab: close it there first');
+      const next = (await this.listProjects()).filter((p) => p.id !== id).sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
+      if (next) view = await this.open(next.id);
+      else await this.create('Untitled project');
+      reopened = true;
+    } else if (await isProjectLocked(id)) {
+      throw new Error('That project is open in another tab: close it there first');
+    }
+    await this.deps.storage.deleteProject(id);
+    return { reopened, view };
   }
 
   // --- saving -----------------------------------------------------------------
 
   /** Save now (e.g. before an operation that must see everything saved). */
   async saveNow(options: SaveOptions = {}): Promise<SaveStats> {
+    if (this.readOnly) throw new Error('This project is read-only in this tab');
     await this.scheduler.settle();
     return this.saveWorkingCopy(options);
   }

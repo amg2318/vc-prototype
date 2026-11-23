@@ -23,6 +23,11 @@ export class DiskTileBackingStore implements TileBackingStore {
   private readonly writing = new Map<TileId, Promise<void>>();
   /** Tiles that couldn't be written to disk. */
   private readonly fallback = new CompressedTileStore();
+  /**
+   * False in a read-only tab: evicted tiles stay compressed in memory, since
+   * the tab that owns the project may garbage-collect anything it doesn't use.
+   */
+  writeToDisk = true;
   /** Called when a write fails (e.g. storage full). */
   onWriteError: ((error: unknown) => void) | null = null;
 
@@ -38,6 +43,7 @@ export class DiskTileBackingStore implements TileBackingStore {
 
   put(id: TileId, rgba: Uint8Array): Promise<void> {
     if (this.hashes.has(id)) return Promise.resolve(); // already on disk
+    if (!this.writeToDisk) return this.fallback.put(id, rgba);
     const generation = this.store.generation(id);
     const done = this.storage
       .putTiles([rgba])

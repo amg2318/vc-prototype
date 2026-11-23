@@ -10,6 +10,7 @@ export interface ToolbarActions {
   toggleLayers(): void;
   toggleCanvases(): void;
   toggleHistory(): void;
+  toggleProjects(): void;
   toggleFingerDrawing(): void;
   toggleArrows(): void;
 }
@@ -56,6 +57,7 @@ export class Toolbar {
       button('Canvases', actions.toggleCanvases, 'Canvases'),
       button('Layers', actions.toggleLayers, 'Layers'),
       button('History', actions.toggleHistory, 'Versions of this project'),
+      button('Projects', actions.toggleProjects, 'Projects on this device'),
     );
   }
 

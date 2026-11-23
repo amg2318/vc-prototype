@@ -16,6 +16,7 @@ import { ProjectSession } from './persistence/projectSession';
 import { createStorageWorker, workerClient } from './storage/client';
 import { SaveIndicator } from './ui/saveIndicator';
 import { HistoryPanel } from './ui/historyPanel';
+import { ProjectsPanel } from './ui/projectsPanel';
 import { blockBrowserGestures } from './input/blockBrowserGestures';
 import { PointerInput, inputCapabilities, type EyedropperPhase } from './input/pointerInput';
 import { registerServiceWorker } from './pwa/registerServiceWorker';
@@ -514,7 +515,7 @@ async function main(): Promise<void> {
     fitAll: () => setView(fitAll()),
   });
   // The layers, canvases and history panels share the right-hand side: one at a time.
-  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel];
+  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel, projectsPanel];
   function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
     const show = !panel.visible;
     for (const p of sidePanels()) p.setVisible(p === panel && show);
@@ -545,6 +546,51 @@ async function main(): Promise<void> {
     console.error(error);
     showBanner(`Version history: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const projectsPanel = new ProjectsPanel({
+    list: () => project.listProjects(),
+    estimate: async () => {
+      const e = await navigator.storage?.estimate?.();
+      return e?.usage !== undefined && e.quota !== undefined ? { usage: e.usage, quota: e.quota } : null;
+    },
+    currentId: () => project.project?.id ?? null,
+    currentReadOnly: () => project.readOnly,
+    create: () => void switchProject(() => project.create('Untitled project').then(() => undefined)),
+    open: (p) => void switchProject(() => project.open(p.id)),
+    rename: (p, name) => void project.renameProject(p.id, name).then(() => projectsPanel.refresh(), reportProjectError),
+    duplicate: (p) =>
+      void project.duplicateProject(p.id, `${p.name} copy`).then((copy) => {
+        showBanner(`Made “${copy.name}”.`);
+        return projectsPanel.refresh();
+      }, reportProjectError),
+    remove: (p) =>
+      void switchProject(async () => {
+        const { reopened, view: saved } = await project.deleteProject(p.id);
+        showBanner(`Deleted “${p.name}”.`);
+        return reopened ? saved : null;
+      }),
+  });
+  /**
+   * Run a project operation that may load another project, then show it:
+   * the saved camera if it has one, else fit everything. `null` = the
+   * workspace didn't change.
+   */
+  async function switchProject(task: () => Promise<ViewTransform | undefined | null>): Promise<void> {
+    try {
+      const saved = await task();
+      if (saved !== null) {
+        setView(saved ?? fitAll());
+        historyPanel.setVersions(project.versions);
+        refreshUi();
+      }
+      await projectsPanel.refresh();
+    } catch (error) {
+      reportProjectError(error);
+    }
+  }
+  function reportProjectError(error: unknown): void {
+    console.error(error);
+    showBanner(error instanceof Error ? error.message : String(error));
+  }
   const toolbar = new Toolbar({
     selectTool,
     undo,
@@ -562,6 +608,7 @@ async function main(): Promise<void> {
     },
     toggleCanvases: () => togglePanel(canvasPanel),
     toggleHistory: () => togglePanel(historyPanel),
+    toggleProjects: () => togglePanel(projectsPanel),
   });
 
   function refreshUi(): void {
@@ -603,7 +650,9 @@ async function main(): Promise<void> {
   project.onStatus = (status) => {
     saveIndicator.update(status);
     if (status.state === 'error' && status.message) showBanner(status.message, status.quota);
+    if (status.state === 'read-only' && status.message) showBanner(status.message, true);
   };
+  if (project.readOnly && project.status.message) showBanner(project.status.message, true);
 
   // Soft depth warning: whenever the deepest chain grows past the limit (by an arrow, the source
   // picker, or undo/redo), say so once. It never blocks.
@@ -637,7 +686,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, projectsPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({

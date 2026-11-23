@@ -105,4 +105,20 @@ describe('ProjectSession versions', () => {
     await session.saveNow();
     expect(await savedValue()).toBe(5);
   });
+
+  it('duplicates a project with its content, and deleting the open project opens another', async () => {
+    const { session, stroke, savedValue } = await setup();
+    stroke(5);
+    await session.saveVersion('manual');
+    const original = session.project!;
+    const copy = await session.duplicateProject(original.id, 'Copy');
+    expect(session.project!.id).toBe(original.id); // the copy isn't opened
+
+    const result = await session.deleteProject(original.id);
+    expect(result.reopened).toBe(true);
+    expect(session.project!.id).toBe(copy.id);
+    expect(await savedValue()).toBe(5);
+    expect(session.versions).toHaveLength(1);
+    expect((await session.listProjects()).map((p) => p.name)).toEqual(['Copy']);
+  });
 });
