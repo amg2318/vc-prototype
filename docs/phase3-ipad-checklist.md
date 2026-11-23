@@ -11,8 +11,8 @@ so "one or two frames" means a `chain ms` of about 17 ms or less (33 ms at 60 Hz
 
 | Field                                       | Value |
 | ------------------------------------------- | ----- |
-| iPad model and RAM                          |       |
-| iPadOS / Safari version                     |       |
+| iPad model and RAM                          | Pro, 3rd generation, 256GB |
+| iPadOS / Safari version                     | 26.5  |
 | Display refresh rate (60 Hz / 120 Hz)       |       |
 | Pencil model                                |       |
 | HUD `renderer` line                         |       |
@@ -58,10 +58,10 @@ Build a Chain of 5. Zoom so that only the **last** canvas fills the screen.
 
 | Check | Result |
 | ----- | ------ |
-| Draw on the last canvas's own layer: smooth, block still shows underneath | |
-| Pan so only the **root** is on screen, draw a stroke, then pan back to the end of the chain: is the stroke there? How long until it appears (immediately / brief soft preview / blank)? | |
-| With the root half on screen and the last canvas half on screen, draw on the root: does the visible inheritor update during the stroke? | |
-| HUD `inheritance … stale` while drawing with inheritors off screen, and after pen-up (should return to 0) | |
+| Draw on the last canvas's own layer: smooth, block still shows underneath | yes |
+| Pan so only the **root** is on screen, draw a stroke, then pan back to the end of the chain: is the stroke there? How long until it appears (immediately / brief soft preview / blank)? | immediately but briefly soft preview |
+| With the root half on screen and the last canvas half on screen, draw on the root: does the visible inheritor update during the stroke? | yes |
+| HUD `inheritance … stale` while drawing with inheritors off screen, and after pen-up (should return to 0) | yes |
 
 ## 4. Fast panning with chains
 
