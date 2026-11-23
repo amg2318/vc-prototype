@@ -134,7 +134,7 @@ export class ProjectSession {
   /** Save the current project, then load `id` (with a fresh undo history). */
   async open(id: ProjectId): Promise<RootManifest['view'] | undefined> {
     await this.scheduler.settle();
-    const { storage, workspace, renderer } = this.deps;
+    const { storage, workspace } = this.deps;
     const opened = await storage.openProject(id);
     this.project = opened.info;
     localStorage.setItem(LAST_PROJECT_KEY, id);
@@ -148,19 +148,7 @@ export class ProjectSession {
       await this.saveNow();
       return undefined;
     }
-    const fresh: TileId[] = [];
-    const docs: PaintDocument[] = [];
-    for (const record of copy.records) {
-      const doc = canvasFromRecord(record, workspace.store, this.hashes, (tileId) => fresh.push(tileId));
-      if (!doc) throw new Error('This project has more tiles than fit in memory');
-      docs.push(doc);
-    }
-    const previews = await Promise.all(copy.records.map((r) => this.loadPreviews(r)));
-    renderer.adoptStoredTiles(fresh);
-    workspace.load(docs, copy.manifest.canvasCounter, copy.manifest.activeCanvasId);
-    copy.records.forEach((r, i) => {
-      if (previews[i]) renderer.seedPreviews(r.id, previews[i]!);
-    });
+    const previews = await this.load(copy);
     const recordHashes: ObjectHash[] = copy.manifest.canvases.map((c) => c.record);
     this.saver.remember(copy.records, recordHashes, copy.manifest, opened.head);
     this.activeTime = new ActiveTime(opened.head?.activeMsSinceVersion ?? 0, VERSIONS.activeInputWindowMs);
@@ -174,6 +162,25 @@ export class ProjectSession {
     this.afterOpen(opened.head?.updatedAt ?? null);
     this.onVersions?.(this.versions);
     return copy.manifest.view;
+  }
+
+  /** Put a saved project state into the workspace (clearing undo history). Returns each canvas's previews. */
+  private async load(copy: { manifest: RootManifest; records: CanvasRecord[] }): Promise<(PreviewTile[] | null)[]> {
+    const { workspace, renderer } = this.deps;
+    const fresh: TileId[] = [];
+    const docs: PaintDocument[] = [];
+    for (const record of copy.records) {
+      const doc = canvasFromRecord(record, workspace.store, this.hashes, (tileId) => fresh.push(tileId));
+      if (!doc) throw new Error('This project has more tiles than fit in memory');
+      docs.push(doc);
+    }
+    const previews = await Promise.all(copy.records.map((r) => this.loadPreviews(r)));
+    renderer.adoptStoredTiles(fresh);
+    workspace.load(docs, copy.manifest.canvasCounter, copy.manifest.activeCanvasId);
+    copy.records.forEach((r, i) => {
+      if (previews[i]) renderer.seedPreviews(r.id, previews[i]!);
+    });
+    return previews;
   }
 
   /**
@@ -222,6 +229,37 @@ export class ProjectSession {
       const records = this.saver.savedRecords();
       const level4 = await Promise.all(records.map((r) => this.level4Preview(r)));
       return this.addVersionOfWorkingCopy(kind, reason, Date.now(), records, level4);
+    });
+  }
+
+  /**
+   * Make `version` the working copy. The current state is saved first and,
+   * unless a version already holds it, kept as a "Before restore" version.
+   * Undo history is cleared (it described the state being replaced). The
+   * camera stays where it is. Returns the "Before restore" version, if one
+   * was made.
+   */
+  async restoreVersion(version: VersionEntry): Promise<VersionEntry | null> {
+    await this.saveNow();
+    return this.exclusive(async () => {
+      let before: VersionEntry | null = null;
+      if (workingCopyUnversioned(this.saver.head)) {
+        const records = this.saver.savedRecords();
+        const level4 = await Promise.all(records.map((r) => this.level4Preview(r)));
+        before = await this.addVersionOfWorkingCopy('auto', 'before-restore', Date.now(), records, level4);
+      }
+      const copy = await this.deps.storage.readProject(version.manifestId);
+      if (!copy) throw new Error(`Version “${version.name}” has no saved state`);
+      this.scheduler.paused = true; // loading is not a change to save
+      try {
+        await this.load(copy);
+        this.saver.remember(copy.records, copy.manifest.canvases.map((c) => c.record), copy.manifest, this.saver.head);
+      } finally {
+        this.scheduler.paused = false;
+      }
+      // The restored state becomes the working copy (its records and tiles are reused, not copied).
+      await this.saveWorkingCopy({ force: true });
+      return before;
     });
   }
 

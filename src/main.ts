@@ -521,6 +521,11 @@ async function main(): Promise<void> {
   }
   const historyPanel = new HistoryPanel({
     saveVersion: () => void saveVersion(),
+    restore: (v) =>
+      void project.restoreVersion(v).then((before) => {
+        const kept = before ? `Your previous state is kept as “${before.name}”.` : 'Your previous state was already a version.';
+        showBanner(`Restored “${v.name}”. ${kept} Undo history was cleared.`);
+      }, reportVersionError),
     rename: (v, name) => void project.renameVersion(v.id, name).catch(reportVersionError),
     pin: (v, pinned) => void project.pinVersion(v.id, pinned).catch(reportVersionError),
     remove: (v) => void project.deleteVersion(v.id).then(() => showBanner(`Deleted “${v.name}”.`), reportVersionError),
