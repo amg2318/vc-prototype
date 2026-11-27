@@ -6,12 +6,12 @@ import settingsIcon from '../assets/icons/settings.svg';
 import { PROJECT_FILE_EXTENSION } from '../storage/archive';
 import type { ProjectInfo } from '../storage/format';
 import { relativeDay } from './relativeDay';
-import { StorageSection, type StorageActions } from './storageSection';
+import { formatBytes, StorageSection, type StorageActions } from './storageSection';
 
 /**
  * The Projects page (Figma "projects page" frames): the screen the app opens
  * on, covering the workspace. Every project on this device is a card showing its
- * workspace as last saved and the day it was last opened; tapping one opens it. "New project" creates one and opens it. The settings button
+ * workspace as last saved, the day it was last opened and its size; tapping one opens it. "New project" creates one and opens it. The settings button
  * shows storage settings; each card's ⋮ button has rename, duplicate, export
  * and delete (delete asks again). The page has no close button: it goes away
  * when a project opens.
@@ -169,7 +169,7 @@ export class ProjectsPage {
     const text = document.createElement('div');
     text.className = 'project-text';
     text.append(this.renaming === p.id ? this.nameInput(p) : Object.assign(document.createElement('div'), { className: 'project-name', textContent: p.name }));
-    text.append(Object.assign(document.createElement('div'), { className: 'project-meta', textContent: relativeDay(p.lastOpenedAt) }));
+    text.append(Object.assign(document.createElement('div'), { className: 'project-meta', textContent: `${relativeDay(p.lastOpenedAt)} · ${formatBytes(p.sizeBytes)}` }));
 
     const more = document.createElement('button');
     more.type = 'button';
