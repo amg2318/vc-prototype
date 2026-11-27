@@ -43,6 +43,26 @@ describe('StorageService', () => {
     expect(await storage.getTile(copy.records[0]!.layers[0]!.tiles['0,0']!)).toEqual(tile(7));
   });
 
+  it("reads any project's last saved canvases and level-4 previews, without opening it", async () => {
+    const { storage } = setup();
+    const sketches = await storage.createProject('Sketches');
+    const never = await storage.createProject('Never saved');
+    await storage.openProject(sketches.id);
+    const [layer, preview] = await storage.putTiles([tile(3), tile(9)]);
+    await storage.commit({
+      canvases: [{ id: 'canvas-1', record: { ...record('canvas-1', layer!.hash), x: 40, previews: [{ level: 4, tiles: { '0,0': preview!.hash } }] } }],
+      canvasCounter: 1,
+      activeCanvasId: 'canvas-1',
+    });
+    await storage.openProject(never.id); // another project is open now
+
+    const saved = (await storage.workingPreview(sketches.id))!;
+    expect(saved.canvases).toHaveLength(1);
+    expect(saved.canvases[0]).toMatchObject({ x: 40, y: 0, width: 256, height: 256, paperVisible: true });
+    expect(saved.canvases[0]!.preview).toEqual(tile(9));
+    expect(await storage.workingPreview(never.id)).toBeNull();
+  });
+
   it('adds a version pointing at the manifest a commit writes', async () => {
     const { storage } = setup();
     await storage.openProject((await storage.createProject('P')).id);

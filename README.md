@@ -183,12 +183,14 @@ save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for det
   pinned version; of the automatic ones, the newest 10, then the newest of each day for 30 days, then the
   newest of each week. Both numbers can be changed in **Projects page → Settings (gear)**.
 - **Projects page** (design from Figma: "projects page" vertical / horizontal / empty state): the app
-  opens on it. Every project on this device is a card (newest first) with when it was last opened and its
-  size; tap a card to open it. **New project** creates one and opens it. Each card's **⋮** menu has
+  opens on it. Every project on this device is a card (newest first) with a snapshot of its workspace as
+  last saved and the day it was last opened ("Today", "Thursday", or a date after a week); tap a card to
+  open it. Going to the page saves the open project first, so its card is up to date. **New project** creates one and opens it. Each card's **⋮** menu has
   **Rename**, **Duplicate**, **Export…** (with or without version history) and **Delete…** (asks again).
   With no projects it says "No projects yet". The last opened project is loaded behind the page, so
-  tapping its card shows it at once; deleting the open project closes it. The card picture is still the
-  design's placeholder (real previews need the storage worker to read other projects' thumbnails).
+  tapping its card shows it at once; deleting the open project closes it. The snapshot is drawn on the
+  CPU from each canvas's saved 1/16-scale preview (as version thumbnails are), read by the storage worker
+  without opening the project; saves write nothing extra for it. Project sizes are in Settings.
 - **Settings** (the gear on the Projects page): storage use (all projects, against the browser's
   estimate); whether the browser may clear stored projects, with a button to ask it not to; the
   retention settings; **Delete automatic versions…** and **Clean up** (removes data nothing uses; this

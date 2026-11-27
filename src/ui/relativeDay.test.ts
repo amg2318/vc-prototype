@@ -6,10 +6,10 @@ describe('relativeDay', () => {
   const now = new Date(2026, 10, 27, 15, 0).getTime();
   const at = (day: number, hour = 10): number => new Date(2026, 10, day, hour).getTime();
 
-  it('says today and yesterday by calendar day, not by 24-hour periods', () => {
-    expect(relativeDay(at(27, 0), now, 'en-US')).toBe('today');
-    expect(relativeDay(at(26, 23), now, 'en-US')).toBe('yesterday');
-    expect(relativeDay(at(26, 1), now, 'en-US')).toBe('yesterday');
+  it('says Today and Yesterday by calendar day, not by 24-hour periods', () => {
+    expect(relativeDay(at(27, 0), now, 'en-US')).toBe('Today');
+    expect(relativeDay(at(26, 23), now, 'en-US')).toBe('Yesterday');
+    expect(relativeDay(at(26, 1), now, 'en-US')).toBe('Yesterday');
   });
 
   it('names the weekday within the last week', () => {

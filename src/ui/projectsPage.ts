@@ -6,12 +6,12 @@ import settingsIcon from '../assets/icons/settings.svg';
 import { PROJECT_FILE_EXTENSION } from '../storage/archive';
 import type { ProjectInfo } from '../storage/format';
 import { relativeDay } from './relativeDay';
-import { formatBytes, StorageSection, type StorageActions } from './storageSection';
+import { StorageSection, type StorageActions } from './storageSection';
 
 /**
  * The Projects page (Figma "projects page" frames): the screen the app opens
- * on, covering the workspace. Every project on this device is a card; tapping
- * one opens it. "New project" creates one and opens it. The settings button
+ * on, covering the workspace. Every project on this device is a card showing its
+ * workspace as last saved and the day it was last opened; tapping one opens it. "New project" creates one and opens it. The settings button
  * shows storage settings; each card's ⋮ button has rename, duplicate, export
  * and delete (delete asks again). The page has no close button: it goes away
  * when a project opens.
@@ -20,9 +20,8 @@ export interface ProjectsPageActions {
   list(): Promise<ProjectInfo[]>;
   /** The browser's estimate of storage used and available (bytes), if known. */
   estimate(): Promise<{ usage: number; quota: number } | null>;
-  currentId(): string | null;
-  /** True if the current project is read-only in this tab. */
-  currentReadOnly(): boolean;
+  /** A picture of the project's workspace as last saved (PNG), or null if it has none. */
+  snapshot(project: ProjectInfo): Promise<Uint8Array | null>;
   create(): void;
   open(project: ProjectInfo): void;
   rename(project: ProjectInfo, name: string): void;
@@ -45,6 +44,12 @@ export class ProjectsPage {
   private confirmingDelete = false;
   /** The card whose name is being edited. */
   private renaming: string | null = null;
+  /**
+   * Each project's snapshot as an object URL, with the size the project had
+   * when it was made: every save changes the size, so a different size means
+   * a newer save and a new snapshot.
+   */
+  private readonly snapshots = new Map<string, { sizeBytes: number; url: Promise<string | null> }>();
 
   constructor(private readonly actions: ProjectsPageActions) {
     this.element.className = 'projects-page';
@@ -153,7 +158,7 @@ export class ProjectsPage {
     open.type = 'button';
     open.className = 'project-open';
     open.setAttribute('aria-label', `Open ${p.name}`);
-    open.append(workspacePreview());
+    open.append(this.snapshotImage(p));
     open.addEventListener('click', () => this.actions.open(p));
 
     const info = document.createElement('div');
@@ -164,7 +169,7 @@ export class ProjectsPage {
     const text = document.createElement('div');
     text.className = 'project-text';
     text.append(this.renaming === p.id ? this.nameInput(p) : Object.assign(document.createElement('div'), { className: 'project-name', textContent: p.name }));
-    text.append(Object.assign(document.createElement('div'), { className: 'project-meta', textContent: this.meta(p) }));
+    text.append(Object.assign(document.createElement('div'), { className: 'project-meta', textContent: relativeDay(p.lastOpenedAt) }));
 
     const more = document.createElement('button');
     more.type = 'button';
@@ -185,10 +190,26 @@ export class ProjectsPage {
     return card;
   }
 
-  /** "Last opened Thursday · 12.4 MB", plus a note if another tab is editing it. */
-  private meta(p: ProjectInfo): string {
-    const readOnly = p.id === this.actions.currentId() && this.actions.currentReadOnly();
-    return `Last opened ${relativeDay(p.lastOpenedAt)} · ${formatBytes(p.sizeBytes)}${readOnly ? ' · read-only here' : ''}`;
+  /** The card's picture: filled in when the snapshot is ready (blank if the project has none). */
+  private snapshotImage(p: ProjectInfo): HTMLImageElement {
+    const img = Object.assign(document.createElement('img'), { className: 'project-snapshot', alt: '', draggable: false });
+    img.hidden = true;
+    let cached = this.snapshots.get(p.id);
+    if (!cached || cached.sizeBytes !== p.sizeBytes) {
+      if (cached) void cached.url.then((old) => old && URL.revokeObjectURL(old));
+      const url = this.actions
+        .snapshot(p)
+        .catch(() => null) // e.g. another tab is cleaning the project up: leave the card blank this time
+        .then((png) => (png ? URL.createObjectURL(new Blob([png as BlobPart], { type: 'image/png' })) : null));
+      cached = { sizeBytes: p.sizeBytes, url };
+      this.snapshots.set(p.id, cached);
+    }
+    void cached.url.then((url) => {
+      if (!url) return;
+      img.src = url;
+      img.hidden = false;
+    });
+    return img;
   }
 
   private menu(p: ProjectInfo): HTMLElement {
@@ -253,19 +274,6 @@ export class ProjectsPage {
     });
     return input;
   }
-}
-
-/**
- * The card's picture. For now the placeholder from the design (four
- * canvases): real previews need the storage worker to read another
- * project's thumbnail, which it can't yet.
- */
-function workspacePreview(): HTMLElement {
-  const preview = document.createElement('div');
-  preview.className = 'workspace-preview';
-  preview.setAttribute('aria-hidden', 'true');
-  for (let i = 0; i < 4; i++) preview.append(document.createElement('span'));
-  return preview;
 }
 
 /** An image from the design, at the size it has there. */

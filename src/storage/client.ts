@@ -75,6 +75,7 @@ const OPS: readonly StorageOp[] = [
   'gcFinish',
   'gcCancel',
   'readThumbnail',
+  'workingPreview',
 ] satisfies (keyof StorageApi)[];
 
 function clientFrom(call: (op: StorageOp, args: unknown[]) => Promise<unknown>, pending: () => number): StorageClient {

@@ -14,6 +14,7 @@ import { hitTest, union, visibleWorkspaceRect } from './workspace/coords';
 import { Workspace } from './workspace/workspace';
 import type { PaintDocument } from './document/paintDocument';
 import { ProjectSession } from './persistence/projectSession';
+import { renderWorkspaceThumbnail } from './persistence/workspaceThumbnail';
 import { createStorageWorker, workerClient } from './storage/client';
 import { SaveIndicator } from './ui/saveIndicator';
 import { HistoryPanel } from './ui/historyPanel';
@@ -624,8 +625,10 @@ async function main(): Promise<void> {
       const e = await navigator.storage?.estimate?.();
       return e?.usage !== undefined && e.quota !== undefined ? { usage: e.usage, quota: e.quota } : null;
     },
-    currentId: () => project.project?.id ?? null,
-    currentReadOnly: () => project.readOnly,
+    snapshot: async (p) => {
+      const saved = await storage.workingPreview(p.id);
+      return saved && renderWorkspaceThumbnail(saved.canvases.map((c) => ({ ...c, placement: c })), SNAPSHOT_PX);
+    },
     create: () => void switchProject(() => project.create('Untitled project').then(() => undefined)).then(showWorkspaceIf),
     // The open project is already loaded behind the page: just show it.
     open: (p) => (p.id === project.project?.id ? showWorkspace() : void switchProject(() => project.open(p.id)).then(showWorkspaceIf)),
@@ -707,6 +710,8 @@ async function main(): Promise<void> {
     picker.close();
     blockTransform.stop();
     projectsPage.setVisible(true);
+    // Save the open project now, so its card shows the latest state (the page shows the last save).
+    if (project.project && !project.readOnly) void project.saveNow().then(() => projectsPage.refresh(), () => undefined);
   }
   /**
    * Run a project operation that may load another project, then show it:
@@ -911,6 +916,9 @@ async function main(): Promise<void> {
   if (testCanvases) refreshUi();
   else showProjects();
 }
+
+/** Project card pictures: twice the card's 175 px picture, for Retina screens. */
+const SNAPSHOT_PX = 350;
 
 /** Dev mode (the HUD) is on unless turned off in Projects → Settings. */
 const DEV_MODE_KEY = 'vc-dev-mode';

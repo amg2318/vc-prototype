@@ -1098,24 +1098,13 @@ body {
   cursor: pointer;
 }
 
-/* Placeholder workspace: four 38 × 45 canvases, as in the design. */
-.workspace-preview {
-  position: relative;
-  width: 136px;
-  height: 112px;
+/* The workspace as last saved, fitted inside the card's upper part. */
+.project-snapshot {
+  max-width: 175px;
+  max-height: 170px;
+  object-fit: contain;
+  pointer-events: none;
 }
-
-.workspace-preview span {
-  position: absolute;
-  width: 38px;
-  height: 45px;
-  background: #d9d9d9;
-}
-
-.workspace-preview span:nth-child(1) { left: 0; top: 22px; }
-.workspace-preview span:nth-child(2) { left: 49px; top: 67px; }
-.workspace-preview span:nth-child(3) { left: 49px; top: 0; }
-.workspace-preview span:nth-child(4) { left: 98px; top: 0; }
 
 /* The info bar overlaps the card outline, like the design's bordered bar. */
 .project-info {
