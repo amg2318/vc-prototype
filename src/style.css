@@ -7,6 +7,8 @@
   --warn: #ff9f0a;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  /* The Projects page's font, also used by messages (banners). */
+  --page-font: 'Hiragino Sans', var(--font);
 }
 
 html,
@@ -378,6 +380,7 @@ body {
   transform: translateX(-50%);
   padding: 10px 16px;
   color: var(--warn);
+  font-family: var(--page-font);
   max-width: min(560px, calc(100vw - 40px));
 }
 
@@ -985,7 +988,6 @@ body {
   --card-bg: #2b2b2e;
   --card-line: #767676;
   --page-text: #bdbdbd;
-  --page-font: 'Hiragino Sans', var(--font);
   position: fixed;
   inset: 0;
   overflow-y: auto;
