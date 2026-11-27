@@ -274,7 +274,8 @@ Every arrow action is one undo step. Undoing a canvas deletion links its inherit
 - **Placement**: *fit inside* (the default, refitted when the source changes) or *custom* (as soon as it is
   moved, scaled, rotated or flipped). Fields for position, scale % and rotation °, **Flip H** / **Flip V**,
   **Refit** (fit inside again), and **Transform** (below);
-- **Crop** as % of the source (kept in normalized 0–1 coordinates, so it survives source resizes);
+- **Crop** (on the canvas, below) and **Reset crop**. The crop is kept in normalized 0–1 source
+  coordinates, so it survives source resizes;
 - **Effects**: grayscale, invert, posterize (with levels), applied in that order;
 - **Remove inherited block** (deletes the block and its settings; undoable).
 
@@ -283,6 +284,12 @@ to scale it about its centre, or the round handle above it to rotate (snapping t
 **Flip H**, **Flip V** and **Done** are in a bar at the bottom. While the mode is on, strokes are off and
 presses elsewhere pan. Leave it with Done, the Transform button again ("Done transforming"), any tool in the
 toolbar, or Escape / Enter. Each drag is one undo step.
+
+**Cropping** works the same way (Crop in the block's properties, or **Crop** in the bar, which switches
+between **Transform** and **Crop**): drag any edge or corner handle and those sides follow the pointer,
+up to the source's edges (outlined faintly). What stays visible doesn't move, whether the block is
+scaled, rotated or flipped (the block's centre moves with the crop, and a fitted block becomes custom).
+Presses inside the block pan. **Reset crop** in the bar shows the whole source again, in place.
 
 ### Memory settings
 

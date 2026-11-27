@@ -759,6 +759,28 @@ body {
   border-radius: 50%;
 }
 
+/* Crop tool: edge handles are bars along their edge, corners are squares;
+   the block itself doesn't take presses (they pan). */
+.block-transform.cropping .block-transform-body {
+  pointer-events: none;
+}
+
+.block-transform-handle.crop.edge-u {
+  cursor: ew-resize;
+}
+
+.block-transform-handle.crop.edge-v {
+  cursor: ns-resize;
+}
+
+.block-transform-handle.crop.edge-u::after {
+  inset: 10px 18px;
+}
+
+.block-transform-handle.crop.edge-v::after {
+  inset: 18px 10px;
+}
+
 .block-transform-bar {
   position: fixed;
   z-index: 10; /* above every panel and the HUD */

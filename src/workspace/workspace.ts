@@ -21,6 +21,7 @@ import {
   linkBlock,
   linkedSource,
   refitBlock,
+  type BlockCrop,
   type BlockPlacement,
   type InheritedBlock,
 } from '../document/inheritedBlock';
@@ -363,6 +364,18 @@ export class Workspace {
     const before = this.canvas(targetId).inherited;
     if (!before) return;
     this.setBlock(targetId, { placement: { ...before.placement, ...changes, mode: 'custom' } }, 'Transform inherited block', mergeKey);
+  }
+
+  /**
+   * Crop the block on the canvas: the crop and the centre change together, so
+   * what stays visible doesn't move. The placement becomes custom (a fitted
+   * block would otherwise refit to the new crop and jump).
+   */
+  cropBlock(targetId: CanvasId, crop: BlockCrop | undefined, centre: { x: number; y: number }, mergeKey: string | null = null): void {
+    const before = this.canvas(targetId).inherited;
+    if (!before) return;
+    const placement = { ...before.placement, x: centre.x, y: centre.y, mode: 'custom' as const };
+    this.setBlock(targetId, { crop, placement }, 'Crop inherited block', mergeKey);
   }
 
   /**

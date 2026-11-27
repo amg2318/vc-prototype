@@ -546,8 +546,8 @@ async function main(): Promise<void> {
       workspace.setActiveCanvas(id);
       zoomToCanvas(id);
     },
-    transformBlock: (id) => blockTransform.toggle(id),
-    isTransforming: (id) => blockTransform.canvasId === id,
+    editBlock: (id, tool) => blockTransform.toggle(id, tool),
+    blockTool: (id) => (blockTransform.canvasId === id ? blockTransform.tool : null),
   });
   thumbnails.onUpdated = () => layersPanel.update(); // the block row's thumbnail is built from layer thumbnails
   const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
