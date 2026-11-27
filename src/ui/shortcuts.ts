@@ -16,6 +16,8 @@ export interface ShortcutActions {
   fitSelection(): void;
   /** Save a version of the project (⌘S). */
   saveVersion(): void;
+  /** False while the Projects page covers the workspace: then only H (the HUD) works. */
+  workspaceShown(): boolean;
 }
 
 /**
@@ -30,6 +32,7 @@ export function installShortcuts(actions: ShortcutActions): void {
     if (isTyping(e.target)) return;
     const mod = e.metaKey || e.ctrlKey;
     const key = e.key.toLowerCase();
+    if (!actions.workspaceShown() && !(key === 'h' && !mod && !e.altKey)) return;
 
     if (mod && key === 'z') {
       e.preventDefault();

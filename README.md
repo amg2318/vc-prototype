@@ -155,7 +155,7 @@ push to `main`.
 | B / E / I                 | Brush / eraser / eyedropper  |
 | [ / ]                     | Smaller / larger tool size   |
 | ⇧N                        | New layer                    |
-| H                         | Toggle HUD                   |
+| H                         | Toggle HUD (Dev mode)        |
 | ⌘S / Ctrl+S               | Save a version               |
 | Delete / Backspace        | Delete the selected arrow    |
 | Escape                    | Deselect the arrow; cancel choosing a canvas; leave block-transform mode |
@@ -166,7 +166,8 @@ used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it e
 **Finger** button in the toolbar switches it on or off at any time.
 
 **Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
-Finger (finger drawing on/off), Arrows (show or hide arrows), Canvases, Layers, History, Projects, and the
+Finger (finger drawing on/off), Arrows (show or hide arrows), Canvases, Layers, History, Projects (back to
+the Projects page), and the
 save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for details).
 
 ### Saving, versions and projects (Phase 4)
@@ -180,14 +181,19 @@ save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for det
 - **Automatic versions:** "Session ended …" when a project opens whose last session left changes no
   version holds, and "Autosave …" after 30 minutes of active editing. **Retention** keeps every manual and
   pinned version; of the automatic ones, the newest 10, then the newest of each day for 30 days, then the
-  newest of each week. Both numbers can be changed in **Projects → Storage on this device**.
-- **Projects** panel: every project on this device with its size, and the total against the browser's
-  storage estimate. **New project**, **Import…**, and per project: open, rename, duplicate, delete (asks
-  again), and **Export…** (with or without version history). The app opens the last opened project.
-- **Storage on this device** (in the Projects panel): whether the browser may clear stored projects, with
-  a button to ask it not to; the retention settings; **Delete automatic versions…** and **Clean up**
-  (removes data nothing uses; this also happens on its own). For testing, **Delete all data…** (asks
-  again) deletes every project, version and setting of this app on this device (nothing of other apps
+  newest of each week. Both numbers can be changed in **Projects page → Settings (gear)**.
+- **Projects page** (design from Figma: "projects page" vertical / horizontal / empty state): the app
+  opens on it. Every project on this device is a card (newest first) with when it was last opened and its
+  size; tap a card to open it. **New project** creates one and opens it. Each card's **⋮** menu has
+  **Rename**, **Duplicate**, **Export…** (with or without version history) and **Delete…** (asks again).
+  With no projects it says "No projects yet". The last opened project is loaded behind the page, so
+  tapping its card shows it at once; deleting the open project closes it. The card picture is still the
+  design's placeholder (real previews need the storage worker to read other projects' thumbnails).
+- **Settings** (the gear on the Projects page): storage use (all projects, against the browser's
+  estimate); whether the browser may clear stored projects, with a button to ask it not to; the
+  retention settings; **Delete automatic versions…** and **Clean up** (removes data nothing uses; this
+  also happens on its own); **Import project…**. **Dev mode** shows the HUD (same as H) and is
+  remembered on this device. With Dev mode on, **Delete all data…** (asks again) deletes every project, version and setting of this app on this device (nothing of other apps
   served from the same address, such as other GitHub Pages sites); the app reloads and starts fresh.
   Close the app's other tabs first, or nothing is deleted.
 - **PNG export:** Canvases panel → select a canvas → **Export PNG**: the canvas at full resolution as it
