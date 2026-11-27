@@ -54,7 +54,11 @@ describe('ProjectSession versions', () => {
     const items = new Map<string, string>();
     vi.stubGlobal('document', { visibilityState: 'visible' });
     vi.stubGlobal('window', { setTimeout, clearTimeout });
-    vi.stubGlobal('localStorage', { getItem: (k: string) => items.get(k) ?? null, setItem: (k: string, v: string) => items.set(k, v) });
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => items.get(k) ?? null,
+      setItem: (k: string, v: string) => items.set(k, v),
+      removeItem: (k: string) => items.delete(k),
+    });
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -112,16 +116,18 @@ describe('ProjectSession versions', () => {
     expect(await savedValue()).toBe(5);
   });
 
-  it('duplicates a project with its content, and deleting the open project opens another', async () => {
-    const { session, stroke, savedValue } = await setup();
+  it('duplicates a project with its content, and deleting the open project closes it', async () => {
+    const { session, stroke, savedValue, workspace } = await setup();
     stroke(5);
     await session.saveVersion('manual');
     const original = session.project!;
     const copy = await session.duplicateProject(original.id, 'Copy');
     expect(session.project!.id).toBe(original.id); // the copy isn't opened
 
-    const result = await session.deleteProject(original.id);
-    expect(result.reopened).toBe(true);
+    await session.deleteProject(original.id);
+    expect(session.project).toBeNull();
+    expect(workspace.canvases).toHaveLength(0);
+    expect(await session.openLast()).toBeUndefined(); // the copy was never opened: no saved camera
     expect(session.project!.id).toBe(copy.id);
     expect(await savedValue()).toBe(5);
     expect(session.versions).toHaveLength(1);

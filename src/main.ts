@@ -14,10 +14,12 @@ import { hitTest, union, visibleWorkspaceRect } from './workspace/coords';
 import { Workspace } from './workspace/workspace';
 import type { PaintDocument } from './document/paintDocument';
 import { ProjectSession } from './persistence/projectSession';
+import { renderWorkspaceThumbnail } from './persistence/workspaceThumbnail';
 import { createStorageWorker, workerClient } from './storage/client';
 import { SaveIndicator } from './ui/saveIndicator';
 import { HistoryPanel } from './ui/historyPanel';
-import { formatBytes, ProjectsPanel } from './ui/projectsPanel';
+import { ProjectsPage } from './ui/projectsPage';
+import { formatBytes } from './ui/storageSection';
 import { canvasPng } from './export/canvasPng';
 import { deliverFile, GestureExpiredError, safeFileName } from './export/deliver';
 import { PROJECT_FILE_EXTENSION, PROJECT_FILE_TYPE } from './storage/archive';
@@ -76,7 +78,8 @@ async function main(): Promise<void> {
     view: () => view,
     newProjectCanvases: (ws) => seedCanvases(ws, Number(testCanvases ?? 1)),
   });
-  // `?canvases=N` starts a new project with N canvases (for testing); otherwise the last project opens.
+  // `?canvases=N` starts a new project with N canvases (for testing); otherwise the last project
+  // opens behind the Projects page (or none, on a device with no projects yet).
   const savedView = testCanvases ? (await project.create(`Test: ${testCanvases} canvases`), undefined) : await project.openLast();
   project.watchPageLifecycle();
   project.retention = loadRetention();
@@ -512,7 +515,7 @@ async function main(): Promise<void> {
         setView(fitAll());
       },
       toggleHud() {
-        hud.setVisible(!hud.visible);
+        setDevMode(!hud.visible);
       },
       exportMeasurements() {
         const label = prompt('Label for this run (e.g. "webgpu low-power-off tab"):', renderer.kind) ?? '';
@@ -576,7 +579,7 @@ async function main(): Promise<void> {
     }
   }
   // The layers, canvases and history panels share the right-hand side: one at a time.
-  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel, projectsPanel];
+  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel];
   function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
     const show = !panel.visible;
     for (const p of sidePanels()) p.setVisible(p === panel && show);
@@ -616,27 +619,35 @@ async function main(): Promise<void> {
     if (isQuotaError(error)) showQuotaWarning(QUOTA_MESSAGE);
     else showBanner(`Version history: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const projectsPanel = new ProjectsPanel({
+  const projectsPage = new ProjectsPage({
     list: () => project.listProjects(),
     estimate: async () => {
       const e = await navigator.storage?.estimate?.();
       return e?.usage !== undefined && e.quota !== undefined ? { usage: e.usage, quota: e.quota } : null;
     },
-    currentId: () => project.project?.id ?? null,
-    currentReadOnly: () => project.readOnly,
-    create: () => void switchProject(() => project.create('Untitled project').then(() => undefined)),
-    open: (p) => void switchProject(() => project.open(p.id)),
-    rename: (p, name) => void project.renameProject(p.id, name).then(() => projectsPanel.refresh(), reportProjectError),
+    snapshot: async (p) => {
+      const saved = await storage.workingPreview(p.id);
+      return saved && renderWorkspaceThumbnail(saved.canvases.map((c) => ({ ...c, placement: c })), SNAPSHOT_PX);
+    },
+    create: () => void switchProject(() => project.create('Untitled project').then(() => undefined)).then(showWorkspaceIf),
+    // The open project is already loaded behind the page: just show it.
+    open: (p) => (p.id === project.project?.id ? showWorkspace() : void switchProject(() => project.open(p.id)).then(showWorkspaceIf)),
+    rename: (p, name) =>
+      void project
+        .renameProject(p.id, name)
+        .catch(reportProjectError)
+        .then(() => projectsPage.refresh()),
     duplicate: (p) =>
       void project.duplicateProject(p.id, `${p.name} copy`).then((copy) => {
         showBanner(`Made “${copy.name}”.`);
-        return projectsPanel.refresh();
+        return projectsPage.refresh();
       }, reportProjectError),
     remove: (p) =>
       void switchProject(async () => {
-        const { reopened, view: saved } = await project.deleteProject(p.id);
+        const wasOpen = p.id === project.project?.id;
+        await project.deleteProject(p.id);
         showBanner(`Deleted “${p.name}”.`);
-        return reopened ? saved : null;
+        return wasOpen ? undefined : null; // the workspace was emptied
       }),
     exportFile: (p, includeHistory) =>
       void (async () => {
@@ -644,17 +655,6 @@ async function main(): Promise<void> {
           showBanner(`Exporting “${p.name}”…`, true);
           const bytes = await project.exportProject(p.id, includeHistory);
           await offerFile(bytes, `${safeFileName(p.name)}${PROJECT_FILE_EXTENSION}`, PROJECT_FILE_TYPE);
-        } catch (error) {
-          reportProjectError(error);
-        }
-      })(),
-    importFile: (file) =>
-      void (async () => {
-        try {
-          showBanner(`Importing “${file.name}”…`, true);
-          const info = await project.importProject(new Uint8Array(await file.arrayBuffer()));
-          showBanner(`Imported “${info.name}” as a new project.`, false, [{ label: 'Open it', run: () => void switchProject(() => project.open(info.id)) }]);
-          await projectsPanel.refresh();
         } catch (error) {
           reportProjectError(error);
         }
@@ -671,18 +671,54 @@ async function main(): Promise<void> {
       collectGarbage: () =>
         void project.collectGarbage().then((stats) => {
           showBanner(stats ? `Cleaned up ${formatBytes(stats.removedBytes)} in ${stats.removedFiles} files.` : 'Nothing to clean up right now.');
-          return projectsPanel.refresh();
+          return projectsPage.refresh();
         }),
       notice: () => (inIosBrowserTab() ? SAFARI_TAB_NOTICE : null),
+      importFile: (file) =>
+        void (async () => {
+          try {
+            showBanner(`Importing “${file.name}”…`, true);
+            const info = await project.importProject(new Uint8Array(await file.arrayBuffer()));
+            showBanner(`Imported “${info.name}” as a new project.`);
+            await projectsPage.refresh();
+          } catch (error) {
+            reportProjectError(error);
+          }
+        })(),
+      devMode: () => hud.visible,
+      setDevMode,
       deleteAllData: requestReset,
     },
   });
+  /** Dev mode shows the HUD (and, on the Projects page, "Delete all data"). Remembered on this device. */
+  function setDevMode(on: boolean): void {
+    hud.setVisible(on);
+    localStorage.setItem(DEV_MODE_KEY, on ? 'on' : 'off');
+  }
+  /** Leave the Projects page for the open project. */
+  function showWorkspace(): void {
+    if (!project.project) return; // nothing to show: the page stays
+    projectsPage.setVisible(false);
+    refreshUi();
+    requestFrame();
+  }
+  function showWorkspaceIf(opened: boolean): void {
+    if (opened) showWorkspace();
+  }
+  function showProjects(): void {
+    for (const p of sidePanels()) p.setVisible(false);
+    picker.close();
+    blockTransform.stop();
+    projectsPage.setVisible(true);
+    // Save the open project now, so its card shows the latest state (the page shows the last save).
+    if (project.project && !project.readOnly) void project.saveNow().then(() => projectsPage.refresh(), () => undefined);
+  }
   /**
    * Run a project operation that may load another project, then show it:
    * the saved camera if it has one, else fit everything. `null` = the
-   * workspace didn't change.
+   * workspace didn't change. Resolves to false if it failed (the error is shown).
    */
-  async function switchProject(task: () => Promise<ViewTransform | undefined | null>): Promise<void> {
+  async function switchProject(task: () => Promise<ViewTransform | undefined | null>): Promise<boolean> {
     try {
       const saved = await task();
       if (saved !== null) {
@@ -690,9 +726,11 @@ async function main(): Promise<void> {
         historyPanel.setVersions(project.versions);
         refreshUi();
       }
-      await projectsPanel.refresh();
+      await projectsPage.refresh();
+      return true;
     } catch (error) {
       reportProjectError(error);
+      return false;
     }
   }
   function reportProjectError(error: unknown): void {
@@ -715,7 +753,7 @@ async function main(): Promise<void> {
   function showQuotaWarning(message: string): void {
     showBanner(message, true, [
       { label: 'Delete automatic versions', run: () => void deleteAutomaticVersions() },
-      { label: 'Projects…', run: () => togglePanel(projectsPanel) },
+      { label: 'Projects…', run: showProjects },
     ]);
   }
   async function deleteAutomaticVersions(): Promise<void> {
@@ -723,7 +761,7 @@ async function main(): Promise<void> {
       const deleted = await project.deleteAutomaticVersions();
       showBanner(deleted > 0 ? `Deleted ${deleted} automatic version${deleted === 1 ? '' : 's'}.` : 'There were no automatic versions to delete.');
       await project.saveNow().catch(() => undefined); // try the save that failed again
-      await projectsPanel.refresh();
+      await projectsPage.refresh();
     } catch (error) {
       reportProjectError(error);
     }
@@ -745,7 +783,7 @@ async function main(): Promise<void> {
     },
     toggleCanvases: () => togglePanel(canvasPanel),
     toggleHistory: () => togglePanel(historyPanel),
-    toggleProjects: () => togglePanel(projectsPanel),
+    showProjects,
   });
 
   function refreshUi(): void {
@@ -849,7 +887,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, projectsPanel.element, hud.element, loupe.element, banner, blockTransform.bar);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, projectsPage.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({
@@ -865,15 +903,25 @@ async function main(): Promise<void> {
       const doc = active()?.doc;
       if (doc) setView(fitRectToView(doc.placement, cssWidth, cssHeight));
     },
-    toggleHud: () => hud.setVisible(!hud.visible),
+    toggleHud: () => setDevMode(!hud.visible),
     saveVersion: () => void saveVersion(),
+    workspaceShown: () => !projectsPage.visible,
   });
 
   new ResizeObserver(resize).observe(canvas);
   watchDevicePixelRatio();
   resize();
-  hud.setVisible(true); // after the first resize, so the HUD never shows the pre-fit view
+  hud.setVisible(localStorage.getItem(DEV_MODE_KEY) !== 'off'); // after the first resize, so the HUD never shows the pre-fit view
+  // The app opens on the Projects page (`?canvases=N` test runs go straight to their project).
+  if (testCanvases) refreshUi();
+  else showProjects();
 }
+
+/** Project card pictures: twice the card's 175 px picture, for Retina screens. */
+const SNAPSHOT_PX = 350;
+
+/** Dev mode (the HUD) is on unless turned off in Projects → Settings. */
+const DEV_MODE_KEY = 'vc-dev-mode';
 
 /**
  * The canvases of a new project: one 4096² canvas, or with `?canvases=N` a

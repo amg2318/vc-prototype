@@ -1,3 +1,4 @@
+import type { RGB } from '../document/blend';
 import type { CanvasRecord, HeadRecord, ManifestId, ProjectId, ProjectInfo, RootManifest, VersionEntry } from './format';
 import { newId } from './format';
 import { exportArchive, readArchive } from './archive';
@@ -47,6 +48,15 @@ export interface OpenedProject {
   head: HeadRecord | null;
 }
 
+/**
+ * What a project looked like when it was last saved: each canvas's place,
+ * paper and level-4 preview tile (1/16 scale; null if none was saved). The
+ * Projects page draws its card picture from this (see workspaceThumbnail.ts).
+ */
+export interface WorkspacePreview {
+  canvases: { x: number; y: number; width: number; height: number; paper: RGB; paperVisible: boolean; preview: Uint8Array | null }[];
+}
+
 export interface StorageStatus {
   /** False if OPFS or IndexedDB couldn't be opened: nothing survives a reload. */
   persistent: boolean;
@@ -69,6 +79,8 @@ export interface StorageApi {
   commit(message: CommitMessage): CommitReply;
   updateHead(edit: HeadEdit, thumbnail?: { name: string; bytes: Uint8Array }): HeadRecord;
   readThumbnail(name: string): Uint8Array | null;
+  /** Any project's last saved state, for its card (read only; null if it was never saved). */
+  workingPreview(id: ProjectId): WorkspacePreview | null;
   /** A project file (zip) of a project, with or without its versions (see archive.ts). */
   exportProject(id: ProjectId, includeHistory: boolean): Uint8Array;
   /** Read a project file into a new project. */
@@ -206,6 +218,22 @@ export class StorageService implements AsyncApi {
 
   readThumbnail(name: string): Promise<Uint8Array | null> {
     return this.project.files.read(`thumbnails/${name}`);
+  }
+
+  async workingPreview(id: ProjectId): Promise<WorkspacePreview | null> {
+    const store = this.current?.id === id ? this.current : await ProjectStore.open(id, this.files(id), this.catalog);
+    // In the store's lock, like export: no save of the open project replaces what is being read.
+    return store.exclusive(async () => {
+      const copy = await store.readWorkingCopy();
+      if (!copy) return null;
+      const canvases = await Promise.all(
+        copy.records.map(async (r) => {
+          const hash = r.previews.find((p) => p.level === 4)?.tiles['0,0'];
+          return { x: r.x, y: r.y, width: r.width, height: r.height, paper: r.paper, paperVisible: r.paperVisible, preview: hash ? await store.getTile(hash) : null };
+        }),
+      );
+      return { canvases };
+    });
   }
 
   async exportProject(id: ProjectId, includeHistory: boolean): Promise<Uint8Array> {

@@ -955,3 +955,255 @@ body {
   color: var(--panel-fg);
   font: inherit;
 }
+
+/* --- Projects page (Figma: "projects page" vertical / horizontal / empty state) --- */
+
+.projects-page {
+  --page-bg: #1e1e20;
+  --card-bg: #2b2b2e;
+  --card-line: #767676;
+  --page-text: #bdbdbd;
+  --page-font: 'Hiragino Sans', var(--font);
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  background: var(--page-bg);
+  color: var(--page-text);
+  font-family: var(--page-font);
+  /* 54 px margins as in the design (834 px wide in portrait, 1194 px in landscape). */
+  padding: calc(env(safe-area-inset-top) + 31px) calc(env(safe-area-inset-right) + 54px)
+    calc(env(safe-area-inset-bottom) + 54px) calc(env(safe-area-inset-left) + 54px);
+}
+
+.projects-header {
+  position: relative;
+}
+
+.projects-logo {
+  display: flex;
+  align-items: center;
+  margin-left: -4px;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 24px;
+  color: #dedede;
+}
+
+.projects-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 13px;
+  margin-top: 22px;
+}
+
+.projects-title-row h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 36px;
+}
+
+.projects-actions {
+  display: flex;
+  gap: 13px;
+}
+
+.projects-button {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: #c0c0c0;
+  font: 400 16px/24px var(--page-font);
+  cursor: pointer;
+}
+
+.projects-button:active {
+  filter: brightness(1.3);
+}
+
+.new-project {
+  gap: 19px;
+  padding: 0 19px 0 12px;
+}
+
+.settings-button {
+  justify-content: center;
+  width: 46px;
+  padding: 0;
+}
+
+.settings-button[aria-expanded='true'] {
+  filter: brightness(1.3);
+}
+
+.projects-divider {
+  display: block;
+  width: 100%;
+  margin-top: 22px;
+}
+
+.projects-settings {
+  top: 98px; /* just under the settings button */
+  right: 0;
+  z-index: 2;
+  width: min(360px, calc(100vw - 40px));
+  max-height: calc(100dvh - 200px);
+  overflow: auto;
+  padding: 4px 10px 12px;
+  font-family: var(--font);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.projects-settings .storage-settings {
+  margin-top: 0;
+}
+
+/* Cards are the design's 219 × 308; the columns spread across the width
+   (3 in portrait, 4 in landscape on an 11" iPad). */
+.projects-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 219px);
+  justify-content: space-between;
+  gap: 53px 33px;
+  margin: 46px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 219px;
+  height: 308px;
+  box-sizing: border-box;
+  border: 2px solid var(--card-line);
+  border-radius: 24px;
+}
+
+.project-open {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 22px 22px 0 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* The workspace as last saved, fitted inside the card's upper part. */
+.project-snapshot {
+  max-width: 175px;
+  max-height: 170px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+/* The info bar overlaps the card outline, like the design's bordered bar. */
+.project-info {
+  display: flex;
+  align-items: center;
+  height: 84px;
+  margin: 0 -2px -2px;
+  box-sizing: border-box;
+  border: 2px solid var(--card-line);
+  border-radius: 0 0 24px 24px;
+  background: var(--card-bg);
+  padding: 0 0 0 14px;
+  cursor: pointer;
+}
+
+.project-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.project-name {
+  overflow: hidden;
+  font-size: 16px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-meta {
+  margin-top: 5px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 28px;
+  margin: -2px 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--page-bg);
+  color: var(--panel-fg);
+  font: 500 16px var(--page-font);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ⋮ : the design's 24 px icon in a 44 px touch target. */
+.project-more {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin-right: -2px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.project-more[aria-expanded='true'] {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.project-menu {
+  right: 8px;
+  bottom: 74px;
+  z-index: 1;
+  display: grid;
+  gap: 2px;
+  min-width: 190px;
+  padding: 6px;
+  font-family: var(--font);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.project-menu button {
+  text-align: left;
+  background: transparent;
+}
+
+.project-menu button.destructive {
+  color: #ff6b61;
+}
+
+.projects-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  font-size: 24px;
+  font-weight: 500;
+  pointer-events: none;
+}

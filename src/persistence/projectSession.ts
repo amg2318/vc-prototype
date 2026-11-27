@@ -130,6 +130,7 @@ export class ProjectSession {
       // While the page is hidden, every second counts (it may be closed for good): skip the previews.
       await this.saveWorkingCopy({ skipPreviews: document.visibilityState === 'hidden' });
     }, SAVE.debounceMs);
+    this.scheduler.paused = true; // nothing to save until a project is open
     workspace.onChange(() => {
       if (this.scheduler.paused) return;
       this.scheduler.changed();
@@ -172,7 +173,11 @@ export class ProjectSession {
 
   // --- opening ----------------------------------------------------------------
 
-  /** Open the last opened project, or the most recent one, or a new one. Returns the saved camera, if any. */
+  /**
+   * Open the last opened project, or the most recent one. Returns the saved
+   * camera, if any. With no projects nothing opens (the Projects page shows
+   * "No projects yet" and stays up until one is created).
+   */
   async openLast(): Promise<RootManifest['view'] | undefined> {
     const status = await this.deps.storage.status();
     this.persistent = status.persistent;
@@ -180,7 +185,6 @@ export class ProjectSession {
     const last = localStorage.getItem(LAST_PROJECT_KEY);
     const choice = projects.find((p) => p.id === last) ?? [...projects].sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
     if (choice) return this.open(choice.id);
-    await this.create('Untitled project');
     return undefined;
   }
 
@@ -578,23 +582,33 @@ export class ProjectSession {
 
   /**
    * Delete a project and everything in it. Refused while another tab has it
-   * open. Deleting the open project opens the most recent other one (or a
-   * new one); the result says so, with that project's saved camera.
+   * open. Deleting the open project closes it: no project is open afterwards
+   * (projects are deleted from the Projects page, which stays up).
    */
-  async deleteProject(id: ProjectId): Promise<{ reopened: boolean; view: RootManifest['view'] | undefined }> {
-    let reopened = false;
-    let view: RootManifest['view'] | undefined;
+  async deleteProject(id: ProjectId): Promise<void> {
     if (id === this.project?.id) {
       if (this.readOnly) throw new Error('This project is open in another tab: close it there first');
-      const next = (await this.listProjects()).filter((p) => p.id !== id).sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)[0];
-      if (next) view = await this.open(next.id);
-      else await this.create('Untitled project');
-      reopened = true;
+      await this.closeProject();
     } else if (await isProjectLocked(id)) {
       throw new Error('That project is open in another tab: close it there first');
     }
     await this.deps.storage.deleteProject(id);
-    return { reopened, view };
+  }
+
+  /** Stop working on the open project (about to be deleted): empty workspace, no lock, nothing to save. */
+  private async closeProject(): Promise<void> {
+    await this.scheduler.settle();
+    this.scheduler.paused = true;
+    clearTimeout(this.gcTimer);
+    await this.lock?.release();
+    this.lock = null;
+    this.backing.writeToDisk = false;
+    this.project = null;
+    localStorage.removeItem(LAST_PROJECT_KEY);
+    this.deps.workspace.load([], this.deps.workspace.canvasCounter, null);
+    this.saver.remember([], [], null, null);
+    this.setStatus({ state: 'saved', savedAt: null, message: null, quota: false });
+    this.onVersions?.(this.versions);
   }
 
   // --- saving -----------------------------------------------------------------

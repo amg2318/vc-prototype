@@ -3,7 +3,10 @@
 // URLs are relative to the service worker's own location, so the same file
 // works at "/" and under a GitHub Pages sub-path.
 
-const CACHE = 'vc-proto-__CACHE_VERSION__';
+// Only this app's caches are replaced: other apps served from the same address
+// (e.g. other GitHub Pages sites of the same user) share the cache storage.
+const CACHE_PREFIX = 'vc-proto-';
+const CACHE = `${CACHE_PREFIX}__CACHE_VERSION__`;
 const PRECACHE = __PRECACHE_MANIFEST__;
 
 self.addEventListener('install', (event) => {
@@ -15,7 +18,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });

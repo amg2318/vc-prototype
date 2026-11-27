@@ -10,7 +10,8 @@ export interface ToolbarActions {
   toggleLayers(): void;
   toggleCanvases(): void;
   toggleHistory(): void;
-  toggleProjects(): void;
+  /** Leave the workspace for the Projects page. */
+  showProjects(): void;
   toggleFingerDrawing(): void;
   toggleArrows(): void;
 }
@@ -57,7 +58,7 @@ export class Toolbar {
       button('Canvases', actions.toggleCanvases, 'Canvases'),
       button('Layers', actions.toggleLayers, 'Layers'),
       button('History', actions.toggleHistory, 'Versions of this project'),
-      button('Projects', actions.toggleProjects, 'Projects on this device'),
+      button('Projects', actions.showProjects, 'All projects on this device'),
     );
   }
 
