@@ -220,11 +220,6 @@ body {
   margin-left: 12px;
 }
 
-/* The export image is drawn pointing right; the design turns it to point up. */
-.export-icon {
-  transform: rotate(-90deg);
-}
-
 .tool-rail {
   pointer-events: auto;
   position: absolute;

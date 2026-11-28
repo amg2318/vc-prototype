@@ -43,12 +43,10 @@ export class TopBar {
 
     const right = document.createElement('div');
     right.className = 'top-bar-buttons';
-    const exportButton = iconButton(exportIcon, 'Export', actions.toggleExport);
-    exportButton.querySelector('img')!.classList.add('export-icon'); // the image is drawn on its side
     const historyButton = iconButton(historyIcon, 'Versions of this project', actions.toggleHistory);
     historyButton.querySelector('img')!.classList.add('dim');
     right.append(
-      exportButton,
+      iconButton(exportIcon, 'Export', actions.toggleExport),
       iconButton(settingsIcon, 'Settings', actions.toggleSettings),
       historyButton,
       iconButton(canvasesIcon, 'Canvases', actions.toggleCanvases),
