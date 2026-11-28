@@ -414,10 +414,13 @@ body {
   /* Figma "drawing page (layers menu)": 291 px wide, 23 px from the right edge (under the Layers button). */
   top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
   right: calc(env(safe-area-inset-right) + 23px);
-  width: min(291px, calc(100vw - 20px));
+  /* The design's 291 px, narrower when the screen is (never wider than the space right of the rail). */
+  width: min(291px, calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - var(--rail-right) - 33px));
   box-sizing: border-box;
   max-height: min(587px, calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 20px));
-  overflow: auto;
+  /* Scrolls up and down only: everything inside fits the panel's width. */
+  overflow: hidden auto;
+  overscroll-behavior: contain;
   padding: 0 20px 20px; /* + the 1 px border = the design's 21 px */
   border: 1px solid #555556;
   border-radius: 4px;
@@ -463,6 +466,8 @@ body {
   margin: 0;
   padding: 0;
   display: grid;
+  /* One column exactly as wide as the panel: a long row shrinks or truncates instead of widening it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -498,9 +503,9 @@ body {
   cursor: pointer;
 }
 
-/* The block row has no drag handle: line its thumbnail up with the layers' (44 px in). */
+/* The block row has no drag handle: start at the card's inner edge, so its title has room. */
 .block-row .layer-main {
-  padding-left: 44px;
+  padding-left: 13px;
 }
 
 .thumbnail {
@@ -1094,6 +1099,38 @@ body {
 
 .block-details select {
   min-width: 0;
+}
+
+/* Inside the layers panel (a card ~250 px wide): each label sits above its control(s), like
+   the layer card's Opacity and Blend, so nothing has to squeeze side by side. */
+.layers .row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.layers .row > span:first-child {
+  grid-column: 1 / -1;
+}
+
+.layers .row > :last-child:nth-child(2) {
+  grid-column: 1 / -1; /* a lone control (e.g. Blend) takes the full width */
+}
+
+.layers .block-grid {
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.layers.panel select {
+  -webkit-appearance: none;
+  appearance: none;
+  min-width: 0;
+  height: 31px;
+  min-height: 31px;
+  padding: 0 24px 0 8px;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
 }
 
 .panel button.danger {
