@@ -515,6 +515,14 @@ async function main(): Promise<void> {
   const settingsPanel = new SettingsPanel(
     input.fingers,
     {
+      renameProject(name) {
+        const open = project.project;
+        if (!open) return;
+        void project
+          .renameProject(open.id, name)
+          .catch(reportProjectError)
+          .then(() => refreshUi()); // the top bar and this field show the new name
+      },
       setArrowsShown(shown) {
         arrowControls.shown = shown;
         if (!shown) arrowControls.select(null);
@@ -836,7 +844,7 @@ async function main(): Promise<void> {
       canUndo: workspace.history.canUndo,
       canRedo: workspace.history.canRedo,
     });
-    settingsPanel.update({ arrowsShown: arrowControls.shown });
+    settingsPanel.update({ projectName: project.project?.name ?? '', arrowsShown: arrowControls.shown });
     layersPanel.update();
     canvasPanel.update();
     picker.setRecentColors(tools.recentColors);

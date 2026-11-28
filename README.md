@@ -339,7 +339,7 @@ canvas shows its last composite or a coarser preview, so it never goes blank.
 "pressure from speed" for mouse and finger (faster = thinner; otherwise they draw at full pressure). The
 brush and eraser have separate settings. Size and opacity are the rail's two bars.
 
-**Settings** (top bar): finger drawing (Auto / On / Off), show arrows, and under **Debug** two-finger
+**Settings** (top bar): the project's name (saved on Return or when you leave the field), finger drawing (Auto / On / Off), show arrows, and under **Debug** two-finger
 rotate, fit view, toggle HUD, export JSON and reset stats.
 
 ## Measurement HUD
