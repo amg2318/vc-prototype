@@ -1,8 +1,8 @@
-import addIcon from '../assets/icons/add.svg';
+import addIcon from '../assets/icons/drawing/add.png';
 import dividerLine from '../assets/icons/divider.svg';
 import logoPencil from '../assets/icons/logo-pencil.svg';
-import moreOptionsIcon from '../assets/icons/more-options.svg';
-import settingsIcon from '../assets/icons/settings.svg';
+import moreOptionsIcon from '../assets/icons/drawing/more-options.png';
+import settingsIcon from '../assets/icons/drawing/settings.png';
 import { PROJECT_FILE_EXTENSION } from '../storage/archive';
 import type { ProjectInfo } from '../storage/format';
 import { relativeDay } from './relativeDay';
@@ -71,7 +71,7 @@ export class ProjectsPage {
     this.settingsButton.setAttribute('aria-label', 'Settings');
     this.settingsButton.setAttribute('aria-expanded', 'false');
     this.settingsButton.title = 'Settings';
-    this.settingsButton.append(icon(settingsIcon, 20, 20));
+    this.settingsButton.append(icon(settingsIcon, 32, 32));
     this.settingsButton.addEventListener('click', () => this.setSettingsOpen(this.settingsButton.getAttribute('aria-expanded') !== 'true'));
 
     const buttons = document.createElement('div');
@@ -177,7 +177,7 @@ export class ProjectsPage {
     more.title = 'More options';
     more.setAttribute('aria-label', `More options for ${p.name}`);
     more.setAttribute('aria-expanded', String(this.menuFor === p.id));
-    more.append(icon(moreOptionsIcon, 4, 18));
+    more.append(icon(moreOptionsIcon, 24, 24));
     more.addEventListener('click', () => {
       this.menuFor = this.menuFor === p.id ? null : p.id;
       this.confirmingDelete = false;
