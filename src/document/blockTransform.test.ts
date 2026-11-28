@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { blockFrame, dragPlacement, frameCorners, MIN_SCALE, normalizeAngle, rotateHandle, snapAngle } from './blockTransform';
-import { createBlock, type BlockPlacement } from './inheritedBlock';
+import { blockFrame, dragCrop, dragPlacement, frameCorners, MIN_CROP_PX, MIN_SCALE, normalizeAngle, rotateHandle, snapAngle } from './blockTransform';
+import { applyAffine, createBlock, sourceToInheritor, type BlockPlacement, type InheritedBlock } from './inheritedBlock';
 
 const placement: BlockPlacement = { mode: 'custom', x: 100, y: 100, scale: 1, rotation: 0, flipX: false, flipY: false };
 
@@ -50,5 +50,53 @@ describe('angles', () => {
     expect(normalizeAngle(-Math.PI / 2 - 2 * Math.PI)).toBeCloseTo(-Math.PI / 2);
     expect(snapAngle(0.01)).toBe(0);
     expect(snapAngle(0.1)).toBe(0.1);
+  });
+});
+
+describe('dragCrop', () => {
+  const sourceSize = { width: 200, height: 100 };
+  const blockWith = (p: Partial<BlockPlacement>): InheritedBlock => ({
+    ...createBlock('a', sourceSize, { width: 400, height: 400 }),
+    placement: { ...placement, ...p },
+  });
+  /** Where a source pixel lands on the inheritor. */
+  const at = (block: InheritedBlock, x: number, y: number) => applyAffine(sourceToInheritor(block, sourceSize), x, y);
+
+  it('moves the dragged edge with the pointer and keeps the content where it was', () => {
+    const block = blockWith({ scale: 2 }); // 400 × 200 on the canvas, centred at (100, 100)
+    const { crop, centre } = dragCrop({ handle: { u: 1, v: 0 }, start: { x: 300, y: 100 }, block, sourceSize }, { x: 200, y: 140 });
+    expect(crop).toEqual({ x: 0, y: 0, width: 0.75, height: 1 }); // the right quarter is gone; vertical movement is ignored
+    expect(centre).toEqual({ x: 50, y: 100 });
+    const after = { ...block, crop, placement: { ...block.placement, ...centre } };
+    expect(at(after, 10, 20)).toEqual(at(block, 10, 20));
+  });
+
+  it('crops the right side of the source when the block is flipped, and keeps rotated content still', () => {
+    const block = blockWith({ flipX: true, rotation: Math.PI / 2 });
+    // Rotated a quarter turn, the block's "left" edge (u = -100) sits at y = 0; drag it 50 px down.
+    const { crop, centre } = dragCrop({ handle: { u: -1, v: 0 }, start: { x: 100, y: 0 }, block, sourceSize }, { x: 100, y: 50 });
+    expect(crop!.x).toBeCloseTo(0);
+    expect(crop!.width).toBeCloseTo(0.75); // flipped: the block's left edge is the source's right
+    const after = { ...block, crop, placement: { ...block.placement, ...centre } };
+    const before = at(block, 30, 70);
+    const now = at(after, 30, 70);
+    expect(now.x).toBeCloseTo(before.x);
+    expect(now.y).toBeCloseTo(before.y);
+  });
+
+  it('never grows past the source, and an uncropped result is no crop', () => {
+    const cropped = { ...blockWith({}), crop: { x: 0.25, y: 0, width: 0.5, height: 1 } };
+    const { crop } = dragCrop({ handle: { u: -1, v: -1 }, start: { x: 50, y: 50 }, block: cropped, sourceSize }, { x: -500, y: -500 });
+    expect(crop).toEqual({ x: 0, y: 0, width: 0.75, height: 1 });
+    const whole = dragCrop({ handle: { u: 1, v: 0 }, start: { x: 150, y: 100 }, block: cropped, sourceSize: sourceSize }, { x: 900, y: 100 });
+    expect(whole.crop).toEqual({ x: 0.25, y: 0, width: 0.75, height: 1 });
+    const back = dragCrop({ handle: { u: -1, v: 0 }, start: { x: 0, y: 0 }, block: { ...cropped, crop: { x: 0.25, y: 0, width: 0.75, height: 1 } }, sourceSize }, { x: -900, y: 0 });
+    expect(back.crop).toBeUndefined();
+  });
+
+  it('stops MIN_CROP_PX short of the opposite edge', () => {
+    const block = blockWith({});
+    const { crop } = dragCrop({ handle: { u: 1, v: 0 }, start: { x: 200, y: 100 }, block, sourceSize }, { x: -900, y: 100 });
+    expect(crop!.width * sourceSize.width).toBeCloseTo(MIN_CROP_PX);
   });
 });

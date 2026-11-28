@@ -161,18 +161,22 @@ push to `main`.
 | Escape                    | Deselect the arrow; cancel choosing a canvas; leave block-transform mode |
 | Enter                     | Leave block-transform mode   |
 
-**Finger drawing** (brush panel, "Finger draws"): *Auto* (default) lets one finger draw until a pen is
-used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it either way. The
-**Finger** button in the toolbar switches it on or off at any time.
+**Finger drawing** (Settings, "Finger draws"): *Auto* (default) lets one finger draw until a pen is
+used, then one finger pans, so a resting palm never draws. *On* / *Off* fix it either way.
 
-**Toolbar:** brush, eraser, eyedropper, colour (opens the HSV picker with recent colours), undo, redo,
-Finger (finger drawing on/off), Arrows (show or hide arrows), Canvases, Layers, History, Projects (back to
-the Projects page), and the
-save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for details).
+The drawing page follows the Figma "drawing page" frames:
+
+- **Top bar:** Projects (back to the Projects page) and the project's name; on the right Export (the
+  active canvas as a PNG, or the project file), Settings, History, Canvases and Layers.
+- **Tool rail** (left edge): brush, eraser, eyedropper, colour (opens the HSV picker with recent colours),
+  size and opacity bars for the current tool (drag up for more; size is on a log scale), brush settings,
+  undo and redo.
+
+Saving has no indicator: save errors and read-only mode show as messages at the bottom.
 
 ### Saving, versions and projects (Phase 4)
 
-- **Saving is automatic.** The save status in the toolbar shows where things are. There is no "save"
+- **Saving is automatic.** Problems show as a message at the bottom. There is no "save"
   command for the working copy; ⌘S and **Save version** make a *version*.
 - **History** panel: the open project's versions, newest first, with a thumbnail of the workspace, a name
   and whether it was saved by hand or automatically. Select one to **Restore** it, rename it, **Pin** it
@@ -205,7 +209,7 @@ save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for det
   **Save…** button appears; tap it.
 - **Two tabs:** only one tab can change a project. A second tab opens it read-only and says so; nothing is
   saved there. Delete, duplicate and export are refused while another tab has the project open.
-- **Storage full:** the save status turns red and a message offers to delete automatic versions or to open
+- **Storage full:** a message offers to delete automatic versions or to open
   Projects (export and delete). Nothing already saved is lost; the unsaved changes stay on screen.
 - **On iPad, use the home-screen app.** In a Safari tab, Safari may clear a site's data after some days
   without a visit; the app says so once per visit. A home-screen app's storage is not cleared that way.
@@ -217,7 +221,7 @@ save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for det
 - **Name labels** sit above each canvas at a constant size. Tap one to select its canvas, double-tap to
   zoom to it, and drag it to move the canvas (one undo step per drag). Moves snap to other canvases' edges
   and, if enabled, to a 256 px grid.
-- **Canvases panel** (toolbar → Canvases):
+- **Canvases panel** (top bar → Canvases):
   - a list of every canvas (tap one to select it and zoom to it) and **Fit all**;
   - **New canvas** from a preset or a custom size up to 4096 × 4096: A4 300 dpi (2480 × 3508),
     US Letter 300 dpi (2550 × 3300), comic page 6.625 × 10.25 in at 300 dpi (1988 × 3075),
@@ -230,8 +234,9 @@ save status (Saved / Saving… / Unsaved / Not saved / Read-only; tap it for det
   screen gets a brief amber outline.
 - The selected canvas has a blue outline; a faint grid marks empty space.
 
-**Layers panel:** the top layer is listed first. Tap a row to select it. Use ● to show or hide a layer, and
-drag ≡ to reorder. The selected layer shows its opacity (one undo step per slider drag), blend mode, rename,
+**Layers panel** (Figma "drawing page (layers menu)"): a card per layer, top layer first. Tap a card to
+select it. The checkbox shows or hides a layer; drag the ≡ handle to reorder. The selected layer's card
+(blue) shows its opacity (one undo step per slider drag), blend mode, rename,
 duplicate, clear and delete. **Background** sets the paper colour, which the eraser never removes; its ●
 hides the paper, making the canvas transparent (shown over a checkerboard), so canvases inheriting it see
 only its strokes. The inherited block has its own row at the bottom (see below).
@@ -258,7 +263,7 @@ number of outgoing ones.
   on its left edge. Tap the stub, then tap the canvas to inherit from instead.
 - **Opacity:** arrows are faint by default; full for the selected arrow and the arrows touching the
   selected canvas; medium for the rest of the selected canvas's chain (`ARROW_STYLE` in `src/config.ts`).
-  **Arrows** in the toolbar hides or shows them all.
+  **Show arrows** in Settings hides or shows them all.
 - **Lineage:** the selected canvas's chain upstream and every canvas depending on it downstream get a faint
   outline, and a badge above it says how many canvases depend on it.
 - **Depth warning:** when a chain grows past 8 levels (`INHERITANCE_DEPTH_WARNING`), a banner says so. It
@@ -267,14 +272,15 @@ number of outgoing ones.
 Every arrow action is one undo step. Undoing a canvas deletion links its inheritors again.
 
 **The inherited block** (layers panel, bottom row, dashed): a thumbnail, its state (*from <source>*,
-*empty*, *source deleted*), opacity and blend mode, and ● to hide it. A canvas without a block offers
+*empty*, *source deleted*), opacity and blend mode, and a checkbox to hide it. A canvas without a block offers
 **Inherit from…** instead. Tap the row for its properties:
 - **Source** picker (canvases that would make a loop are disabled) and **Go to** the source;
 - **Opacity** (one undo step per drag) and **Blend**: normal, multiply, screen or overlay;
 - **Placement**: *fit inside* (the default, refitted when the source changes) or *custom* (as soon as it is
   moved, scaled, rotated or flipped). Fields for position, scale % and rotation °, **Flip H** / **Flip V**,
   **Refit** (fit inside again), and **Transform** (below);
-- **Crop** as % of the source (kept in normalized 0–1 coordinates, so it survives source resizes);
+- **Crop** (on the canvas, below) and **Reset crop**. The crop is kept in normalized 0–1 source
+  coordinates, so it survives source resizes;
 - **Effects**: grayscale, invert, posterize (with levels), applied in that order;
 - **Remove inherited block** (deletes the block and its settings; undoable).
 
@@ -282,7 +288,13 @@ Every arrow action is one undo step. Undoing a canvas deletion links its inherit
 to scale it about its centre, or the round handle above it to rotate (snapping to 15° steps within 2°).
 **Flip H**, **Flip V** and **Done** are in a bar at the bottom. While the mode is on, strokes are off and
 presses elsewhere pan. Leave it with Done, the Transform button again ("Done transforming"), any tool in the
-toolbar, or Escape / Enter. Each drag is one undo step.
+tool rail, or Escape / Enter. Each drag is one undo step.
+
+**Cropping** works the same way (Crop in the block's properties, or **Crop** in the bar, which switches
+between **Transform** and **Crop**): drag any edge or corner handle and those sides follow the pointer,
+up to the source's edges (outlined faintly). What stays visible doesn't move, whether the block is
+scaled, rotated or flipped (the block's centre moves with the crop, and a fitted block becomes custom).
+Presses inside the block pan. **Reset crop** in the bar shows the whole source again, in place.
 
 ### Memory settings
 
@@ -304,7 +316,7 @@ canvas shows its last composite or a coarser preview, so it never goes blank.
   project has one 4096 × 4096 canvas).
 - `?layerBudgetMB=N` sets the GPU budget for layer tiles.
 - `?renderer=webgl2` forces the WebGL2 fallback.
-- `?stress` adds stress mode to **Brush details & debug**:
+- `?stress` adds stress mode to **Settings → Debug**:
   - **Build workspace**: N canvases (default 20) of a preset size, each with M layers (default 4) of
     S scripted strokes (default 6), in a grid to the right of the existing canvases;
   - **Auto-pan**: resets the stats, flies the view from canvas to canvas and back, then reports frame
@@ -323,10 +335,12 @@ canvas shows its last composite or a coarser preview, so it never goes blank.
     reopen the project until its previews show and until it is at full resolution, and garbage
     collection after deleting the older half of the versions. The details go to the JSON export.
 
-**Brush panel:** size and opacity of the current tool (the brush and eraser have separate settings), and
-finger drawing (Auto / On / Off). Under **Brush details & debug** are spacing, smoothing, the pressure
-curve, pressure → size / opacity, "pressure from speed" for mouse and finger (faster = thinner; otherwise
-they draw at full pressure), two-finger rotate, fit view, toggle HUD, export JSON and reset stats.
+**Brush settings** (tool rail): spacing, smoothing, the pressure curve, pressure → size / opacity and
+"pressure from speed" for mouse and finger (faster = thinner; otherwise they draw at full pressure). The
+brush and eraser have separate settings. Size and opacity are the rail's two bars.
+
+**Settings** (top bar): the project's name (saved on Return or when you leave the field), finger drawing (Auto / On / Off), show arrows, and under **Debug** two-finger
+rotate, fit view, toggle HUD, export JSON and reset stats.
 
 ## Measurement HUD
 
@@ -402,7 +416,7 @@ src/
   brush/      pressure (real or from speed), stabilizer, dab interpolation, StrokeEngine (pure logic)
   render/     Renderer interface, RenderCore (shared by both backends), pyramid planner, tile
               residency + compressed store, packing helpers, webgpu/ and webgl2/ backends
-  ui/         toolbar, canvas labels, canvases panel, layers panel (+ block section), colour picker,
+  ui/         top bar, tool rail, popovers, canvas labels, canvases panel, layers panel (+ block section), colour picker,
               arrows and arrow controls, block-transform mode, undo indicator, …
   viewport/   workspace ↔ screen transform
   debug/      metrics, HUD, controls, JSON export, stress mode

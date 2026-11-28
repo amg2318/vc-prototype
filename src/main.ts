@@ -3,7 +3,6 @@ import './style.css';
 import { GESTURES, INHERITANCE_DEPTH_WARNING, TILE_BYTES } from './config';
 import { buildCanvasState } from './app/compositeState';
 import { StrokeController, type ActiveStroke } from './app/strokeController';
-import { Controls } from './debug/controls';
 import { buildExport, isStandalone, saveMeasurements, type SessionInfo } from './debug/exportMeasurements';
 import { Hud } from './debug/hud';
 import { Metrics } from './debug/metrics';
@@ -16,7 +15,6 @@ import type { PaintDocument } from './document/paintDocument';
 import { ProjectSession } from './persistence/projectSession';
 import { renderWorkspaceThumbnail } from './persistence/workspaceThumbnail';
 import { createStorageWorker, workerClient } from './storage/client';
-import { SaveIndicator } from './ui/saveIndicator';
 import { HistoryPanel } from './ui/historyPanel';
 import { ProjectsPage } from './ui/projectsPage';
 import { formatBytes } from './ui/storageSection';
@@ -47,7 +45,11 @@ import { UNDO_FEEDBACK_MS, UndoIndicator, edgeIndicator } from './ui/undoIndicat
 import type { Change } from './history/command';
 import { snapPosition } from './workspace/snap';
 import { Thumbnails } from './ui/thumbnails';
-import { Toolbar } from './ui/toolbar';
+import { BrushPanel } from './ui/brushPanel';
+import { ExportMenu } from './ui/exportMenu';
+import { SettingsPanel } from './ui/settingsPanel';
+import { ToolRail } from './ui/toolRail';
+import { TopBar, type TopBarPanel } from './ui/topBar';
 import { IDENTITY_VIEW, docToClipMatrix, docToScreen, fitRectToView, zoomAt, type ViewTransform } from './viewport/viewport';
 
 async function main(): Promise<void> {
@@ -506,11 +508,27 @@ async function main(): Promise<void> {
   project.onSaved = (stats) => metrics.noteSave(stats);
   project.onGarbageCollected = (stats) => metrics.noteGc(stats);
 
-  const controls = new Controls(
+  const brushPanel = new BrushPanel(
     () => tools.editableSettings,
     () => (tools.paintingTool === 'eraser' ? 'Eraser' : 'Brush'),
+  );
+  const settingsPanel = new SettingsPanel(
     input.fingers,
     {
+      renameProject(name) {
+        const open = project.project;
+        if (!open) return;
+        void project
+          .renameProject(open.id, name)
+          .catch(reportProjectError)
+          .then(() => refreshUi()); // the top bar and this field show the new name
+      },
+      setArrowsShown(shown) {
+        arrowControls.shown = shown;
+        if (!shown) arrowControls.select(null);
+        refreshUi();
+        requestFrame();
+      },
       fitView() {
         setView(fitAll());
       },
@@ -546,8 +564,8 @@ async function main(): Promise<void> {
       workspace.setActiveCanvas(id);
       zoomToCanvas(id);
     },
-    transformBlock: (id) => blockTransform.toggle(id),
-    isTransforming: (id) => blockTransform.canvasId === id,
+    editBlock: (id, tool) => blockTransform.toggle(id, tool),
+    blockTool: (id) => (blockTransform.canvasId === id ? blockTransform.tool : null),
   });
   thumbnails.onUpdated = () => layersPanel.update(); // the block row's thumbnail is built from layer thumbnails
   const canvasPanel = new CanvasPanel(() => workspace.canvases, () => workspace.activeCanvasId, {
@@ -578,11 +596,27 @@ async function main(): Promise<void> {
       reportProjectError(error);
     }
   }
-  // The layers, canvases and history panels share the right-hand side: one at a time.
-  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [layersPanel, canvasPanel, historyPanel];
+  // The popovers from the top bar and the rail's brush settings: one at a time.
+  const sidePanels = (): { visible: boolean; setVisible(v: boolean): void }[] => [
+    layersPanel,
+    canvasPanel,
+    historyPanel,
+    settingsPanel,
+    exportMenu,
+    brushPanel,
+  ];
   function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
     const show = !panel.visible;
     for (const p of sidePanels()) p.setVisible(p === panel && show);
+    refreshUi(); // the top bar outlines the open panel's button
+  }
+  function openTopBarPanel(): TopBarPanel | null {
+    if (exportMenu.visible) return 'export';
+    if (settingsPanel.visible) return 'settings';
+    if (historyPanel.visible) return 'history';
+    if (canvasPanel.visible) return 'canvases';
+    if (layersPanel.visible) return 'layers';
+    return null;
   }
   const historyPanel = new HistoryPanel({
     saveVersion: () => void saveVersion(),
@@ -649,16 +683,7 @@ async function main(): Promise<void> {
         showBanner(`Deleted “${p.name}”.`);
         return wasOpen ? undefined : null; // the workspace was emptied
       }),
-    exportFile: (p, includeHistory) =>
-      void (async () => {
-        try {
-          showBanner(`Exporting “${p.name}”…`, true);
-          const bytes = await project.exportProject(p.id, includeHistory);
-          await offerFile(bytes, `${safeFileName(p.name)}${PROJECT_FILE_EXTENSION}`, PROJECT_FILE_TYPE);
-        } catch (error) {
-          reportProjectError(error);
-        }
-      })(),
+    exportFile: (p, includeHistory) => void exportProjectFile(p, includeHistory),
     storage: {
       persisted: async () => (navigator.storage?.persisted ? navigator.storage.persisted() : null),
       requestPersistence: async () => (navigator.storage?.persist ? navigator.storage.persist() : false),
@@ -690,6 +715,15 @@ async function main(): Promise<void> {
       deleteAllData: requestReset,
     },
   });
+  async function exportProjectFile(p: { id: string; name: string }, includeHistory: boolean): Promise<void> {
+    try {
+      showBanner(`Exporting “${p.name}”…`, true);
+      const bytes = await project.exportProject(p.id, includeHistory);
+      await offerFile(bytes, `${safeFileName(p.name)}${PROJECT_FILE_EXTENSION}`, PROJECT_FILE_TYPE);
+    } catch (error) {
+      reportProjectError(error);
+    }
+  }
   /** Dev mode shows the HUD (and, on the Projects page, "Delete all data"). Remembered on this device. */
   function setDevMode(on: boolean): void {
     hud.setVisible(on);
@@ -766,39 +800,55 @@ async function main(): Promise<void> {
       reportProjectError(error);
     }
   }
-  const toolbar = new Toolbar({
+  const exportMenu = new ExportMenu({
+    exportCanvasPng: () => {
+      refreshUi(); // the menu just closed
+      const id = workspace.activeCanvasId;
+      if (id) void exportCanvasPng(id);
+      else showBanner('Tap a canvas first, then export it.');
+    },
+    exportProject: () => {
+      refreshUi(); // the menu just closed
+      if (project.project) void exportProjectFile(project.project, true);
+    },
+  });
+  const topBar = new TopBar({
+    showProjects,
+    toggleExport: () => togglePanel(exportMenu),
+    toggleSettings: () => togglePanel(settingsPanel),
+    toggleHistory: () => togglePanel(historyPanel),
+    toggleCanvases: () => togglePanel(canvasPanel),
+    toggleLayers: () => togglePanel(layersPanel),
+  });
+  const toolRail = new ToolRail({
     selectTool,
+    toggleColorPicker: () => {
+      brushPanel.setVisible(false); // both open beside the rail
+      picker.toggle();
+    },
+    settingsChanged: () => brushPanel.refresh(),
+    toggleBrushSettings: () => {
+      picker.close();
+      togglePanel(brushPanel);
+    },
     undo,
     redo,
-    toggleColorPicker: () => picker.toggle(),
-    toggleLayers: () => togglePanel(layersPanel),
-    toggleFingerDrawing: () => {
-      input.fingers.setting = input.fingers.enabled ? 'off' : 'on';
-    },
-    toggleArrows: () => {
-      arrowControls.shown = !arrowControls.shown;
-      if (!arrowControls.shown) arrowControls.select(null);
-      refreshUi();
-      requestFrame();
-    },
-    toggleCanvases: () => togglePanel(canvasPanel),
-    toggleHistory: () => togglePanel(historyPanel),
-    showProjects,
   });
 
   function refreshUi(): void {
-    toolbar.update({
+    topBar.update({ projectName: project.project?.name ?? '', openPanel: openTopBarPanel() });
+    toolRail.update({
       tool: tools.current,
       color: tools.brush.color,
+      settings: tools.editableSettings,
       canUndo: workspace.history.canUndo,
       canRedo: workspace.history.canRedo,
-      fingerDraws: input.fingers.enabled,
-      showArrows: arrowControls.shown,
     });
+    settingsPanel.update({ projectName: project.project?.name ?? '', arrowsShown: arrowControls.shown });
     layersPanel.update();
     canvasPanel.update();
     picker.setRecentColors(tools.recentColors);
-    controls.refresh();
+    brushPanel.refresh();
   }
   tools.onChange(refreshUi);
   input.fingers.onChange(refreshUi);
@@ -834,13 +884,7 @@ async function main(): Promise<void> {
 
   // --- saving (Phase 4) ---------------------------------------------------------
 
-  const saveIndicator = new SaveIndicator((status) =>
-    showBanner(status.message ?? (status.savedAt ? `All changes saved (last save ${new Date(status.savedAt).toLocaleTimeString()}).` : 'Not saved yet.')),
-  );
-  toolbar.element.append(saveIndicator.element);
-  saveIndicator.update(project.status);
   project.onStatus = (status) => {
-    saveIndicator.update(status);
     if (status.state === 'error' && status.message) {
       if (status.quota) showQuotaWarning(status.message);
       else showBanner(status.message);
@@ -869,7 +913,7 @@ async function main(): Promise<void> {
   if (import.meta.env.DEV) Object.assign(window, { workspace, metrics });
 
   if (new URLSearchParams(location.search).has('stress')) {
-    controls.debugBody.append(
+    settingsPanel.debugBody.append(
       createStressPanel({
         get editor() {
           return active() ?? workspace.editor(workspace.canvases[0]!.id);
@@ -887,7 +931,7 @@ async function main(): Promise<void> {
     );
   }
 
-  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, toolbar.element, picker.element, controls.element, layersPanel.element, canvasPanel.element, historyPanel.element, projectsPage.element, hud.element, loupe.element, banner, blockTransform.bar);
+  ui.append(undoIndicator.element, labels.element, arrowControls.element, blockTransform.element, topBar.element, toolRail.element, picker.element, brushPanel.element, settingsPanel.element, exportMenu.element, layersPanel.element, canvasPanel.element, historyPanel.element, projectsPage.element, hud.element, loupe.element, banner, blockTransform.bar);
   refreshUi();
 
   installShortcuts({

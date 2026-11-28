@@ -7,6 +7,8 @@
   --warn: #ff9f0a;
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  /* The Projects page's font, also used by messages (banners). */
+  --page-font: 'Hiragino Sans', var(--font);
 }
 
 html,
@@ -121,37 +123,261 @@ body {
   padding: 0 !important;
 }
 
-/* --- toolbar ------------------------------------------------------------- */
+/* --- drawing page: top bar and tool rail ------------------------------------ */
 
-.toolbar {
-  top: calc(env(safe-area-inset-top) + 10px);
-  left: 50%;
-  transform: translateX(-50%);
+/* Sizes and colours from the Figma "drawing page" frames (834 × 1194 portrait, 1194 × 834 landscape). */
+:root {
+  --bar-bg: #1e1e20;
+  --bar-button-bg: #2b2b2e;
+  --bar-button-active: #48484d;
+  /* Where the canvas area starts: below the top bar, right of the rail. */
+  --top-bar-height: 71px;
+  --rail-right: 78px;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 47px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  cursor: pointer;
+}
+
+.icon-button:active,
+.icon-button.active {
+  background: var(--bar-button-active);
+}
+
+.icon-button.open {
+  box-shadow: inset 0 0 0 2px #2b69e3; /* the design's 2 px blue border, without changing the size */
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-button img,
+.top-bar-back img {
+  display: block;
+  pointer-events: none;
+}
+
+.dim,
+.tool-rail .icon-button img {
+  opacity: 0.8;
+}
+
+.top-bar {
+  pointer-events: auto;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Buttons sit 15 px from the top, 12 px from the bottom, as in the design. */
+  height: calc(var(--top-bar-height) - 15px);
+  padding: calc(env(safe-area-inset-top) + 15px) calc(env(safe-area-inset-right) + 23px) 0 calc(env(safe-area-inset-left) + 18px);
+  box-sizing: content-box;
+  display: flex;
+  align-items: flex-start;
+  background: var(--bar-bg);
+  font-family: var(--page-font);
+}
+
+.top-bar-back {
   display: flex;
   align-items: center;
+  gap: 9px;
+  height: 44px;
+  padding: 0 0 0 13px;
+  width: 133px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  color: #c0c0c0;
+  font: 400 16px/24px var(--page-font);
+  cursor: pointer;
+}
+
+.top-bar-back:active {
+  background: var(--bar-button-active);
+}
+
+.top-bar-name {
+  flex: 1;
+  min-width: 0;
+  margin-left: 20px;
+  color: #bdbdbd;
+  font: 500 16px/44px var(--page-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-bar-buttons {
+  display: flex;
+  gap: 12px;
+  margin-left: 12px;
+}
+
+.tool-rail {
+  pointer-events: auto;
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  left: calc(env(safe-area-inset-left) + 18px);
+  width: 60px;
+  box-sizing: border-box;
+  padding: 7px 0 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px;
+  background: var(--bar-bg);
+  /* Never past the bottom of the screen: the size and opacity bars shrink first (see
+     .vertical-slider); on a screen too short even for that, the rail scrolls. */
+  max-height: calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 10px - env(safe-area-inset-bottom) - 10px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none; /* a scrollbar would squeeze the 60 px rail; wheel and touch still scroll */
+}
+
+.tool-rail > * {
+  flex: none;
+}
+
+
+.rail-swatch {
+  width: 42px;
+  height: 42px;
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.vertical-slider {
+  position: relative;
+  width: 47px;
+  height: 137px;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  touch-action: none;
+  /* In the rail, the bars give up height when the screen is short, down to a still-usable 64 px. */
+  flex: 0 1 137px;
+  min-height: 64px;
+  cursor: ns-resize;
+}
+
+.vertical-slider-thumb {
+  position: absolute;
+  left: 4px;
+  width: 40px;
+  height: 9px;
+  border-radius: 4px;
+  background: #808082;
+  pointer-events: none;
+}
+
+.rail-size {
+  margin-top: 11px;
+}
+
+.rail-opacity {
+  margin-top: 13px;
+}
+
+.rail-brush-settings {
+  margin-top: 8px;
+}
+
+.rail-divider {
+  display: block;
+  width: 61.0283px;
+  height: 2.36846px;
+  margin: 8px 0 3px;
+}
+
+.tool-rail .icon-button:last-child {
+  margin-top: 3px; /* redo sits 9 px under undo */
+}
+
+/* Short screens (e.g. a laptop browser window): tighten the extra space around the rail's groups. */
+@media (max-height: 820px) {
+  .tool-rail {
+    padding: 6px 0;
+  }
+
+  .rail-swatch,
+  .rail-size,
+  .rail-opacity,
+  .rail-brush-settings {
+    margin-top: 2px;
+  }
+
+  .rail-divider {
+    margin: 2px 0 0;
+  }
+
+  .tool-rail .icon-button:last-child {
+    margin-top: 0;
+  }
+}
+
+/* --- popovers from the top bar and the rail ------------------------------------- */
+
+.popover {
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  max-height: calc(100dvh - 160px);
+  overflow: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.popover-title {
+  font-weight: 600;
+}
+
+.popover-body {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+}
+
+.popover summary {
+  padding: 10px 14px;
+  min-height: 24px;
+  cursor: pointer;
+  color: var(--panel-muted);
+}
+
+/* Under their top-bar buttons (47 px wide, 12 px apart, 23 px from the right edge). */
+.export-menu {
+  right: calc(env(safe-area-inset-right) + 23px + 4 * 59px);
+  display: grid;
   gap: 6px;
   padding: 6px;
-  max-width: calc(100vw - 20px);
-  overflow-x: auto;
 }
 
-.toolbar-swatch {
-  width: 44px;
-  border-radius: 50% !important;
+.settings-panel {
+  right: calc(env(safe-area-inset-right) + 23px + 3 * 59px);
+  width: min(300px, calc(100vw - 20px));
 }
 
-.toolbar-separator {
-  width: 1px;
-  height: 28px;
-  background: rgba(255, 255, 255, 0.2);
+.brush-panel {
+  left: calc(env(safe-area-inset-left) + var(--rail-right) + 10px);
+  width: min(280px, calc(100vw - 20px));
 }
 
 /* --- colour picker -------------------------------------------------------- */
 
 .color-picker {
-  top: calc(env(safe-area-inset-top) + 72px);
-  left: 50%;
-  transform: translateX(-50%);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  left: calc(env(safe-area-inset-left) + var(--rail-right) + 10px);
   display: grid;
   gap: 10px;
   padding: 12px;
@@ -182,73 +408,52 @@ body {
   border-radius: 10px;
 }
 
-/* --- brush panel ---------------------------------------------------------- */
-
-.controls {
-  top: calc(env(safe-area-inset-top) + 72px);
-  left: calc(env(safe-area-inset-left) + 10px);
-  width: min(280px, calc(100vw - 20px));
-  max-height: calc(100dvh - 160px);
-  overflow: auto;
-}
-
-.controls-title {
-  font-weight: 600;
-}
-
-.controls-body {
-  display: grid;
-  gap: 4px;
-  padding: 10px 14px;
-}
-
-.controls summary {
-  padding: 10px 14px;
-  min-height: 24px;
-  cursor: pointer;
-  color: var(--panel-muted);
-}
-
 /* --- layers --------------------------------------------------------------- */
 
 .layers {
-  top: calc(env(safe-area-inset-top) + 72px);
-  right: calc(env(safe-area-inset-right) + 10px);
-  width: min(300px, calc(100vw - 20px));
-  max-height: calc(100dvh - 160px);
-  overflow: auto;
-  padding-bottom: 8px;
+  /* Figma "drawing page (layers menu)"; the container's look is shared by every menu (see .menu). */
+  right: calc(env(safe-area-inset-right) + 23px);
 }
 
-.layers header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 8px 4px 14px;
+.panel .layers-add {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
 }
 
-.layers h2 {
-  font-size: 15px;
-  margin: 0;
+.layers-add img {
+  opacity: 0.8;
 }
 
 .layers ol {
   list-style: none;
   margin: 0;
-  padding: 0 6px;
+  padding: 0;
+  display: grid;
+  /* One column exactly as wide as the panel: a long row shrinks or truncates instead of widening it. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
 }
 
+/* A layer card: 249 × 84, blue and expanded while active. */
 .layer-row {
-  border-radius: 10px;
-  margin-bottom: 4px;
-  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  color: #fff;
 }
 
 .layer-row.active {
-  background: rgba(10, 132, 255, 0.28);
+  background: #163c62;
 }
 
-.layer-row.hidden-layer .layer-name {
+.layer-row.hidden-layer .layer-name,
+.layer-row.hidden-layer .thumbnail {
   opacity: 0.5;
 }
 
@@ -261,48 +466,185 @@ body {
 .layer-main {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 56px;
-  padding: 4px 6px;
+  gap: 14px;
+  height: 84px;
+  box-sizing: border-box;
+  padding: 0 4px 0 0;
   cursor: pointer;
 }
 
+/* The block row has no drag handle: start at the card's inner edge, so its title has room. */
+.block-row .layer-main {
+  padding-left: 13px;
+}
+
 .thumbnail {
-  width: 44px;
-  height: 44px;
-  border-radius: 6px;
+  width: 45px;
+  height: 49px;
+  border-radius: 4px;
   flex: none;
+  object-fit: contain;
   /* Checkerboard so transparency is visible. */
   background: repeating-conic-gradient(#bbb 0% 25%, #eee 0% 50%) 50% / 12px 12px;
 }
 
 .layer-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font: 400 14px/21px var(--page-font);
 }
 
-.layer-main .eye {
-  background: transparent !important;
-  font-size: 18px;
-}
-
+/* 24 px icon, 10 px from the card's left edge, in a 44 px-tall target. */
 .drag-handle {
+  display: grid;
+  place-items: center start;
   width: 44px;
   height: 44px;
-  display: grid;
-  place-items: center;
-  font-size: 20px;
-  color: var(--panel-muted);
+  margin-right: -14px; /* the thumbnail starts 44 px in */
+  padding-left: 10px;
+  box-sizing: border-box;
+  flex: none;
   touch-action: none;
   cursor: grab;
+}
+
+.drag-handle img {
+  display: block;
+  pointer-events: none;
+}
+
+/* 16 px checkbox, 18 px from the card's right edge, in a 44 px target. */
+.layer-visible {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  cursor: pointer;
+}
+
+.layer-visible input[type='checkbox'] {
+  justify-self: center;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 1.5px solid #c0c0c0;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.layer-visible input[type='checkbox']:checked {
+  border: 0;
+  background: url('./assets/icons/drawing/check.svg') no-repeat center / 16px 16px;
+}
+
+.layer-row.active .layer-visible input[type='checkbox']:checked {
+  background-image: url('./assets/icons/drawing/check-active.svg');
 }
 
 .layer-details {
   display: grid;
   gap: 6px;
-  padding: 0 10px 10px;
+  padding: 1px 18px 13px 13px;
+  font: 400 12px/18px var(--page-font);
+}
+
+.layer-label {
+  display: flex;
+  justify-content: space-between;
+}
+
+.layer-details output {
+  font: inherit;
+  color: #fff;
+}
+
+/* Opacity: blue up to the thumb, as in the design. */
+/* `input.` beats the generic `.panel input[type='range']` rule. */
+.panel input.layer-opacity {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  min-height: 16px;
+  margin: 0 0 6px;
+  background: transparent;
+  --fill: 100%;
+}
+
+.layer-opacity::-webkit-slider-runnable-track {
+  height: 8px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 4px;
+  background: linear-gradient(to right, #0086ff var(--fill), #3a3a3c var(--fill));
+}
+
+.layer-opacity::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 50%;
+  background: #0086ff;
+}
+
+.layer-opacity::-moz-range-track {
+  height: 8px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 4px;
+  background: linear-gradient(to right, #0086ff var(--fill), #3a3a3c var(--fill));
+}
+
+.layer-opacity::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 50%;
+  background: #0086ff;
+}
+
+.panel .layer-select {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 31px;
+  min-height: 31px;
+  margin: 3px 0 10px;
+  padding: 0 24px 0 8px;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.layer-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.panel .layer-actions button {
+  min-height: 29px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--bar-bg);
+  color: #c0c0c0;
+  font: 400 12px/13px var(--page-font);
+}
+
+.panel .layer-actions button:active {
+  background: #000;
 }
 
 .paper-row {
@@ -311,7 +653,8 @@ body {
   justify-content: space-between;
   gap: 8px;
   min-height: 44px;
-  padding: 6px 14px 0;
+  padding: 12px 0 0;
+  color: #c0c0c0;
 }
 
 .paper-row input {
@@ -320,11 +663,16 @@ body {
   margin-left: auto;
 }
 
+.paper-row .eye {
+  background: transparent !important;
+  font-size: 18px;
+}
+
 /* --- HUD, loupe, messages -------------------------------------------------- */
 
 .hud {
   bottom: calc(env(safe-area-inset-bottom) + 10px);
-  left: calc(env(safe-area-inset-left) + 10px);
+  left: calc(env(safe-area-inset-left) + var(--rail-right) + 10px);
   margin: 0;
   padding: 0 12px 10px;
   font-family: var(--mono);
@@ -378,6 +726,7 @@ body {
   transform: translateX(-50%);
   padding: 10px 16px;
   color: var(--warn);
+  font-family: var(--page-font);
   max-width: min(560px, calc(100vw - 40px));
 }
 
@@ -436,7 +785,7 @@ body {
 /* --- Canvases panel -------------------------------------------------------- */
 
 .canvases {
-  top: calc(env(safe-area-inset-top) + 72px);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
   right: calc(env(safe-area-inset-right) + 10px);
   width: min(320px, calc(100vw - 20px));
   max-height: calc(100dvh - 160px);
@@ -670,8 +1019,25 @@ body {
   text-overflow: ellipsis;
 }
 
-.block-inherit {
-  padding: 6px 10px;
+/* "No inherited block" over a full-width source picker, like the layer card's Blend control. */
+.panel .block-inherit {
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 12px 13px 13px;
+  color: #c0c0c0;
+  font: 400 12px/18px var(--page-font);
+}
+
+.panel .block-inherit select {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 31px;
+  min-height: 31px;
+  padding: 0 24px 0 8px;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: inherit;
 }
 
 .block-details h3 {
@@ -759,6 +1125,28 @@ body {
   border-radius: 50%;
 }
 
+/* Crop tool: edge handles are bars along their edge, corners are squares;
+   the block itself doesn't take presses (they pan). */
+.block-transform.cropping .block-transform-body {
+  pointer-events: none;
+}
+
+.block-transform-handle.crop.edge-u {
+  cursor: ew-resize;
+}
+
+.block-transform-handle.crop.edge-v {
+  cursor: ns-resize;
+}
+
+.block-transform-handle.crop.edge-u::after {
+  inset: 10px 18px;
+}
+
+.block-transform-handle.crop.edge-v::after {
+  inset: 18px 10px;
+}
+
 .block-transform-bar {
   position: fixed;
   z-index: 10; /* above every panel and the HUD */
@@ -773,48 +1161,10 @@ body {
   white-space: nowrap;
 }
 
-/* --- save indicator (Phase 4) ------------------------------------------------ */
-
-.save-indicator {
-  min-width: 84px;
-  font-size: 13px;
-  color: var(--panel-muted);
-}
-
-.save-indicator::before {
-  content: '';
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: 50%;
-  background: #30d158; /* saved */
-  vertical-align: 1px;
-}
-
-.save-indicator[data-state='saving']::before,
-.save-indicator[data-state='unsaved']::before {
-  background: var(--panel-muted);
-}
-
-.save-indicator[data-state='error']::before,
-.save-indicator[data-state='not-persistent']::before {
-  background: #ff453a;
-}
-
-.save-indicator[data-state='error'],
-.save-indicator[data-state='not-persistent'] {
-  color: #ff453a;
-}
-
-.save-indicator[data-state='read-only']::before {
-  background: var(--warn);
-}
-
 /* --- history (Phase 4) ---------------------------------------------------- */
 
 .history {
-  top: calc(env(safe-area-inset-top) + 72px);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
   right: calc(env(safe-area-inset-right) + 10px);
   width: min(340px, calc(100vw - 20px));
   max-height: calc(100dvh - 160px);
@@ -963,7 +1313,6 @@ body {
   --card-bg: #2b2b2e;
   --card-line: #767676;
   --page-text: #bdbdbd;
-  --page-font: 'Hiragino Sans', var(--font);
   position: fixed;
   inset: 0;
   overflow-y: auto;
@@ -1206,4 +1555,257 @@ body {
   font-size: 24px;
   font-weight: 500;
   pointer-events: none;
+}
+
+/* --- Drawing page menus --------------------------------------------------------
+   Every menu on the drawing page (layers, canvases, history, settings, export, brush
+   settings, colour) shares the Figma layers menu's look: a dark panel with a grey border,
+   a 20 px title, cards that turn blue when selected, and the same buttons, dropdowns,
+   text fields and checkboxes. Placed last so it overrides the generic .panel rules. */
+
+.menu {
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  box-sizing: border-box;
+  max-height: min(587px, calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 20px - env(safe-area-inset-bottom)));
+  /* Scrolls up and down only: everything inside fits the menu's width. */
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  padding: 0 20px 20px; /* + the 1 px border = the design's 21 px */
+  border: 1px solid #555556;
+  border-radius: 4px;
+  background: var(--bar-bg);
+  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.25);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: #c0c0c0;
+  font: 400 14px/21px var(--page-font);
+}
+
+/* The menus on the right, under their top-bar buttons: the design's 291 px, narrower when the
+   screen is (never wider than the space right of the rail). */
+.layers.menu,
+.canvases.menu,
+.history.menu,
+.settings-panel.menu {
+  width: min(291px, calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - var(--rail-right) - 33px));
+}
+
+.canvases.menu,
+.history.menu {
+  right: calc(env(safe-area-inset-right) + 23px);
+}
+
+/* Title row: the title, and an optional action on the right (add layer, fit all, save version). */
+.menu header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 36px;
+  padding: 19px 0 15px;
+}
+
+.menu h2,
+.menu .popover-title {
+  margin: 0;
+  color: #c0c0c0;
+  font: 400 20px/30px var(--page-font);
+}
+
+/* Menus without a header element: their title gets the header's spacing. */
+.color-picker.menu > h2,
+.menu .popover-title {
+  padding: 19px 0 9px;
+}
+
+.menu h3 {
+  margin: 14px 0 6px;
+  color: #c0c0c0;
+  font: 400 14px/21px var(--page-font);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.menu .popover-body {
+  gap: 10px;
+  padding: 0;
+}
+
+.menu summary {
+  padding: 10px 0;
+  color: #c0c0c0;
+}
+
+.menu output,
+.menu .row output {
+  min-width: 0;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+/* Rows, as in the layer card: the label above its slider or dropdown (a value, a button
+   or a second control goes on the right); a checkbox stays on the label's line. */
+.menu .row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu .row > span:first-child {
+  grid-column: 1 / -1;
+}
+
+.menu .row:has(> input[type='checkbox']) > span:first-child {
+  grid-column: auto;
+}
+
+.menu .row > :last-child:nth-child(2):not([type='checkbox']) {
+  grid-column: 1 / -1; /* a lone control (e.g. a dropdown) takes the full width */
+}
+
+.menu .block-grid {
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  font: 400 12px/18px var(--page-font);
+}
+
+/* Buttons: like the layer card's actions, but on the menu's background. */
+.menu button {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 4px;
+  background: var(--bar-button-bg);
+  color: #c0c0c0;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu header button {
+  min-height: 36px;
+  border-radius: 8px;
+}
+
+.menu button:active,
+.menu button.active {
+  background: #0086ff;
+  color: #fff;
+}
+
+/* Inside a card (#2b2b2e or the blue selected card), buttons take the menu's darker colour. */
+.menu li button {
+  background: var(--bar-bg);
+}
+
+.menu select {
+  -webkit-appearance: none;
+  appearance: none;
+  min-width: 0;
+  height: 31px;
+  min-height: 31px;
+  padding: 0 24px 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu input[type='text'],
+.menu input[type='number'] {
+  min-width: 0;
+  height: 31px;
+  min-height: 31px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: #3a3a3c;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu input[type='range'] {
+  accent-color: #0086ff;
+}
+
+/* The layers menu's checkbox: a 16 px rounded box, ticked with the design's check. */
+.menu input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 1.5px solid #c0c0c0;
+  border-radius: 4px;
+}
+
+.menu input[type='checkbox']:checked {
+  border: 0;
+  background: url('./assets/icons/drawing/check.svg') no-repeat center / 16px 16px;
+}
+
+/* Lists of cards (canvases, versions), like the layer cards. */
+.canvases.menu ol,
+.history.menu ol {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.canvases.menu .canvas-row,
+.history.menu .version-row {
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  color: #fff;
+}
+
+.canvases.menu .canvas-row {
+  min-height: 52px;
+  padding: 0 13px;
+  font-size: 14px;
+}
+
+.canvases.menu .canvas-row.active,
+.history.menu .version-row.active {
+  background: #163c62;
+}
+
+.canvases.menu .canvas-size,
+.history.menu .version-meta {
+  color: #c0c0c0;
+  font: 400 12px/18px var(--page-font);
+}
+
+.history.menu .version-summary {
+  gap: 13px;
+  min-height: 84px;
+  padding: 0 13px;
+}
+
+.history.menu .version-summary img {
+  border-radius: 4px;
+  background: var(--bar-bg);
+}
+
+.history.menu .version-name {
+  font-size: 14px;
+}
+
+.history.menu .version-details {
+  padding: 0 13px 13px;
+}
+
+.history-empty {
+  font-size: 12px;
+}
+
+/* Small menus keep their own width. */
+.export-menu.menu {
+  display: grid;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.color-picker.menu {
+  gap: 10px;
 }

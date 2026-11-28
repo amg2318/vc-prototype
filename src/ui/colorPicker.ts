@@ -19,7 +19,7 @@ export class ColorPicker {
 
   constructor(private readonly onPick: (color: RGB) => void) {
     this.element = document.createElement('div');
-    this.element.className = 'color-picker panel';
+    this.element.className = 'color-picker panel menu';
     this.element.hidden = true;
 
     this.square = this.canvas('picker-square', SQUARE_W, SQUARE_H);
@@ -28,7 +28,8 @@ export class ColorPicker {
     this.recents.className = 'picker-recents';
     this.hex = document.createElement('div');
     this.hex.className = 'picker-hex';
-    this.element.append(this.square, this.hue, this.hex, this.recents);
+    const title = Object.assign(document.createElement('h2'), { textContent: 'Colour' });
+    this.element.append(title, this.square, this.hue, this.hex, this.recents);
 
     this.drag(this.square, (x, y) => {
       this.hsv = { ...this.hsv, s: x, v: 1 - y };

@@ -3,6 +3,8 @@ import type { Editor } from '../document/editor';
 import type { BlockBlendMode, Effect, InheritedBlock } from '../document/inheritedBlock';
 import type { CanvasId, PaintDocument } from '../document/paintDocument';
 import type { Workspace } from '../workspace/workspace';
+import type { BlockTool } from './blockTransformMode';
+import { visibilityCheckbox } from './formRows';
 import type { Thumbnails } from './thumbnails';
 
 const BLOCK_BLEND_MODES: BlockBlendMode[] = ['normal', 'multiply', 'screen', 'overlay'];
@@ -11,9 +13,10 @@ const DEFAULT_POSTERIZE_LEVELS = 4;
 export interface BlockSectionActions {
   /** Select a canvas and bring it into view ("Go to source"). */
   goToCanvas(id: CanvasId): void;
-  /** Enter block-transform mode for this canvas's block (or leave it). */
-  transformBlock(id: CanvasId): void;
-  isTransforming(id: CanvasId): boolean;
+  /** Edit this canvas's block on the canvas with `tool` (or stop, if that tool is already on). */
+  editBlock(id: CanvasId, tool: BlockTool): void;
+  /** The on-canvas tool in use for this canvas's block, or null. */
+  blockTool(id: CanvasId): BlockTool | null;
 }
 
 /**
@@ -92,11 +95,10 @@ export class BlockSection {
     this.summary = document.createElement('div');
     this.summary.className = 'block-summary';
     text.append(title, this.summary);
-    const eye = button(block.visible ? '●' : '○', () => this.set({ visible: !(editor.doc.inherited?.visible ?? true) }), block.visible ? 'Hide block' : 'Show block');
-    eye.classList.add('eye');
-    main.append(this.thumbnail, text, eye);
+    const visible = visibilityCheckbox(block.visible, (v) => this.set({ visible: v }));
+    main.append(this.thumbnail, text, visible);
     main.addEventListener('click', (e) => {
-      if (e.target === eye) return;
+      if (visible.contains(e.target as Node)) return;
       this.open = !this.open;
       this.signature = '';
       this.update(editor);
@@ -157,25 +159,15 @@ export class BlockSection {
       [span('Scale %'), scale, span('')],
       [span('Rotate °'), rotation, span('')],
     ]);
-    const transform = button('Transform', () => this.actions.transformBlock(id), 'Move, scale and rotate the block on the canvas (tap again to finish)');
+    const transform = button('Transform', () => this.actions.editBlock(id, 'transform'), 'Move, scale and rotate the block on the canvas (tap again to finish)');
     transform.dataset.field = 'transform';
     const placementButtons = buttons(transform, flipX, flipY, refit);
     const mode = span(block.placement.mode === 'fit' ? 'Placement: fit inside' : 'Placement: custom');
     mode.className = 'block-mode';
 
-    // Crop, as % of the source
-    const setCrop = (): void => {
-      const v = (k: string): number => Number((this.fields.get(k) as HTMLInputElement).value) / 100;
-      const cx = clamp(v('cropX'), 0, 0.99);
-      const cy = clamp(v('cropY'), 0, 0.99);
-      const crop = { x: cx, y: cy, width: clamp(v('cropW'), 0.01, 1 - cx), height: clamp(v('cropH'), 0.01, 1 - cy) };
-      const whole = crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1;
-      ws.setBlock(id, { crop: whole ? undefined : crop }, 'Crop inherited block');
-    };
-    const crop = grid([
-      [span('Crop x, y %'), this.numberField('cropX', setCrop), this.numberField('cropY', setCrop)],
-      [span('Crop w, h %'), this.numberField('cropW', setCrop), this.numberField('cropH', setCrop)],
-    ]);
+    // Crop: on the canvas, by dragging the block's edges
+    const crop = button('Crop', () => this.actions.editBlock(id, 'crop'), 'Crop the block on the canvas by dragging its edges (tap again to finish)');
+    crop.dataset.field = 'crop';
     const resetCrop = button('Reset crop', () => ws.setBlock(id, { crop: undefined }, 'Crop inherited block'), 'Show the whole source');
     resetCrop.disabled = block.crop === undefined;
 
@@ -226,8 +218,7 @@ export class BlockSection {
       placement,
       placementButtons,
       heading('Crop'),
-      crop,
-      buttons(resetCrop),
+      buttons(crop, resetCrop),
       heading('Effects'),
       effectsBox,
       ...(levelsRow ? [levelsRow] : []),
@@ -260,7 +251,6 @@ export class BlockSection {
   private refreshValues(block: InheritedBlock, ws: Workspace): void {
     if (this.summary) this.summary.textContent = summaryText(block, ws);
     const p = block.placement;
-    const crop = block.crop ?? { x: 0, y: 0, width: 1, height: 1 };
     const values: Record<string, string> = {
       opacity: String(block.opacity),
       blendMode: block.blendMode,
@@ -268,20 +258,21 @@ export class BlockSection {
       y: round(p.y),
       scale: round(p.scale * 100, 1),
       rotation: round((p.rotation * 180) / Math.PI, 1),
-      cropX: round(crop.x * 100, 1),
-      cropY: round(crop.y * 100, 1),
-      cropW: round(crop.width * 100, 1),
-      cropH: round(crop.height * 100, 1),
       levels: String(block.effects.find((e) => e.kind === 'posterize')?.levels ?? DEFAULT_POSTERIZE_LEVELS),
     };
     for (const [key, field] of this.fields) {
       if (document.activeElement !== field && values[key] !== undefined) field.value = values[key];
     }
+    const tool = this.editor ? this.actions.blockTool(this.editor.doc.id) : null;
     const transform = this.element.querySelector<HTMLButtonElement>('button[data-field="transform"]');
-    if (transform && this.editor) {
-      const on = this.actions.isTransforming(this.editor.doc.id);
-      transform.textContent = on ? 'Done transforming' : 'Transform';
-      transform.classList.toggle('active', on);
+    if (transform) {
+      transform.textContent = tool === 'transform' ? 'Done transforming' : 'Transform';
+      transform.classList.toggle('active', tool === 'transform');
+    }
+    const crop = this.element.querySelector<HTMLButtonElement>('button[data-field="crop"]');
+    if (crop) {
+      crop.textContent = tool === 'crop' ? 'Done cropping' : 'Crop';
+      crop.classList.toggle('active', tool === 'crop');
     }
     const out = this.element.querySelector<HTMLOutputElement>('output[data-field="opacityText"]');
     if (out) out.textContent = `${Math.round(block.opacity * 100)}%`;

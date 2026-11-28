@@ -1,4 +1,4 @@
-import { croppedSize, type BlockPlacement, type InheritedBlock, type Size } from './inheritedBlock';
+import { croppedSize, cropRect, type BlockCrop, type BlockPlacement, type InheritedBlock, type Size } from './inheritedBlock';
 
 /**
  * The maths of block-transform mode: the block's frame on the inheritor and
@@ -96,4 +96,85 @@ export function normalizeAngle(a: number): number {
 export function snapAngle(a: number): number {
   const nearest = Math.round(a / SNAP_STEP) * SNAP_STEP;
   return Math.abs(a - nearest) <= SNAP_WITHIN ? nearest : a;
+}
+
+// --- cropping on the canvas -------------------------------------------------------
+
+/**
+ * A crop handle: which sides of the block it moves, in the block's own axes
+ * (u: -1 left, 1 right; v: -1 top, 1 bottom; 0 = that axis stays). Corners
+ * move two sides, edge handles one.
+ */
+export interface CropHandle {
+  u: -1 | 0 | 1;
+  v: -1 | 0 | 1;
+}
+
+export interface CropDrag {
+  handle: CropHandle;
+  /** Pointer where the drag started. */
+  start: Point;
+  /** The block and its source's size when the drag started. */
+  block: InheritedBlock;
+  sourceSize: Size;
+}
+
+/** Narrowest a crop can get (inheritor pixels), so its handles stay apart. */
+export const MIN_CROP_PX = 8;
+
+/**
+ * The crop and block centre for the pointer at `p` during `drag`. The
+ * dragged sides follow the pointer (within the source); the content does
+ * not move on the canvas, whatever the rotation, scale and flips.
+ */
+export function dragCrop(drag: CropDrag, p: Point): { crop: BlockCrop | undefined; centre: Point } {
+  const { block, sourceSize, handle } = drag;
+  const frame = blockFrame(block, sourceSize);
+  const cos = Math.cos(frame.rotation);
+  const sin = Math.sin(frame.rotation);
+  const dx = p.x - drag.start.x;
+  const dy = p.y - drag.start.y;
+  const du = dx * cos + dy * sin;
+  const dv = -dx * sin + dy * cos;
+
+  // Where the source's edges are, in the block's axes: the crop can grow up to them.
+  const r = cropRect(block.crop, sourceSize);
+  const s = block.placement.scale;
+  const fx = block.placement.flipX ? -1 : 1;
+  const fy = block.placement.flipY ? -1 : 1;
+  const cx = r.x + r.width / 2;
+  const cy = r.y + r.height / 2;
+  const uLimits = sorted(fx * s * -cx, fx * s * (sourceSize.width - cx));
+  const vLimits = sorted(fy * s * -cy, fy * s * (sourceSize.height - cy));
+
+  const [left, right] = moveSides(-frame.halfWidth, frame.halfWidth, handle.u, du, uLimits);
+  const [top, bottom] = moveSides(-frame.halfHeight, frame.halfHeight, handle.v, dv, vLimits);
+
+  // Back to source pixels: u = fx * s * (x - cx), so x = cx + fx * u / s.
+  const [x0, x1] = sorted(cx + (fx * left) / s, cx + (fx * right) / s);
+  const [y0, y1] = sorted(cy + (fy * top) / s, cy + (fy * bottom) / s);
+  const crop = {
+    x: clamp01(x0 / sourceSize.width),
+    y: clamp01(y0 / sourceSize.height),
+    width: clamp01((x1 - x0) / sourceSize.width),
+    height: clamp01((y1 - y0) / sourceSize.height),
+  };
+  const whole = crop.x < 1e-6 && crop.y < 1e-6 && crop.width > 1 - 1e-6 && crop.height > 1 - 1e-6;
+  return { crop: whole ? undefined : crop, centre: framePoint(frame, (left + right) / 2, (top + bottom) / 2) };
+}
+
+/** Move the low (side -1) or high (side 1) end of [lo, hi] by `delta`, within `limits`, keeping it at least MIN_CROP_PX wide. */
+function moveSides(lo: number, hi: number, side: -1 | 0 | 1, delta: number, limits: [number, number]): [number, number] {
+  const min = Math.min(MIN_CROP_PX, hi - lo);
+  if (side === -1) return [Math.min(Math.max(lo + delta, limits[0]), hi - min), hi];
+  if (side === 1) return [lo, Math.max(Math.min(hi + delta, limits[1]), lo + min)];
+  return [lo, hi];
+}
+
+function sorted(a: number, b: number): [number, number] {
+  return a <= b ? [a, b] : [b, a];
+}
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
 }
