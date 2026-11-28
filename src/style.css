@@ -123,37 +123,226 @@ body {
   padding: 0 !important;
 }
 
-/* --- toolbar ------------------------------------------------------------- */
+/* --- drawing page: top bar and tool rail ------------------------------------ */
 
-.toolbar {
-  top: calc(env(safe-area-inset-top) + 10px);
-  left: 50%;
-  transform: translateX(-50%);
+/* Sizes and colours from the Figma "drawing page" frames (834 × 1194 portrait, 1194 × 834 landscape). */
+:root {
+  --bar-bg: #1e1e20;
+  --bar-button-bg: #2b2b2e;
+  --bar-button-active: #48484d;
+  /* Where the canvas area starts: below the top bar, right of the rail. */
+  --top-bar-height: 71px;
+  --rail-right: 78px;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 47px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  cursor: pointer;
+}
+
+.icon-button:active,
+.icon-button.active {
+  background: var(--bar-button-active);
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-button img,
+.top-bar-back img {
+  display: block;
+  pointer-events: none;
+}
+
+.dim,
+.tool-rail .icon-button img {
+  opacity: 0.8;
+}
+
+.top-bar {
+  pointer-events: auto;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Buttons sit 15 px from the top, 12 px from the bottom, as in the design. */
+  height: calc(var(--top-bar-height) - 15px);
+  padding: calc(env(safe-area-inset-top) + 15px) calc(env(safe-area-inset-right) + 23px) 0 calc(env(safe-area-inset-left) + 18px);
+  box-sizing: content-box;
+  display: flex;
+  align-items: flex-start;
+  background: var(--bar-bg);
+  font-family: var(--page-font);
+}
+
+.top-bar-back {
   display: flex;
   align-items: center;
+  gap: 9px;
+  height: 44px;
+  padding: 0 0 0 13px;
+  width: 133px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  color: #c0c0c0;
+  font: 400 16px/24px var(--page-font);
+  cursor: pointer;
+}
+
+.top-bar-back:active {
+  background: var(--bar-button-active);
+}
+
+.top-bar-name {
+  flex: 1;
+  min-width: 0;
+  margin-left: 20px;
+  color: #bdbdbd;
+  font: 500 16px/44px var(--page-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-bar-buttons {
+  display: flex;
+  gap: 12px;
+  margin-left: 12px;
+}
+
+/* The export image is drawn pointing right; the design turns it to point up. */
+.export-icon {
+  transform: rotate(-90deg);
+}
+
+.tool-rail {
+  pointer-events: auto;
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  left: calc(env(safe-area-inset-left) + 18px);
+  width: 60px;
+  box-sizing: border-box;
+  padding: 7px 0 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px;
+  background: var(--bar-bg);
+}
+
+.rail-swatch {
+  width: 42px;
+  height: 42px;
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.vertical-slider {
+  position: relative;
+  width: 47px;
+  height: 137px;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  touch-action: none;
+  cursor: ns-resize;
+}
+
+.vertical-slider-thumb {
+  position: absolute;
+  left: 4px;
+  width: 40px;
+  height: 9px;
+  border-radius: 4px;
+  background: #808082;
+  pointer-events: none;
+}
+
+.rail-size {
+  margin-top: 11px;
+}
+
+.rail-opacity {
+  margin-top: 13px;
+}
+
+.rail-brush-settings {
+  margin-top: 8px;
+}
+
+.rail-divider {
+  display: block;
+  width: 61.0283px;
+  height: 2.36846px;
+  margin: 8px 0 3px;
+}
+
+.tool-rail .icon-button:last-child {
+  margin-top: 3px; /* redo sits 9 px under undo */
+}
+
+/* --- popovers from the top bar and the rail ------------------------------------- */
+
+.popover {
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  max-height: calc(100dvh - 160px);
+  overflow: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.popover-title {
+  font-weight: 600;
+}
+
+.popover-body {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+}
+
+.popover summary {
+  padding: 10px 14px;
+  min-height: 24px;
+  cursor: pointer;
+  color: var(--panel-muted);
+}
+
+/* Under their top-bar buttons (47 px wide, 12 px apart, 23 px from the right edge). */
+.export-menu {
+  right: calc(env(safe-area-inset-right) + 23px + 4 * 59px);
+  display: grid;
   gap: 6px;
   padding: 6px;
-  max-width: calc(100vw - 20px);
-  overflow-x: auto;
 }
 
-.toolbar-swatch {
-  width: 44px;
-  border-radius: 50% !important;
+.settings-panel {
+  right: calc(env(safe-area-inset-right) + 23px + 3 * 59px);
+  width: min(300px, calc(100vw - 20px));
 }
 
-.toolbar-separator {
-  width: 1px;
-  height: 28px;
-  background: rgba(255, 255, 255, 0.2);
+.brush-panel {
+  left: calc(env(safe-area-inset-left) + var(--rail-right) + 10px);
+  width: min(280px, calc(100vw - 20px));
 }
 
 /* --- colour picker -------------------------------------------------------- */
 
 .color-picker {
-  top: calc(env(safe-area-inset-top) + 72px);
-  left: 50%;
-  transform: translateX(-50%);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  left: calc(env(safe-area-inset-left) + var(--rail-right) + 10px);
   display: grid;
   gap: 10px;
   padding: 12px;
@@ -184,37 +373,10 @@ body {
   border-radius: 10px;
 }
 
-/* --- brush panel ---------------------------------------------------------- */
-
-.controls {
-  top: calc(env(safe-area-inset-top) + 72px);
-  left: calc(env(safe-area-inset-left) + 10px);
-  width: min(280px, calc(100vw - 20px));
-  max-height: calc(100dvh - 160px);
-  overflow: auto;
-}
-
-.controls-title {
-  font-weight: 600;
-}
-
-.controls-body {
-  display: grid;
-  gap: 4px;
-  padding: 10px 14px;
-}
-
-.controls summary {
-  padding: 10px 14px;
-  min-height: 24px;
-  cursor: pointer;
-  color: var(--panel-muted);
-}
-
 /* --- layers --------------------------------------------------------------- */
 
 .layers {
-  top: calc(env(safe-area-inset-top) + 72px);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
   right: calc(env(safe-area-inset-right) + 10px);
   width: min(300px, calc(100vw - 20px));
   max-height: calc(100dvh - 160px);
@@ -326,7 +488,7 @@ body {
 
 .hud {
   bottom: calc(env(safe-area-inset-bottom) + 10px);
-  left: calc(env(safe-area-inset-left) + 10px);
+  left: calc(env(safe-area-inset-left) + var(--rail-right) + 10px);
   margin: 0;
   padding: 0 12px 10px;
   font-family: var(--mono);
@@ -439,7 +601,7 @@ body {
 /* --- Canvases panel -------------------------------------------------------- */
 
 .canvases {
-  top: calc(env(safe-area-inset-top) + 72px);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
   right: calc(env(safe-area-inset-right) + 10px);
   width: min(320px, calc(100vw - 20px));
   max-height: calc(100dvh - 160px);
@@ -798,48 +960,10 @@ body {
   white-space: nowrap;
 }
 
-/* --- save indicator (Phase 4) ------------------------------------------------ */
-
-.save-indicator {
-  min-width: 84px;
-  font-size: 13px;
-  color: var(--panel-muted);
-}
-
-.save-indicator::before {
-  content: '';
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: 50%;
-  background: #30d158; /* saved */
-  vertical-align: 1px;
-}
-
-.save-indicator[data-state='saving']::before,
-.save-indicator[data-state='unsaved']::before {
-  background: var(--panel-muted);
-}
-
-.save-indicator[data-state='error']::before,
-.save-indicator[data-state='not-persistent']::before {
-  background: #ff453a;
-}
-
-.save-indicator[data-state='error'],
-.save-indicator[data-state='not-persistent'] {
-  color: #ff453a;
-}
-
-.save-indicator[data-state='read-only']::before {
-  background: var(--warn);
-}
-
 /* --- history (Phase 4) ---------------------------------------------------- */
 
 .history {
-  top: calc(env(safe-area-inset-top) + 72px);
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
   right: calc(env(safe-area-inset-right) + 10px);
   width: min(340px, calc(100vw - 20px));
   max-height: calc(100dvh - 160px);

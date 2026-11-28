@@ -7,7 +7,7 @@ import type { ViewTransform } from '../viewport/viewport';
 import { union, type Rect } from '../workspace/coords';
 import { CANVAS_PRESETS } from '../workspace/presets';
 import type { Workspace } from '../workspace/workspace';
-import { buttons } from './controls';
+import { buttons } from '../ui/formRows';
 import { buildGroup, describeRun, strokeRoot, type Shape } from './inheritanceStress';
 import type { Metrics } from './metrics';
 import { persistenceRun, type PersistenceStressDeps } from './persistenceStress';
