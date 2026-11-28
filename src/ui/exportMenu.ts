@@ -20,7 +20,9 @@ export class ExportMenu extends Popover {
       });
       return b;
     };
+    const title = Object.assign(document.createElement('div'), { className: 'popover-title', textContent: 'Export' });
     this.element.append(
+      title,
       item('Canvas as PNG', 'Save the active canvas as a PNG image', actions.exportCanvasPng),
       item('Project file', `Save this project, with its versions, as a ${PROJECT_FILE_EXTENSION} file`, actions.exportProject),
     );

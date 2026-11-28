@@ -49,7 +49,7 @@ export class LayersPanel {
   ) {
     this.block = new BlockSection(thumbnails, blockActions);
     this.element = document.createElement('aside');
-    this.element.className = 'layers panel';
+    this.element.className = 'layers panel menu';
 
     const header = document.createElement('header');
     const title = document.createElement('h2');

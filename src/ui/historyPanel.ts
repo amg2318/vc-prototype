@@ -26,7 +26,7 @@ export class HistoryPanel {
   private readonly images = new Map<string, Promise<string | null>>();
 
   constructor(private readonly actions: HistoryActions) {
-    this.element.className = 'history panel';
+    this.element.className = 'history panel menu';
     this.element.hidden = true;
     const header = document.createElement('header');
     const title = Object.assign(document.createElement('h2'), { textContent: 'History' });

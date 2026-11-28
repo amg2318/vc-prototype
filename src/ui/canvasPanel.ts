@@ -53,7 +53,7 @@ export class CanvasPanel {
     private readonly activeId: () => string | null,
     private readonly actions: CanvasPanelActions,
   ) {
-    this.element.className = 'canvases panel';
+    this.element.className = 'canvases panel menu';
     this.element.hidden = true;
 
     const header = document.createElement('header');

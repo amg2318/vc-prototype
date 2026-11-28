@@ -411,38 +411,8 @@ body {
 /* --- layers --------------------------------------------------------------- */
 
 .layers {
-  /* Figma "drawing page (layers menu)": 291 px wide, 23 px from the right edge (under the Layers button). */
-  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  /* Figma "drawing page (layers menu)"; the container's look is shared by every menu (see .menu). */
   right: calc(env(safe-area-inset-right) + 23px);
-  /* The design's 291 px, narrower when the screen is (never wider than the space right of the rail). */
-  width: min(291px, calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - var(--rail-right) - 33px));
-  box-sizing: border-box;
-  max-height: min(587px, calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 20px));
-  /* Scrolls up and down only: everything inside fits the panel's width. */
-  overflow: hidden auto;
-  overscroll-behavior: contain;
-  padding: 0 20px 20px; /* + the 1 px border = the design's 21 px */
-  border: 1px solid #555556;
-  border-radius: 4px;
-  background: var(--bar-bg);
-  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.25);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-  font-family: var(--page-font);
-}
-
-.layers header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 36px;
-  padding: 19px 0 15px;
-}
-
-.layers h2 {
-  margin: 0;
-  color: #c0c0c0;
-  font: 400 20px/30px var(--page-font);
 }
 
 .panel .layers-add {
@@ -1101,38 +1071,6 @@ body {
   min-width: 0;
 }
 
-/* Inside the layers panel (a card ~250 px wide): each label sits above its control(s), like
-   the layer card's Opacity and Blend, so nothing has to squeeze side by side. */
-.layers .row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
-}
-
-.layers .row > span:first-child {
-  grid-column: 1 / -1;
-}
-
-.layers .row > :last-child:nth-child(2) {
-  grid-column: 1 / -1; /* a lone control (e.g. Blend) takes the full width */
-}
-
-.layers .block-grid {
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
-}
-
-.layers.panel select {
-  -webkit-appearance: none;
-  appearance: none;
-  min-width: 0;
-  height: 31px;
-  min-height: 31px;
-  padding: 0 24px 0 8px;
-  border-radius: 4px;
-  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
-  color: #fff;
-  font: 400 12px/18px var(--page-font);
-}
-
 .panel button.danger {
   background: #6b2a24;
 }
@@ -1617,4 +1555,257 @@ body {
   font-size: 24px;
   font-weight: 500;
   pointer-events: none;
+}
+
+/* --- Drawing page menus --------------------------------------------------------
+   Every menu on the drawing page (layers, canvases, history, settings, export, brush
+   settings, colour) shares the Figma layers menu's look: a dark panel with a grey border,
+   a 20 px title, cards that turn blue when selected, and the same buttons, dropdowns,
+   text fields and checkboxes. Placed last so it overrides the generic .panel rules. */
+
+.menu {
+  top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
+  box-sizing: border-box;
+  max-height: min(587px, calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 20px - env(safe-area-inset-bottom)));
+  /* Scrolls up and down only: everything inside fits the menu's width. */
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  padding: 0 20px 20px; /* + the 1 px border = the design's 21 px */
+  border: 1px solid #555556;
+  border-radius: 4px;
+  background: var(--bar-bg);
+  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.25);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: #c0c0c0;
+  font: 400 14px/21px var(--page-font);
+}
+
+/* The menus on the right, under their top-bar buttons: the design's 291 px, narrower when the
+   screen is (never wider than the space right of the rail). */
+.layers.menu,
+.canvases.menu,
+.history.menu,
+.settings-panel.menu {
+  width: min(291px, calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - var(--rail-right) - 33px));
+}
+
+.canvases.menu,
+.history.menu {
+  right: calc(env(safe-area-inset-right) + 23px);
+}
+
+/* Title row: the title, and an optional action on the right (add layer, fit all, save version). */
+.menu header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 36px;
+  padding: 19px 0 15px;
+}
+
+.menu h2,
+.menu .popover-title {
+  margin: 0;
+  color: #c0c0c0;
+  font: 400 20px/30px var(--page-font);
+}
+
+/* Menus without a header element: their title gets the header's spacing. */
+.color-picker.menu > h2,
+.menu .popover-title {
+  padding: 19px 0 9px;
+}
+
+.menu h3 {
+  margin: 14px 0 6px;
+  color: #c0c0c0;
+  font: 400 14px/21px var(--page-font);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.menu .popover-body {
+  gap: 10px;
+  padding: 0;
+}
+
+.menu summary {
+  padding: 10px 0;
+  color: #c0c0c0;
+}
+
+.menu output,
+.menu .row output {
+  min-width: 0;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+/* Rows, as in the layer card: the label above its slider or dropdown (a value, a button
+   or a second control goes on the right); a checkbox stays on the label's line. */
+.menu .row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu .row > span:first-child {
+  grid-column: 1 / -1;
+}
+
+.menu .row:has(> input[type='checkbox']) > span:first-child {
+  grid-column: auto;
+}
+
+.menu .row > :last-child:nth-child(2):not([type='checkbox']) {
+  grid-column: 1 / -1; /* a lone control (e.g. a dropdown) takes the full width */
+}
+
+.menu .block-grid {
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  font: 400 12px/18px var(--page-font);
+}
+
+/* Buttons: like the layer card's actions, but on the menu's background. */
+.menu button {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 4px;
+  background: var(--bar-button-bg);
+  color: #c0c0c0;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu header button {
+  min-height: 36px;
+  border-radius: 8px;
+}
+
+.menu button:active,
+.menu button.active {
+  background: #0086ff;
+  color: #fff;
+}
+
+/* Inside a card (#2b2b2e or the blue selected card), buttons take the menu's darker colour. */
+.menu li button {
+  background: var(--bar-bg);
+}
+
+.menu select {
+  -webkit-appearance: none;
+  appearance: none;
+  min-width: 0;
+  height: 31px;
+  min-height: 31px;
+  padding: 0 24px 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu input[type='text'],
+.menu input[type='number'] {
+  min-width: 0;
+  height: 31px;
+  min-height: 31px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: #3a3a3c;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.menu input[type='range'] {
+  accent-color: #0086ff;
+}
+
+/* The layers menu's checkbox: a 16 px rounded box, ticked with the design's check. */
+.menu input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 1.5px solid #c0c0c0;
+  border-radius: 4px;
+}
+
+.menu input[type='checkbox']:checked {
+  border: 0;
+  background: url('./assets/icons/drawing/check.svg') no-repeat center / 16px 16px;
+}
+
+/* Lists of cards (canvases, versions), like the layer cards. */
+.canvases.menu ol,
+.history.menu ol {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.canvases.menu .canvas-row,
+.history.menu .version-row {
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  color: #fff;
+}
+
+.canvases.menu .canvas-row {
+  min-height: 52px;
+  padding: 0 13px;
+  font-size: 14px;
+}
+
+.canvases.menu .canvas-row.active,
+.history.menu .version-row.active {
+  background: #163c62;
+}
+
+.canvases.menu .canvas-size,
+.history.menu .version-meta {
+  color: #c0c0c0;
+  font: 400 12px/18px var(--page-font);
+}
+
+.history.menu .version-summary {
+  gap: 13px;
+  min-height: 84px;
+  padding: 0 13px;
+}
+
+.history.menu .version-summary img {
+  border-radius: 4px;
+  background: var(--bar-bg);
+}
+
+.history.menu .version-name {
+  font-size: 14px;
+}
+
+.history.menu .version-details {
+  padding: 0 13px 13px;
+}
+
+.history-empty {
+  font-size: 12px;
+}
+
+/* Small menus keep their own width. */
+.export-menu.menu {
+  display: grid;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.color-picker.menu {
+  gap: 10px;
 }

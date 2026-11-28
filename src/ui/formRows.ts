@@ -52,7 +52,7 @@ export class Popover {
 
   constructor(className: string) {
     this.element = document.createElement('div');
-    this.element.className = `${className} panel popover`;
+    this.element.className = `${className} panel popover menu`;
     this.element.hidden = true;
   }
 
