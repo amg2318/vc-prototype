@@ -239,7 +239,18 @@ body {
   gap: 6px;
   border-radius: 4px;
   background: var(--bar-bg);
+  /* Never past the bottom of the screen: the size and opacity bars shrink first (see
+     .vertical-slider); on a screen too short even for that, the rail scrolls. */
+  max-height: calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 10px - env(safe-area-inset-bottom) - 10px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none; /* a scrollbar would squeeze the 60 px rail; wheel and touch still scroll */
 }
+
+.tool-rail > * {
+  flex: none;
+}
+
 
 .rail-swatch {
   width: 42px;
@@ -258,6 +269,9 @@ body {
   border-radius: 8px;
   background: var(--bar-button-bg);
   touch-action: none;
+  /* In the rail, the bars give up height when the screen is short, down to a still-usable 64 px. */
+  flex: 0 1 137px;
+  min-height: 64px;
   cursor: ns-resize;
 }
 
@@ -292,6 +306,28 @@ body {
 
 .tool-rail .icon-button:last-child {
   margin-top: 3px; /* redo sits 9 px under undo */
+}
+
+/* Short screens (e.g. a laptop browser window): tighten the extra space around the rail's groups. */
+@media (max-height: 820px) {
+  .tool-rail {
+    padding: 6px 0;
+  }
+
+  .rail-swatch,
+  .rail-size,
+  .rail-opacity,
+  .rail-brush-settings {
+    margin-top: 2px;
+  }
+
+  .rail-divider {
+    margin: 2px 0 0;
+  }
+
+  .tool-rail .icon-button:last-child {
+    margin-top: 0;
+  }
 }
 
 /* --- popovers from the top bar and the rail ------------------------------------- */
