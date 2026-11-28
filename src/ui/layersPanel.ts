@@ -1,14 +1,23 @@
+import addIcon from '../assets/icons/drawing/add.png';
+import dragIcon from '../assets/icons/drawing/drag.png';
 import type { BlendMode } from '../document/blend';
 import type { Editor } from '../document/editor';
 import type { LayerId, RasterLayer } from '../document/paintDocument';
 import { hexToRgb, rgbToHex } from './color';
 import { BlockSection, type BlockSectionActions } from './blockSection';
+import { visibilityCheckbox } from './formRows';
+import { icon } from './iconButton';
 import type { Thumbnails } from './thumbnails';
 
-const BLEND_MODES: BlendMode[] = ['normal', 'multiply'];
+const BLEND_MODES: { mode: BlendMode; label: string }[] = [
+  { mode: 'normal', label: 'Normal' },
+  { mode: 'multiply', label: 'Multiply' },
+];
 
 /**
- * Layers panel. The list is shown top layer first (like every paint app),
+ * Layers panel (Figma "drawing page (layers menu)"): a card per layer with a
+ * drag handle, thumbnail, name and visibility checkbox; the active layer's
+ * card is expanded with opacity, blend mode and layer actions. The list is shown top layer first (like every paint app),
  * while the document stores layers bottom first.
  *
  * Rows are rebuilt only when the list itself changes (order, names,
@@ -45,7 +54,9 @@ export class LayersPanel {
     const header = document.createElement('header');
     const title = document.createElement('h2');
     title.textContent = 'Layers';
-    this.addButton = button('+', () => this.editor?.addLayer(), 'Add layer (⇧N)');
+    this.addButton = button('', () => this.editor?.addLayer(), 'Add layer (⇧N)');
+    this.addButton.className = 'layers-add';
+    this.addButton.append(icon(addIcon, 24));
     header.append(title, this.addButton);
 
     this.list = document.createElement('ol');
@@ -101,6 +112,7 @@ export class LayersPanel {
     if (this.opacitySlider && document.activeElement !== this.opacitySlider) {
       this.opacitySlider.value = String(active.opacity);
     }
+    if (this.opacitySlider) showFill(this.opacitySlider);
     if (this.opacityOutput) this.opacityOutput.textContent = `${Math.round(active.opacity * 100)}%`;
     if (this.blendSelect) this.blendSelect.value = active.blendMode;
     this.addButton.disabled = !editor.canAddLayer;
@@ -128,22 +140,20 @@ export class LayersPanel {
 
     const main = document.createElement('div');
     main.className = 'layer-main';
+    const handle = document.createElement('span');
+    handle.className = 'drag-handle';
+    handle.title = 'Drag to reorder';
+    handle.append(icon(dragIcon, 24));
+    this.makeDraggable(handle, li, layer.id);
     const name = document.createElement('span');
     name.className = 'layer-name';
     name.textContent = layer.name;
     name.addEventListener('dblclick', () => this.rename(layer.id));
-    const eye = button(layer.visible ? '●' : '○', () => editor.setLayerProps(layer.id, { visible: !layer.visible }),
-      layer.visible ? 'Hide layer' : 'Show layer');
-    eye.classList.add('eye');
-    const handle = document.createElement('span');
-    handle.className = 'drag-handle';
-    handle.textContent = '≡';
-    handle.setAttribute('aria-label', 'Drag to reorder');
-    this.makeDraggable(handle, li, layer.id);
+    const visible = visibilityCheckbox(layer.visible, (v) => editor.setLayerProps(layer.id, { visible: v }));
 
-    main.append(this.thumbnails.canvasFor(layer.id), name, eye, handle);
+    main.append(handle, this.thumbnails.canvasFor(layer.id), name, visible);
     main.addEventListener('click', (e) => {
-      if (e.target === eye || e.target === handle) return;
+      if (handle.contains(e.target as Node) || visible.contains(e.target as Node)) return;
       editor.setActiveLayer(layer.id);
     });
     li.append(main);
@@ -159,25 +169,29 @@ export class LayersPanel {
 
     const opacity = document.createElement('input');
     Object.assign(opacity, { type: 'range', min: '0', max: '1', step: '0.01', value: String(layer.opacity) });
+    opacity.className = 'layer-opacity';
+    opacity.setAttribute('aria-label', 'Opacity');
+    showFill(opacity);
     const output = document.createElement('output');
     // One slider drag = one undo step: all input events share a merge key until 'change'.
-    opacity.addEventListener('input', () =>
-      editor.setLayerProps(layer.id, { opacity: Number(opacity.value) }, `opacity-${layer.id}-${this.opacityDrag}`),
-    );
+    opacity.addEventListener('input', () => {
+      showFill(opacity);
+      editor.setLayerProps(layer.id, { opacity: Number(opacity.value) }, `opacity-${layer.id}-${this.opacityDrag}`);
+    });
     opacity.addEventListener('change', () => this.opacityDrag++);
-    const opacityRow = document.createElement('label');
-    opacityRow.className = 'row';
-    opacityRow.append(Object.assign(document.createElement('span'), { textContent: 'Opacity' }), opacity, output);
+    const opacityLabel = document.createElement('div');
+    opacityLabel.className = 'layer-label';
+    opacityLabel.append(Object.assign(document.createElement('span'), { textContent: 'Opacity' }), output);
 
     const blend = document.createElement('select');
-    for (const mode of BLEND_MODES) blend.append(new Option(mode, mode, false, mode === layer.blendMode));
+    blend.className = 'layer-select';
+    blend.setAttribute('aria-label', 'Blend');
+    for (const { mode, label } of BLEND_MODES) blend.append(new Option(label, mode, false, mode === layer.blendMode));
     blend.addEventListener('change', () => editor.setLayerProps(layer.id, { blendMode: blend.value as BlendMode }));
-    const blendRow = document.createElement('label');
-    blendRow.className = 'row';
-    blendRow.append(Object.assign(document.createElement('span'), { textContent: 'Blend' }), blend);
+    const blendLabel = Object.assign(document.createElement('div'), { className: 'layer-label', textContent: 'Blend' });
 
     const actions = document.createElement('div');
-    actions.className = 'buttons';
+    actions.className = 'layer-actions';
     actions.append(
       button('Rename', () => this.rename(layer.id), 'Rename layer'),
       button('Duplicate', () => editor.duplicateLayer(layer.id), 'Duplicate layer'),
@@ -188,7 +202,7 @@ export class LayersPanel {
     this.opacitySlider = opacity;
     this.opacityOutput = output;
     this.blendSelect = blend;
-    box.append(opacityRow, blendRow, actions);
+    box.append(opacityLabel, opacity, blendLabel, blend, actions);
     return box;
   }
 
@@ -239,4 +253,9 @@ function button(text: string, onClick: () => void, title: string): HTMLButtonEle
   b.setAttribute('aria-label', title);
   b.addEventListener('click', onClick);
   return b;
+}
+
+/** Colour the slider's track up to the thumb (CSS reads `--fill`). */
+function showFill(slider: HTMLInputElement): void {
+  slider.style.setProperty('--fill', `${Number(slider.value) * 100}%`);
 }

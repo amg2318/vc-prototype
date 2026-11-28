@@ -234,8 +234,9 @@ Saving has no indicator: save errors and read-only mode show as messages at the 
   screen gets a brief amber outline.
 - The selected canvas has a blue outline; a faint grid marks empty space.
 
-**Layers panel:** the top layer is listed first. Tap a row to select it. Use ● to show or hide a layer, and
-drag ≡ to reorder. The selected layer shows its opacity (one undo step per slider drag), blend mode, rename,
+**Layers panel** (Figma "drawing page (layers menu)"): a card per layer, top layer first. Tap a card to
+select it. The checkbox shows or hides a layer; drag the ≡ handle to reorder. The selected layer's card
+(blue) shows its opacity (one undo step per slider drag), blend mode, rename,
 duplicate, clear and delete. **Background** sets the paper colour, which the eraser never removes; its ●
 hides the paper, making the canvas transparent (shown over a checkerboard), so canvases inheriting it see
 only its strokes. The inherited block has its own row at the bottom (see below).
@@ -271,7 +272,7 @@ number of outgoing ones.
 Every arrow action is one undo step. Undoing a canvas deletion links its inheritors again.
 
 **The inherited block** (layers panel, bottom row, dashed): a thumbnail, its state (*from <source>*,
-*empty*, *source deleted*), opacity and blend mode, and ● to hide it. A canvas without a block offers
+*empty*, *source deleted*), opacity and blend mode, and a checkbox to hide it. A canvas without a block offers
 **Inherit from…** instead. Tap the row for its properties:
 - **Source** picker (canvases that would make a loop are disabled) and **Go to** the source;
 - **Opacity** (one undo step per drag) and **Blend**: normal, multiply, screen or overlay;

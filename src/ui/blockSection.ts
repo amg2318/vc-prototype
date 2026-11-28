@@ -4,6 +4,7 @@ import type { BlockBlendMode, Effect, InheritedBlock } from '../document/inherit
 import type { CanvasId, PaintDocument } from '../document/paintDocument';
 import type { Workspace } from '../workspace/workspace';
 import type { BlockTool } from './blockTransformMode';
+import { visibilityCheckbox } from './formRows';
 import type { Thumbnails } from './thumbnails';
 
 const BLOCK_BLEND_MODES: BlockBlendMode[] = ['normal', 'multiply', 'screen', 'overlay'];
@@ -94,11 +95,10 @@ export class BlockSection {
     this.summary = document.createElement('div');
     this.summary.className = 'block-summary';
     text.append(title, this.summary);
-    const eye = button(block.visible ? '●' : '○', () => this.set({ visible: !(editor.doc.inherited?.visible ?? true) }), block.visible ? 'Hide block' : 'Show block');
-    eye.classList.add('eye');
-    main.append(this.thumbnail, text, eye);
+    const visible = visibilityCheckbox(block.visible, (v) => this.set({ visible: v }));
+    main.append(this.thumbnail, text, visible);
     main.addEventListener('click', (e) => {
-      if (e.target === eye) return;
+      if (visible.contains(e.target as Node)) return;
       this.open = !this.open;
       this.signature = '';
       this.update(editor);

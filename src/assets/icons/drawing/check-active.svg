@@ -1,0 +1,6 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="check visible or hidden">
+<rect id="checkbox" width="16" height="16" rx="4" fill="#C0C0C0"/>
+<path id="check" d="M3 8.29412L7.9125 12L12 3" stroke-width="2" stroke="#163C62"/>
+</g>
+</svg>

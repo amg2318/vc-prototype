@@ -152,6 +152,10 @@ body {
   background: var(--bar-button-active);
 }
 
+.icon-button.open {
+  box-shadow: inset 0 0 0 2px #2b69e3; /* the design's 2 px blue border, without changing the size */
+}
+
 .icon-button:disabled {
   opacity: 0.4;
   cursor: default;
@@ -407,43 +411,74 @@ body {
 /* --- layers --------------------------------------------------------------- */
 
 .layers {
+  /* Figma "drawing page (layers menu)": 291 px wide, 23 px from the right edge (under the Layers button). */
   top: calc(env(safe-area-inset-top) + var(--top-bar-height) + 10px);
-  right: calc(env(safe-area-inset-right) + 10px);
-  width: min(300px, calc(100vw - 20px));
-  max-height: calc(100dvh - 160px);
+  right: calc(env(safe-area-inset-right) + 23px);
+  width: min(291px, calc(100vw - 20px));
+  box-sizing: border-box;
+  max-height: min(587px, calc(100dvh - env(safe-area-inset-top) - var(--top-bar-height) - 20px));
   overflow: auto;
-  padding-bottom: 8px;
+  padding: 0 20px 20px; /* + the 1 px border = the design's 21 px */
+  border: 1px solid #555556;
+  border-radius: 4px;
+  background: var(--bar-bg);
+  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.25);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  font-family: var(--page-font);
 }
 
 .layers header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 8px 4px 14px;
+  height: 36px;
+  padding: 19px 0 15px;
 }
 
 .layers h2 {
-  font-size: 15px;
   margin: 0;
+  color: #c0c0c0;
+  font: 400 20px/30px var(--page-font);
+}
+
+.panel .layers-add {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+}
+
+.layers-add img {
+  opacity: 0.8;
 }
 
 .layers ol {
   list-style: none;
   margin: 0;
-  padding: 0 6px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
 }
 
+/* A layer card: 249 × 84, blue and expanded while active. */
 .layer-row {
-  border-radius: 10px;
-  margin-bottom: 4px;
-  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  background: var(--bar-button-bg);
+  color: #fff;
 }
 
 .layer-row.active {
-  background: rgba(10, 132, 255, 0.28);
+  background: #163c62;
 }
 
-.layer-row.hidden-layer .layer-name {
+.layer-row.hidden-layer .layer-name,
+.layer-row.hidden-layer .thumbnail {
   opacity: 0.5;
 }
 
@@ -456,48 +491,185 @@ body {
 .layer-main {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 56px;
-  padding: 4px 6px;
+  gap: 14px;
+  height: 84px;
+  box-sizing: border-box;
+  padding: 0 4px 0 0;
   cursor: pointer;
 }
 
+/* The block row has no drag handle: line its thumbnail up with the layers' (44 px in). */
+.block-row .layer-main {
+  padding-left: 44px;
+}
+
 .thumbnail {
-  width: 44px;
-  height: 44px;
-  border-radius: 6px;
+  width: 45px;
+  height: 49px;
+  border-radius: 4px;
   flex: none;
+  object-fit: contain;
   /* Checkerboard so transparency is visible. */
   background: repeating-conic-gradient(#bbb 0% 25%, #eee 0% 50%) 50% / 12px 12px;
 }
 
 .layer-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font: 400 14px/21px var(--page-font);
 }
 
-.layer-main .eye {
-  background: transparent !important;
-  font-size: 18px;
-}
-
+/* 24 px icon, 10 px from the card's left edge, in a 44 px-tall target. */
 .drag-handle {
+  display: grid;
+  place-items: center start;
   width: 44px;
   height: 44px;
-  display: grid;
-  place-items: center;
-  font-size: 20px;
-  color: var(--panel-muted);
+  margin-right: -14px; /* the thumbnail starts 44 px in */
+  padding-left: 10px;
+  box-sizing: border-box;
+  flex: none;
   touch-action: none;
   cursor: grab;
+}
+
+.drag-handle img {
+  display: block;
+  pointer-events: none;
+}
+
+/* 16 px checkbox, 18 px from the card's right edge, in a 44 px target. */
+.layer-visible {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  cursor: pointer;
+}
+
+.layer-visible input[type='checkbox'] {
+  justify-self: center;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 1.5px solid #c0c0c0;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.layer-visible input[type='checkbox']:checked {
+  border: 0;
+  background: url('./assets/icons/drawing/check.svg') no-repeat center / 16px 16px;
+}
+
+.layer-row.active .layer-visible input[type='checkbox']:checked {
+  background-image: url('./assets/icons/drawing/check-active.svg');
 }
 
 .layer-details {
   display: grid;
   gap: 6px;
-  padding: 0 10px 10px;
+  padding: 1px 18px 13px 13px;
+  font: 400 12px/18px var(--page-font);
+}
+
+.layer-label {
+  display: flex;
+  justify-content: space-between;
+}
+
+.layer-details output {
+  font: inherit;
+  color: #fff;
+}
+
+/* Opacity: blue up to the thumb, as in the design. */
+/* `input.` beats the generic `.panel input[type='range']` rule. */
+.panel input.layer-opacity {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  min-height: 16px;
+  margin: 0 0 6px;
+  background: transparent;
+  --fill: 100%;
+}
+
+.layer-opacity::-webkit-slider-runnable-track {
+  height: 8px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 4px;
+  background: linear-gradient(to right, #0086ff var(--fill), #3a3a3c var(--fill));
+}
+
+.layer-opacity::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 50%;
+  background: #0086ff;
+}
+
+.layer-opacity::-moz-range-track {
+  height: 8px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 4px;
+  background: linear-gradient(to right, #0086ff var(--fill), #3a3a3c var(--fill));
+}
+
+.layer-opacity::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid #858585;
+  border-radius: 50%;
+  background: #0086ff;
+}
+
+.panel .layer-select {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 31px;
+  min-height: 31px;
+  margin: 3px 0 10px;
+  padding: 0 24px 0 8px;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: 400 12px/18px var(--page-font);
+}
+
+.layer-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.panel .layer-actions button {
+  min-height: 29px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--bar-bg);
+  color: #c0c0c0;
+  font: 400 12px/13px var(--page-font);
+}
+
+.panel .layer-actions button:active {
+  background: #000;
 }
 
 .paper-row {
@@ -506,13 +678,19 @@ body {
   justify-content: space-between;
   gap: 8px;
   min-height: 44px;
-  padding: 6px 14px 0;
+  padding: 12px 0 0;
+  color: #c0c0c0;
 }
 
 .paper-row input {
   width: 64px;
   height: 36px;
   margin-left: auto;
+}
+
+.paper-row .eye {
+  background: transparent !important;
+  font-size: 18px;
 }
 
 /* --- HUD, loupe, messages -------------------------------------------------- */
@@ -866,8 +1044,25 @@ body {
   text-overflow: ellipsis;
 }
 
-.block-inherit {
-  padding: 6px 10px;
+/* "No inherited block" over a full-width source picker, like the layer card's Blend control. */
+.panel .block-inherit {
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 12px 13px 13px;
+  color: #c0c0c0;
+  font: 400 12px/18px var(--page-font);
+}
+
+.panel .block-inherit select {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 31px;
+  min-height: 31px;
+  padding: 0 24px 0 8px;
+  border-radius: 4px;
+  background: #3a3a3c url('./assets/icons/drawing/chevron-down.svg') no-repeat right 8px center;
+  color: #fff;
+  font: inherit;
 }
 
 .block-details h3 {

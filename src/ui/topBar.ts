@@ -16,6 +16,9 @@ export interface TopBarActions {
   toggleLayers(): void;
 }
 
+/** The top-bar buttons that open a panel; the open one gets a blue outline. */
+export type TopBarPanel = 'export' | 'settings' | 'history' | 'canvases' | 'layers';
+
 /**
  * The drawing page's top bar (Figma "drawing page"): a Projects back button
  * and the project's name on the left; export, settings, history, canvases
@@ -24,6 +27,7 @@ export interface TopBarActions {
 export class TopBar {
   readonly element: HTMLElement;
   private readonly projectName: HTMLElement;
+  private readonly panelButtons: Record<TopBarPanel, HTMLButtonElement>;
 
   constructor(actions: TopBarActions) {
     this.element = document.createElement('header');
@@ -43,20 +47,24 @@ export class TopBar {
 
     const right = document.createElement('div');
     right.className = 'top-bar-buttons';
-    const historyButton = iconButton(historyIcon, 'Versions of this project', actions.toggleHistory);
-    historyButton.querySelector('img')!.classList.add('dim');
-    right.append(
-      iconButton(exportIcon, 'Export', actions.toggleExport),
-      iconButton(settingsIcon, 'Settings', actions.toggleSettings),
-      historyButton,
-      iconButton(canvasesIcon, 'Canvases', actions.toggleCanvases),
-      iconButton(layersIcon, 'Layers', actions.toggleLayers),
-    );
+    this.panelButtons = {
+      export: iconButton(exportIcon, 'Export', actions.toggleExport),
+      settings: iconButton(settingsIcon, 'Settings', actions.toggleSettings),
+      history: iconButton(historyIcon, 'Versions of this project', actions.toggleHistory),
+      canvases: iconButton(canvasesIcon, 'Canvases', actions.toggleCanvases),
+      layers: iconButton(layersIcon, 'Layers', actions.toggleLayers),
+    };
+    this.panelButtons.history.querySelector('img')!.classList.add('dim');
+    right.append(...Object.values(this.panelButtons));
 
     this.element.append(back, this.projectName, right);
   }
 
-  update(state: { projectName: string }): void {
+  update(state: { projectName: string; openPanel: TopBarPanel | null }): void {
     this.projectName.textContent = state.projectName;
+    for (const [panel, b] of Object.entries(this.panelButtons)) {
+      b.classList.toggle('open', panel === state.openPanel);
+      b.setAttribute('aria-expanded', String(panel === state.openPanel));
+    }
   }
 }

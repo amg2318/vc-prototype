@@ -49,7 +49,7 @@ import { BrushPanel } from './ui/brushPanel';
 import { ExportMenu } from './ui/exportMenu';
 import { SettingsPanel } from './ui/settingsPanel';
 import { ToolRail } from './ui/toolRail';
-import { TopBar } from './ui/topBar';
+import { TopBar, type TopBarPanel } from './ui/topBar';
 import { IDENTITY_VIEW, docToClipMatrix, docToScreen, fitRectToView, zoomAt, type ViewTransform } from './viewport/viewport';
 
 async function main(): Promise<void> {
@@ -600,6 +600,15 @@ async function main(): Promise<void> {
   function togglePanel(panel: { visible: boolean; setVisible(v: boolean): void }): void {
     const show = !panel.visible;
     for (const p of sidePanels()) p.setVisible(p === panel && show);
+    refreshUi(); // the top bar outlines the open panel's button
+  }
+  function openTopBarPanel(): TopBarPanel | null {
+    if (exportMenu.visible) return 'export';
+    if (settingsPanel.visible) return 'settings';
+    if (historyPanel.visible) return 'history';
+    if (canvasPanel.visible) return 'canvases';
+    if (layersPanel.visible) return 'layers';
+    return null;
   }
   const historyPanel = new HistoryPanel({
     saveVersion: () => void saveVersion(),
@@ -785,11 +794,13 @@ async function main(): Promise<void> {
   }
   const exportMenu = new ExportMenu({
     exportCanvasPng: () => {
+      refreshUi(); // the menu just closed
       const id = workspace.activeCanvasId;
       if (id) void exportCanvasPng(id);
       else showBanner('Tap a canvas first, then export it.');
     },
     exportProject: () => {
+      refreshUi(); // the menu just closed
       if (project.project) void exportProjectFile(project.project, true);
     },
   });
@@ -817,7 +828,7 @@ async function main(): Promise<void> {
   });
 
   function refreshUi(): void {
-    topBar.update({ projectName: project.project?.name ?? '' });
+    topBar.update({ projectName: project.project?.name ?? '', openPanel: openTopBarPanel() });
     toolRail.update({
       tool: tools.current,
       color: tools.brush.color,

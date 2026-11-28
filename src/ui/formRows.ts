@@ -34,6 +34,18 @@ export function checkboxRow(labelText: string, initial: boolean, onChange: (v: b
   return { element: row(labelText, input), input };
 }
 
+/** The design's visibility checkbox: checked = shown. A label wraps it so the touch target is 44 px. */
+export function visibilityCheckbox(checked: boolean, onChange: (visible: boolean) => void): HTMLLabelElement {
+  const label = document.createElement('label');
+  label.className = 'layer-visible';
+  label.title = checked ? 'Shown (tap to hide)' : 'Hidden (tap to show)';
+  const input = Object.assign(document.createElement('input'), { type: 'checkbox', checked });
+  input.setAttribute('aria-label', 'Visible');
+  input.addEventListener('change', () => onChange(input.checked));
+  label.append(input);
+  return label;
+}
+
 /** Show/hide for the popovers opened from the top bar and the tool rail. */
 export class Popover {
   readonly element: HTMLElement;
